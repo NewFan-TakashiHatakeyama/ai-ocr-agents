@@ -1507,3 +1507,22 @@ a {
   padding-top: 6px;
   line-height: 1.6;
 }
+
+/* ============ 明細セル↔bbox 連携（§8.3 No.6） ============ */
+.bx-cell {
+  border-color: var(--brand-deep);
+}
+.bx-cell .tag {
+  background: var(--brand-deep);
+}
+.gridedit td.cell-clickable {
+  cursor: pointer;
+}
+.gridedit td.cell-clickable:hover {
+  background: var(--brand-soft);
+}
+.gridedit td.cell-on {
+  background: var(--brand-soft);
+  outline: 1.5px solid var(--brand);
+  outline-offset: -1.5px;
+}

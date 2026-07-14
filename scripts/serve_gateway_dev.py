@@ -42,6 +42,24 @@ def _page_data_uri() -> str:
     return f"data:image/png;base64,{b64}"
 
 
+def _line_items_table() -> TableResult:
+    # sample.png（御見積書, 793x1123）の明細表に概ね一致する列×行の座標でセル bbox を付与。
+    cols = {"商品名": (40, 327), "数量": (420, 500), "単位": (500, 565), "単価": (565, 640), "金額": (640, 753)}
+    data = [
+        ("冷凍コロッケ", "250", "袋", "85", "21,250", 375, 396),
+        ("冷凍ピザ", "180", "袋", "410", "85,600", 405, 425),
+        ("カップラーメン醤油味", "200", "個", "100", "20,000", 428, 448),
+        ("カップラーメン味噌味", "200", "個", "100", "20,000", 460, 480),
+    ]
+    rows = []
+    for name, qty, unit, price, amount, y0, y1 in data:
+        vals = {"商品名": name, "数量": qty, "単位": unit, "単価": price, "金額": amount}
+        rows.append(
+            {c: TableCell(value=vals[c], bbox=[x0, y0, x1, y1]) for c, (x0, x1) in cols.items()}
+        )
+    return TableResult(name="line_items", page=1, confidence=0.88, rows=rows)
+
+
 def _seed(repo: InMemoryRepository) -> None:
     repo.create_document(
         DocumentRecord(
@@ -126,19 +144,7 @@ def _seed(repo: InMemoryRepository) -> None:
                     review_status=ReviewStatus.AUTO,
                 ),
             ],
-            tables=[
-                TableResult(
-                    name="line_items",
-                    page=1,
-                    confidence=0.88,
-                    rows=[
-                        {"商品名": TableCell(value="冷凍コロッケ"), "数量": TableCell(value="250"), "単位": TableCell(value="袋"), "単価": TableCell(value="85"), "金額": TableCell(value="21,250")},
-                        {"商品名": TableCell(value="冷凍ピザ"), "数量": TableCell(value="180"), "単位": TableCell(value="袋"), "単価": TableCell(value="410"), "金額": TableCell(value="85,600")},
-                        {"商品名": TableCell(value="カップラーメン醤油味"), "数量": TableCell(value="200"), "単位": TableCell(value="個"), "単価": TableCell(value="100"), "金額": TableCell(value="20,000")},
-                        {"商品名": TableCell(value="カップラーメン味噌味"), "数量": TableCell(value="200"), "単位": TableCell(value="個"), "単価": TableCell(value="100"), "金額": TableCell(value="20,000")},
-                    ],
-                )
-            ],
+            tables=[_line_items_table()],
             review_summary={"pending": 1, "auto": 3},
         )
     )

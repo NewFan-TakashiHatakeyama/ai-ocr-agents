@@ -56,6 +56,7 @@ class ExtractedField(BaseModel):
 class TableCell(BaseModel):
     value: Optional[str] = None
     span_ids: list[int] = Field(default_factory=list)
+    bbox: Optional[BBox] = None  # セル領域（§8.3 セル↔ビューア連携。構造由来 cell_box）
 
 
 class TableResult(BaseModel):

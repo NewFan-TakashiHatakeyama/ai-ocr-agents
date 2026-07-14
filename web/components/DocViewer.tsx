@@ -23,7 +23,7 @@ export function DocViewer({
   const [url, setUrl] = useState<string | null>(null);
   const [scale, setScale] = useState(1);
   const imgRef = useRef<HTMLImageElement>(null);
-  const { selectedField, select } = useReviewStore();
+  const { selectedField, select, selectedCell } = useReviewStore();
 
   useEffect(() => {
     let active = true;
@@ -75,6 +75,20 @@ export function DocViewer({
                 </div>
               );
             })}
+          {selectedCell && selectedCell.page === pageNo && (
+            <div
+              className="bbox bx-cell sel"
+              style={{
+                left: selectedCell.bbox[0] * scale,
+                top: selectedCell.bbox[1] * scale,
+                width: (selectedCell.bbox[2] - selectedCell.bbox[0]) * scale,
+                height: (selectedCell.bbox[3] - selectedCell.bbox[1]) * scale,
+              }}
+              aria-label="選択した明細セル"
+            >
+              <span className="tag">明細セル</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

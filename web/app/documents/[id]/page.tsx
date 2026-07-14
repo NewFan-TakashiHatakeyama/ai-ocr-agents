@@ -19,7 +19,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     queryKey: ["result", id],
     queryFn: () => api.getResult(id),
   });
-  const { selectedField, edits, select, setEdit, clearEdits } = useReviewStore();
+  const { selectedField, selectedCell, edits, select, setEdit, clearEdits } = useReviewStore();
   const push = useToasts((s) => s.push);
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(1);
@@ -35,10 +35,11 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   }, [data]);
 
   useEffect(() => {
-    // 選択フィールドのページを表示
+    // 選択フィールド/セルのページを表示
     const f = data?.fields.find((x) => x.name === selectedField);
     if (f?.page) setPage(f.page);
-  }, [selectedField, data]);
+    else if (selectedCell) setPage(selectedCell.page);
+  }, [selectedField, selectedCell, data]);
 
   const submit = useCallback(
     async (force = false) => {

@@ -89,7 +89,10 @@ class PgContextStore:
             c.execute(text("DELETE FROM extraction_tables WHERE run_id = :r"), {"r": run_id})
             for t in tables:
                 rows_json = [
-                    {col: {"value": cell.value, "span_ids": cell.span_ids} for col, cell in row.items()}
+                    {
+                        col: {"value": cell.value, "span_ids": cell.span_ids, "bbox": cell.bbox}
+                        for col, cell in row.items()
+                    }
                     for row in t.rows
                 ]
                 c.execute(

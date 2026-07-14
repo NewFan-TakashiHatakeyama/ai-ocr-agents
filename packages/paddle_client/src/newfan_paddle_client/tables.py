@@ -98,7 +98,7 @@ def build_tables(pruned: PrunedResult, spans: list[Span], *, page: int) -> list[
                 sids = _spans_in_box(spans, box) if box else []
                 if text or sids:
                     name = col_names[col] if col < len(col_names) else f"col{col + 1}"
-                    row_dict[name] = TableCell(value=text or None, span_ids=sids)
+                    row_dict[name] = TableCell(value=text or None, span_ids=sids, bbox=box)
                 col += colspan
             if row_dict:  # 空行（見積フォームの余白行）は除去
                 rows_out.append(row_dict)

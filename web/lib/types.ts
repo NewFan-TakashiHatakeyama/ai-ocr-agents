@@ -24,6 +24,7 @@ export interface ExtractedField {
 export interface TableCell {
   value?: string | null;
   span_ids: number[];
+  bbox?: BBox | null;
 }
 
 export interface TableResult {
