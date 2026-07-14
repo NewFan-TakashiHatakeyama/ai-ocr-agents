@@ -45,6 +45,13 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     # API キーは Secrets Manager 由来の環境変数 API_KEYS(JSON) から（未設定は空 InMemory）。
     api_keys: ApiKeyStore | None = EnvApiKeyStore.from_env() if os.environ.get("API_KEYS") else None
 
+    # チャットエージェント: ANTHROPIC_API_KEY 設定時は LLM tool-use、無ければ決定論（RuleBased）。
+    chat_agent = None
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        from newfan_gateway.chat import LlmChatAgent
+
+        chat_agent = LlmChatAgent(model=os.environ.get("LLM_MODEL", "claude-opus-4-8"))
+
     return create_app(
         settings=settings,
         repo=repo,
@@ -52,6 +59,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         orchestrator=orchestrator,
         api_keys=api_keys,
         admin=admin,
+        chat_agent=chat_agent,
     )
 
 

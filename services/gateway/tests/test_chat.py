@@ -61,3 +61,67 @@ def test_chat_confirm_requires_admin(ctx: SimpleNamespace) -> None:
 
 def test_chat_requires_auth(ctx: SimpleNamespace) -> None:
     assert ctx.client.post("/v1/chat", json={"message": "hi"}).status_code == 403
+
+
+# ---- 本番エージェント: Anthropic ストリーム→SSE 写像 ----
+
+from newfan_gateway.chat import LlmChatAgent, map_events  # noqa: E402
+
+
+def _ns(**kw: object) -> SimpleNamespace:
+    return SimpleNamespace(**kw)
+
+
+def _navigate_events() -> list[SimpleNamespace]:
+    return [
+        _ns(type="content_block_start", content_block=_ns(type="text")),
+        _ns(type="content_block_delta", delta=_ns(type="text_delta", text="ダッシュボードを開きます。")),
+        _ns(type="content_block_stop"),
+        _ns(type="content_block_start", content_block=_ns(type="tool_use", name="navigate")),
+        _ns(type="content_block_delta", delta=_ns(type="input_json_delta", partial_json='{"target":"/dashboard",')),
+        _ns(type="content_block_delta", delta=_ns(type="input_json_delta", partial_json='"label":"ダッシュボード"}')),
+        _ns(type="content_block_stop"),
+        _ns(type="message_stop"),
+    ]
+
+
+def test_map_events_navigate() -> None:
+    evs = list(map_events(iter(_navigate_events())))
+    types = [e.type for e in evs]
+    assert types == ["token", "tool_call", "done"]
+    assert evs[0].data["text"] == "ダッシュボードを開きます。"
+    assert evs[1].data == {"name": "navigate", "target": "/dashboard", "label": "ダッシュボード"}
+
+
+def test_map_events_update_schema_is_confirm() -> None:
+    events = [
+        _ns(type="content_block_start", content_block=_ns(type="tool_use", name="update_schema")),
+        _ns(type="content_block_delta", delta=_ns(type="input_json_delta", partial_json='{"doc_type":"invoice","field":{"name":"note","label":"備考"},"prompt":"追加しますか？"}')),
+        _ns(type="content_block_stop"),
+        _ns(type="message_stop"),
+    ]
+    evs = list(map_events(iter(events)))
+    assert [e.type for e in evs] == ["confirm_request", "done"]
+    assert evs[0].data["action"] == "update_schema" and evs[0].data["field"]["label"] == "備考"
+
+
+class _FakeStream:
+    def __init__(self, events: list[SimpleNamespace]) -> None:
+        self._events = events
+
+    def __enter__(self) -> object:
+        return iter(self._events)
+
+    def __exit__(self, *a: object) -> bool:
+        return False
+
+
+class _FakeClient:
+    def __init__(self, events: list[SimpleNamespace]) -> None:
+        self.messages = SimpleNamespace(stream=lambda **kw: _FakeStream(events))
+
+
+def test_llm_chat_agent_streams_via_client() -> None:
+    agent = LlmChatAgent(client=_FakeClient(_navigate_events()))
+    evs = list(agent.stream("ten_1", "先月のSTP率は？"))
+    assert [e.type for e in evs] == ["token", "tool_call", "done"]
