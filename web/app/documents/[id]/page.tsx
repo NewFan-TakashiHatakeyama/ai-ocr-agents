@@ -19,7 +19,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     queryKey: ["result", id],
     queryFn: () => api.getResult(id),
   });
-  const { selectedField, edits, select, clearEdits } = useReviewStore();
+  const { selectedField, edits, select, setEdit, clearEdits } = useReviewStore();
   const push = useToasts((s) => s.push);
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(1);
@@ -101,11 +101,17 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         select(pending[(idx - 1 + pending.length) % pending.length].name);
       } else if (ev.key === "e" && idx < 0 && pending[0]) {
         select(pending[0].name);
+      } else if ((ev.key === "1" || ev.key === "2") && idx >= 0) {
+        // 候補採択: 1=OCR原値 / 2=LLM補正案（§8.3 CharDiffPopover）
+        const f = pending[idx];
+        const corr = (f.correction ?? {}) as { to?: string };
+        const val = ev.key === "1" ? f.value_raw ?? "" : corr.to ?? f.value_raw ?? "";
+        setEdit(f.name, val);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [pending, selectedField, select, submit]);
+  }, [pending, selectedField, select, setEdit, submit]);
 
   if (isLoading) return <div className="page">読み込み中…</div>;
   if (error || !data) return <div className="page">結果の取得に失敗しました。</div>;

@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { AuditBadge, VerifyBadges } from "@/components/AuditBadge";
+import { CharDiffPopover } from "@/components/CharDiffPopover";
 import { ConfidenceBar } from "@/components/ConfidenceBar";
 import { TableGrid } from "@/components/TableGrid";
 import { sortFields } from "@/lib/fields";
@@ -20,30 +21,37 @@ function Row({ f }: { f: ExtractedField }) {
   const pend = f.review_status === "pending";
 
   return (
-    <div
-      id={`frow-${f.name}`}
-      className={`frow ${pend ? "pend" : "done"}${active ? " sel" : ""}`}
-      onClick={() => select(f.name)}
-    >
-      <span className="fl">{f.label ?? f.name}</span>
-      {active ? (
-        <input
-          className="fv"
-          value={current}
-          onChange={(e) => setEdit(f.name, e.target.value)}
-          aria-label={`${f.label ?? f.name} を編集`}
-          autoFocus
-        />
-      ) : (
-        <span className="fv" title={current}>
-          {current || <em style={{ color: "var(--ink3)" }}>（空）</em>}
-        </span>
+    <>
+      <div
+        id={`frow-${f.name}`}
+        className={`frow ${pend ? "pend" : "done"}${active ? " sel" : ""}`}
+        onClick={() => select(f.name)}
+      >
+        <span className="fl">{f.label ?? f.name}</span>
+        {active ? (
+          <input
+            className="fv"
+            value={current}
+            onChange={(e) => setEdit(f.name, e.target.value)}
+            aria-label={`${f.label ?? f.name} を編集`}
+            autoFocus
+          />
+        ) : (
+          <span className="fv" title={current}>
+            {current || <em style={{ color: "var(--ink3)" }}>（空）</em>}
+          </span>
+        )}
+        {edited && <span className="src human">編集</span>}
+        {!edited && <AuditBadge field={f} />}
+        <VerifyBadges field={f} />
+        <ConfidenceBar field={f} />
+      </div>
+      {active && pend && (
+        <div className="cdp-wrap">
+          <CharDiffPopover field={f} onSelect={(v) => setEdit(f.name, v)} onEdit={() => {}} />
+        </div>
       )}
-      {edited && <span className="src human">編集</span>}
-      {!edited && <AuditBadge field={f} />}
-      <VerifyBadges field={f} />
-      <ConfidenceBar field={f} />
-    </div>
+    </>
   );
 }
 

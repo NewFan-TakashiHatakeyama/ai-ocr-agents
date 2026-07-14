@@ -1446,3 +1446,64 @@ a {
 .gridedit tr:last-child td {
   border-bottom: none;
 }
+
+/* ============ 文字差分ポップオーバー（§8.3 CharDiffPopover, 候補採択） ============ */
+.cdp-wrap {
+  padding: 4px 14px 12px;
+  background: linear-gradient(90deg, var(--amber-soft), #fff 80%);
+  border-left: 3px solid var(--amber);
+  border-bottom: 1px solid var(--line);
+}
+
+.cdp {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cdp-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 6px 9px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.cdp-opt:hover {
+  border-color: var(--brand);
+}
+
+.cdp-opt.rec {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.cdp-opt.ghost {
+  border-style: dashed;
+}
+
+.cdp-opt .v {
+  font-weight: 800;
+}
+
+.cdp-rec {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 800;
+  color: var(--brand-deep);
+}
+
+.cdp-why {
+  font-size: 9.5px;
+  color: var(--ink2);
+  border-top: 1px dashed var(--line);
+  padding-top: 6px;
+  line-height: 1.6;
+}

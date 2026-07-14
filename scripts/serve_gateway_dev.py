@@ -70,15 +70,24 @@ def _seed(repo: InMemoryRepository) -> None:
                 ExtractedField(
                     name="total_amount",
                     label="御見積合計金額",
-                    value_raw="¥136,998",
-                    value_normalized="136998",
+                    value_raw="¥I36,998",  # OCR 誤読（I↔1）
+                    value_normalized="I36998",
                     confidence=0.72,  # デモ用に要確認（実測は 0.93）
                     grounding_score=1.0,
                     page=1,
                     bbox=[235, 306, 320, 330],
-                    source_quote="¥136,998",
+                    source_quote="¥I36,998",
                     span_ids=[5],
                     review_status=ReviewStatus.PENDING,
+                    correction={
+                        "applied": False,
+                        "needs_review": True,
+                        "from": "I36998",
+                        "to": "136,998",
+                        "rationale": "混同ペア I↔1（先頭文字）。明細合計 ¥136,998 と一致（V-SUM）。",
+                        "used_pairs": ["I↔1"],
+                        "memory_refs": ["cor_01H8MQ"],
+                    },
                 ),
                 ExtractedField(
                     name="issuer_name",

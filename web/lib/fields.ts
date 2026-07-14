@@ -26,8 +26,9 @@ export interface AuditSource {
 // 値の由来（§11 監査要件）。データから最善で導出する。
 export function sourceOf(f: ExtractedField): AuditSource {
   if (f.review_status === "corrected") return { key: "human", label: "人手修正" };
-  const corr = f.correction as { source?: string; changed?: boolean } | null | undefined;
-  if (corr && (corr.changed ?? true)) {
+  const corr = f.correction as { source?: string; applied?: boolean } | null | undefined;
+  // correction.applied が true のときのみ適用済み由来。未適用（候補提示のみ）は OCR原値。
+  if (corr && corr.applied) {
     if (corr.source === "rule") return { key: "rule", label: "ルール適用" };
     return { key: "llm", label: "LLM補正" };
   }
