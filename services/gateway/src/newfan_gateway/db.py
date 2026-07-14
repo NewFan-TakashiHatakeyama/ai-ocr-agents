@@ -63,11 +63,10 @@ class ExtractionRun(Base):
     status: Mapped[str] = mapped_column(String, default="processing")
     engine_versions: Mapped[dict] = mapped_column(JSON, default=dict)
     options: Mapped[dict] = mapped_column(JSON, default=dict)
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
     result_version: Mapped[int] = mapped_column(Integer, default=1)
-    # gateway 読み取り用の非正規化フィールド/テーブル（正本は extraction_fields/_tables）
-    fields_json: Mapped[list] = mapped_column(JSON, default=list)
-    tables_json: Mapped[list] = mapped_column(JSON, default=list)
-    review_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    # fields/tables/review_summary は正規化テーブル（extraction_fields/_tables）が正本。
+    # _synced() がそこから RunRecord を組む（§7 の実スキーマに整合）。
 
 
 class Job(Base):
@@ -163,6 +162,8 @@ class PgRepository:
             return s.scalars(stmt).first() is not None
 
     def create_run(self, run: RunRecord) -> None:
+        # gateway は抽出前に run 行のみ作成する。fields/tables は worker が
+        # extraction_fields/_tables へ書く（§4.3 finalize）。
         with self._rls(run.tenant_id) as s:
             s.add(
                 ExtractionRun(
@@ -174,16 +175,13 @@ class PgRepository:
                     engine_versions=run.engine_versions,
                     options=run.options,
                     result_version=run.result_version,
-                    fields_json=[f.model_dump() for f in run.fields],
-                    tables_json=[t.model_dump() for t in run.tables],
-                    review_summary=run.review_summary,
                 )
             )
 
     def get_run(self, tenant_id, run_id):
         with self._rls(tenant_id) as s:
             row = s.get(ExtractionRun, run_id)
-            return _run_record(row) if row else None
+            return self._synced(s, row) if row else None
 
     def get_latest_run(self, tenant_id, document_id):
         with self._rls(tenant_id) as s:
@@ -194,7 +192,76 @@ class PgRepository:
                 .limit(1)
             )
             row = s.scalars(stmt).first()
-            return _run_record(row) if row else None
+            return self._synced(s, row) if row else None
+
+    def _schema_labels(self, s, schema_id):
+        if not schema_id:
+            return {}
+        r = s.execute(text("SELECT fields FROM field_schemas WHERE id=:i"), {"i": schema_id}).first()
+        return {f.get("name"): f.get("label") for f in (r.fields or [])} if r else {}
+
+    def _synced(self, s, row):
+        """正規化テーブル（worker 書込の extraction_fields/_tables）を優先して RunRecord を組む。
+
+        gateway 作成直後（抽出前）で正規化行が無ければ非正規化 fields_json にフォールバック。
+        label は field_schemas から補完、review_summary は field の review_status から算出する。
+        """
+        frows = s.execute(
+            text(
+                "SELECT field_name, value_raw, value_normalized, final_value, confidence, "
+                " grounding_score, page_no, bbox, source_quote, span_ids, correction, "
+                " validation, review_status FROM extraction_fields WHERE run_id=:r ORDER BY field_name"
+            ),
+            {"r": row.id},
+        ).all()
+        if not frows:
+            return _run_record(row)  # 非正規化フォールバック
+        labels = self._schema_labels(s, row.schema_id)
+        fields = [
+            ExtractedField.model_validate(
+                {
+                    "name": r.field_name,
+                    "label": labels.get(r.field_name),
+                    "value_raw": r.value_raw,
+                    "value_normalized": r.final_value if r.final_value is not None else r.value_normalized,
+                    "span_ids": r.span_ids or [],
+                    "page": r.page_no,
+                    "bbox": r.bbox,
+                    "source_quote": r.source_quote,
+                    "confidence": r.confidence,
+                    "grounding_score": r.grounding_score,
+                    "correction": r.correction,
+                    "validation": r.validation,
+                    "review_status": r.review_status,
+                }
+            )
+            for r in frows
+        ]
+        trows = s.execute(
+            text(
+                "SELECT name, page_no, structure_html, rows, confidence "
+                "FROM extraction_tables WHERE run_id=:r ORDER BY name"
+            ),
+            {"r": row.id},
+        ).all()
+        tables = [
+            TableResult.model_validate(
+                {"name": t.name, "page": t.page_no, "structure_html": t.structure_html, "rows": t.rows or [], "confidence": t.confidence}
+            )
+            for t in trows
+        ]
+        counts: dict[str, int] = {}
+        for r in frows:
+            counts[r.review_status] = counts.get(r.review_status, 0) + 1
+        review_summary = {
+            "pending": counts.get("pending", 0),
+            "auto": counts.get("auto", 0) + counts.get("approved", 0) + counts.get("corrected", 0),
+        }
+        return RunRecord(
+            id=row.id, tenant_id=row.tenant_id, document_id=row.document_id, schema_id=row.schema_id,
+            status=row.status, engine_versions=row.engine_versions, options=row.options,
+            result_version=row.result_version, fields=fields, tables=tables, review_summary=review_summary,
+        )
 
     def set_document_status(self, tenant_id, document_id, status):
         with self._rls(tenant_id) as s:
@@ -233,7 +300,7 @@ class PgRepository:
     def list_review_runs(self, tenant_id):
         with self._rls(tenant_id) as s:
             stmt = select(ExtractionRun).where(ExtractionRun.status == "needs_review")
-            return [_run_record(r) for r in s.scalars(stmt)]
+            return [self._synced(s, r) for r in s.scalars(stmt)]
 
 
 def _doc_record(row: Document) -> DocumentRecord:
@@ -245,13 +312,11 @@ def _doc_record(row: Document) -> DocumentRecord:
 
 
 def _run_record(row: ExtractionRun) -> RunRecord:
+    # 抽出前（extraction_fields 未書込）の run。fields/tables は空。
     return RunRecord(
         id=row.id, tenant_id=row.tenant_id, document_id=row.document_id, schema_id=row.schema_id,
         status=row.status, engine_versions=row.engine_versions, options=row.options,
-        result_version=row.result_version,
-        fields=[ExtractedField.model_validate(f) for f in (row.fields_json or [])],
-        tables=[TableResult.model_validate(t) for t in (row.tables_json or [])],
-        review_summary=row.review_summary or {},
+        result_version=row.result_version, fields=[], tables=[], review_summary={},
     )
 
 

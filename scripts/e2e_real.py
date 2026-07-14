@@ -143,6 +143,16 @@ def main() -> int:
     ok &= len(trows) == 1 and trows[0][0] == "table" and len(trows[0][2]) == 1
     tbl_ok = bool(trows) and any(cell.get("value") == "りんご" for row in trows[0][2] for cell in row.values())
     ok &= tbl_ok
+    # gateway result 同期: PgRepository.get_run が正規化テーブル（worker 書込）を反映するか
+    from newfan_gateway.db import PgRepository
+
+    gw_run = PgRepository(DSN).get_run(TENANT, "run_a")
+    gw_fields = [(f.name, f.label, f.value_normalized) for f in gw_run.fields] if gw_run else []
+    print(f"  gateway.get_run fields={gw_fields}")
+    print(f"  gateway.get_run tables={[(t.name, len(t.rows)) for t in gw_run.tables]} review_summary={gw_run.review_summary}")
+    ok &= gw_run is not None
+    ok &= any(f.name == "total_amount" and f.label == "合計金額(税込)" and f.value_normalized == "128000" for f in gw_run.fields)
+    ok &= len(gw_run.tables) == 1 and bool(gw_run.tables[0].rows)
 
     # --- Phase B: HITL（needs_review → resume）---
     print("== Phase B: HITL needs_review -> resume ==")
