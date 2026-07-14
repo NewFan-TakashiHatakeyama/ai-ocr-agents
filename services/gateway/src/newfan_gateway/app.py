@@ -19,6 +19,7 @@ from newfan_gateway.config import Settings
 from newfan_gateway.context import request_id_var
 from newfan_gateway.errors import ApiError, api_error_handler, error_body
 from newfan_gateway.ids import new_id
+from newfan_gateway.locks import InMemoryLockStore
 from newfan_gateway.ports import FakeOrchestratorClient, Ingestor, OrchestratorClient
 from newfan_gateway.queue import InMemoryQueue, Queue
 from newfan_gateway.repository import InMemoryRepository, Repository
@@ -55,6 +56,7 @@ def create_app(
     app.state.admin = admin or InMemoryAdminRepository()
     app.state.chat_agent = chat_agent or RuleBasedChatAgent()
     app.state.api_keys = api_keys or InMemoryApiKeyStore({})
+    app.state.lock_store = InMemoryLockStore()
     app.state.idempotency = {}
     if ingestor is not None:
         app.state.ingestor = ingestor

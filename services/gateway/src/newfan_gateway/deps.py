@@ -10,6 +10,7 @@ from newfan_gateway.admin import AdminRepository
 from newfan_gateway.auth import Principal, check_min_role, decode_principal
 from newfan_gateway.chat import ChatAgent
 from newfan_gateway.config import Settings
+from newfan_gateway.locks import LockStore
 from newfan_gateway.ports import Ingestor, OrchestratorClient
 from newfan_gateway.queue import Queue
 from newfan_gateway.repository import Repository
@@ -41,6 +42,10 @@ def get_admin(request: Request) -> AdminRepository:
 
 def get_chat_agent(request: Request) -> ChatAgent:
     return request.app.state.chat_agent  # type: ignore[no-any-return]
+
+
+def get_lock_store(request: Request) -> LockStore:
+    return request.app.state.lock_store  # type: ignore[no-any-return]
 
 
 def get_principal(

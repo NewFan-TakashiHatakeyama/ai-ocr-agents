@@ -104,6 +104,17 @@ class SignedUrl(BaseModel):
     expires_in: int
 
 
+class LockStatus(BaseModel):
+    """検証画面ソフトロックの状態（§8.2）。"""
+
+    document_id: str
+    locked: bool  # 現在ロックされているか
+    held_by_me: bool  # 呼び出し元が保持者か（True の間だけ編集可）
+    holder: Optional[str] = None  # 保持者の表示名（他者ロック時のバナー表示用）
+    remaining_sec: int = 0  # 期限までの残り秒
+    ttl_sec: int = 0  # 取得時の TTL
+
+
 # ---- 管理画面 DTO（SCR-04/05/06） ----
 
 

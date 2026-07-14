@@ -13,7 +13,7 @@ import type { ExtractedField, TableResult } from "@/lib/types";
 // §8.3 <FieldPanel>: 要確認→確定済みのセクション。由来バッジ・検証バッジ・conf帯。
 // 選択中は右パネル行とビューアbboxを双方向同期。編集はバッファ（確定時に保存）。
 
-function Row({ f }: { f: ExtractedField }) {
+function Row({ f, readOnly = false }: { f: ExtractedField; readOnly?: boolean }) {
   const { selectedField, edits, select, setEdit } = useReviewStore();
   const active = selectedField === f.name;
   const edited = f.name in edits;
@@ -28,7 +28,7 @@ function Row({ f }: { f: ExtractedField }) {
         onClick={() => select(f.name)}
       >
         <span className="fl">{f.label ?? f.name}</span>
-        {active ? (
+        {active && !readOnly ? (
           <input
             className="fv"
             value={current}
@@ -46,7 +46,7 @@ function Row({ f }: { f: ExtractedField }) {
         <VerifyBadges field={f} />
         <ConfidenceBar field={f} />
       </div>
-      {active && pend && (
+      {active && pend && !readOnly && (
         <div className="cdp-wrap">
           <CharDiffPopover field={f} onSelect={(v) => setEdit(f.name, v)} onEdit={() => {}} />
         </div>
@@ -58,9 +58,11 @@ function Row({ f }: { f: ExtractedField }) {
 export function FieldPanel({
   fields,
   tables = [],
+  readOnly = false,
 }: {
   fields: ExtractedField[];
   tables?: TableResult[];
+  readOnly?: boolean;
 }) {
   const [onlyPending, setOnlyPending] = useState(false);
   const sorted = sortFields(fields);
@@ -84,11 +86,11 @@ export function FieldPanel({
 
       {pending.length > 0 && <div className="fp-sec">要確認（{pending.length}）</div>}
       {pending.map((f) => (
-        <Row key={f.name} f={f} />
+        <Row key={f.name} f={f} readOnly={readOnly} />
       ))}
 
       {!onlyPending && done.length > 0 && <div className="fp-sec">確定済み（{done.length}）</div>}
-      {!onlyPending && done.map((f) => <Row key={f.name} f={f} />)}
+      {!onlyPending && done.map((f) => <Row key={f.name} f={f} readOnly={readOnly} />)}
 
       {!onlyPending && <TableGrid tables={tables} />}
     </div>

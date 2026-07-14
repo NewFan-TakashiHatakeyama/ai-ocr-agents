@@ -11,6 +11,7 @@ import { ApiError, api } from "@/lib/api";
 import { sortFields } from "@/lib/fields";
 import { useReviewStore } from "@/lib/store";
 import { useToasts } from "@/lib/toast";
+import { fmtRemaining, useDocumentLock } from "@/lib/useDocumentLock";
 
 // SCR-03 検証画面（HITL, §8.2/§8.3）。本プロダクトの中核。全操作キーボード完結（§8.4）。
 export default function ReviewPage({ params }: { params: Promise<{ id: string }> }) {
@@ -23,6 +24,8 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   const push = useToasts((s) => s.push);
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(1);
+  // §8.2 ソフトロック: 他者が確認中なら readOnly（編集・確定を抑止）
+  const { readOnly, remaining, holder } = useDocumentLock(id);
 
   const pending = useMemo(
     () => (data ? sortFields(data.fields).filter((f) => f.review_status === "pending") : []),
@@ -85,7 +88,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
       const typing = ev.target instanceof HTMLInputElement || ev.target instanceof HTMLTextAreaElement;
       if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") {
         ev.preventDefault();
-        void submit();
+        if (!readOnly) void submit();
         return;
       }
       if (typing) {
@@ -102,7 +105,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         select(pending[(idx - 1 + pending.length) % pending.length].name);
       } else if (ev.key === "e" && idx < 0 && pending[0]) {
         select(pending[0].name);
-      } else if ((ev.key === "1" || ev.key === "2") && idx >= 0) {
+      } else if ((ev.key === "1" || ev.key === "2") && idx >= 0 && !readOnly) {
         // 候補採択: 1=OCR原値 / 2=LLM補正案（§8.3 CharDiffPopover）
         const f = pending[idx];
         const corr = (f.correction ?? {}) as { to?: string };
@@ -112,12 +115,12 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [pending, selectedField, select, setEdit, submit]);
+  }, [pending, selectedField, select, setEdit, submit, readOnly]);
 
   // §8.3 No.4 autosave: 編集を 500ms デバウンスで POST /corrections（version 付き楽観ロック）
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
   useEffect(() => {
-    if (!data || Object.keys(edits).length === 0) return;
+    if (!data || readOnly || Object.keys(edits).length === 0) return;
     const handle = setTimeout(async () => {
       const items = Object.entries(edits).map(([field_name, corrected_value]) => ({
         field_name,
@@ -141,7 +144,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
       }
     }, 500);
     return () => clearTimeout(handle);
-  }, [edits, data, push, refetch]);
+  }, [edits, data, push, refetch, readOnly]);
 
   if (isLoading) return <div className="page">読み込み中…</div>;
   if (error || !data) return <div className="page">結果の取得に失敗しました。</div>;
@@ -175,10 +178,21 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           確定 {auto} ·{" "}
           <b style={{ color: pend ? "var(--amber-ink)" : "var(--green)" }}>要確認 {pend}</b>
         </div>
-        <button className="btn primary" disabled={busy || data.status === "confirmed"} onClick={() => submit()}>
+        <button
+          className="btn primary"
+          disabled={busy || readOnly || data.status === "confirmed"}
+          onClick={() => submit()}
+        >
           {busy ? "処理中…" : pend > 0 ? `確定（要確認 ${pend}件）` : "確定して連携へ"}
         </button>
       </div>
+
+      {readOnly && (
+        <div className="rv-lock" role="status" aria-live="polite">
+          🔒 {holder ?? "他のメンバー"} が確認中です（残り {fmtRemaining(remaining)}）。
+          このドキュメントは読み取り専用です。
+        </div>
+      )}
 
       <div className="rv-body">
         <div className="viewer">
@@ -193,7 +207,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           </div>
           <DocViewer documentId={id} fields={data.fields} pageNo={page} />
         </div>
-        <FieldPanel fields={data.fields} tables={data.tables} />
+        <FieldPanel fields={data.fields} tables={data.tables} readOnly={readOnly} />
       </div>
 
       <div className="rv-foot">

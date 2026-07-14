@@ -5,6 +5,7 @@ import type {
   CorrectionItem,
   DocumentCreated,
   DocumentList,
+  LockStatus,
   MetricsResponse,
   ResultResponse,
   ReviewQueueItem,
@@ -80,6 +81,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ run_id: runId }),
     }),
+
+  // 検証画面ソフトロック（§8.2）: マウントで acquire、定期 heartbeat、離脱で release。
+  acquireLock: (documentId: string) =>
+    request<LockStatus>(`/documents/${documentId}/lock`, { method: "POST" }),
+  releaseLock: (documentId: string) =>
+    request<LockStatus>(`/documents/${documentId}/lock`, { method: "DELETE" }),
 
   // 管理画面（SCR-04/05/06, admin）
   listSchemas: () => request<{ items: SchemaDto[] }>(`/schemas`),

@@ -78,6 +78,15 @@ export interface SignedUrl {
   expires_in: number;
 }
 
+export interface LockStatus {
+  document_id: string;
+  locked: boolean;
+  held_by_me: boolean;
+  holder?: string | null;
+  remaining_sec: number;
+  ttl_sec: number;
+}
+
 export interface ApiError {
   error: { code: string; message: string; details: Record<string, unknown>; request_id: string };
 }

@@ -17,6 +17,7 @@ from newfan_gateway.deps import (
     get_admin,
     get_chat_agent,
     get_ingestor,
+    get_lock_store,
     get_orchestrator,
     get_queue,
     get_repo,
@@ -25,6 +26,7 @@ from newfan_gateway.deps import (
 )
 from newfan_gateway.errors import ApiError
 from newfan_gateway.ids import new_id
+from newfan_gateway.locks import DEFAULT_TTL_SEC, LockStore
 from newfan_gateway.ports import Ingestor, OrchestratorClient
 from newfan_gateway.queue import Queue
 from newfan_gateway.records import (
@@ -249,6 +251,66 @@ def get_page_image(
     return dto.SignedUrl(url=page.image_uri, expires_in=settings.signed_url_ttl_sec)
 
 
+# ============ 検証画面ソフトロック（§8.2） ============
+
+
+def _lock_status(document_id: str, me: str, info: Any, held_by_me: bool) -> dto.LockStatus:
+    if info is None:
+        return dto.LockStatus(document_id=document_id, locked=False, held_by_me=False)
+    return dto.LockStatus(
+        document_id=document_id,
+        locked=True,
+        held_by_me=held_by_me,
+        holder=info.holder_name,
+        remaining_sec=info.remaining_sec(),
+        ttl_sec=DEFAULT_TTL_SEC,
+    )
+
+
+@router.post("/documents/{document_id}/lock", response_model=dto.LockStatus)
+def acquire_lock(
+    document_id: str,
+    principal: Principal = Depends(require_role("reviewer")),
+    repo: Repository = Depends(get_repo),
+    locks: LockStore = Depends(get_lock_store),
+) -> dto.LockStatus:
+    """ソフトロックを取得/更新する（マウント時・ハートビート）。
+
+    他者が保持中なら acquired=False（held_by_me=False）で現保持者を返す。助言的なので
+    HTTP は常に 200（バナー表示はクライアント側で held_by_me により判断, §8.2）。
+    """
+    _require_document(repo, principal.tenant_id, document_id)
+    acquired, info = locks.acquire(principal.tenant_id, document_id, principal.sub)
+    return _lock_status(document_id, principal.sub, info, held_by_me=acquired)
+
+
+@router.get("/documents/{document_id}/lock", response_model=dto.LockStatus)
+def get_lock(
+    document_id: str,
+    principal: Principal = Depends(require_role("reviewer")),
+    repo: Repository = Depends(get_repo),
+    locks: LockStore = Depends(get_lock_store),
+) -> dto.LockStatus:
+    """現在のロック状態を返す（ポーリング用）。"""
+    _require_document(repo, principal.tenant_id, document_id)
+    info = locks.get(principal.tenant_id, document_id)
+    held_by_me = info is not None and info.holder_sub == principal.sub
+    return _lock_status(document_id, principal.sub, info, held_by_me=held_by_me)
+
+
+@router.delete("/documents/{document_id}/lock", response_model=dto.LockStatus)
+def release_lock(
+    document_id: str,
+    principal: Principal = Depends(require_role("reviewer")),
+    repo: Repository = Depends(get_repo),
+    locks: LockStore = Depends(get_lock_store),
+) -> dto.LockStatus:
+    """保持者本人によるロック解放（アンマウント・確定時）。"""
+    _require_document(repo, principal.tenant_id, document_id)
+    locks.release(principal.tenant_id, document_id, principal.sub)
+    return dto.LockStatus(document_id=document_id, locked=False, held_by_me=False)
+
+
 @router.post(
     "/documents/{document_id}/corrections", response_model=dto.CorrectionsAccepted
 )
@@ -298,6 +360,7 @@ def confirm(
     principal: Principal = Depends(require_role("reviewer")),
     repo: Repository = Depends(get_repo),
     orchestrator: OrchestratorClient = Depends(get_orchestrator),
+    locks: LockStore = Depends(get_lock_store),
 ) -> dto.ConfirmAccepted:
     _require_document(repo, principal.tenant_id, document_id)
     run = (
@@ -314,6 +377,7 @@ def confirm(
 
     repo.set_document_status(principal.tenant_id, document_id, "in_review")
     orchestrator.resume(run.id, principal.tenant_id, body.overrides)
+    locks.release(principal.tenant_id, document_id, principal.sub)  # 確定で待機者を解放
     _idempotency_store(request, idempotency_key, principal.tenant_id, {"ok": True})
     return dto.ConfirmAccepted()
 
