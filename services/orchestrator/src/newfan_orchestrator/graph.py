@@ -26,6 +26,7 @@ def build_graph(
     memory: Optional[MemoryService] = None,
     structure_client: Optional[StructureClient] = None,
     vl_client: Optional[StructureClient] = None,
+    ocr_client: Optional[Any] = None,
     image_loader: ImageLoader = file_uri_loader,
     context_store: Optional[ContextStore] = None,
     export_enqueue: Optional[EnqueueFn] = None,
@@ -43,7 +44,7 @@ def build_graph(
     memory_lookup_node = memory_nodes.make_memory_lookup(memory) if memory else nodes.memory_lookup
     learn_node = memory_nodes.make_learn(memory) if memory else nodes.learn
     structure_node = (
-        ocr_nodes.make_structure_ocr(structure_client, image_loader)
+        ocr_nodes.make_structure_ocr(structure_client, image_loader, ocr_client=ocr_client)
         if structure_client
         else nodes.structure_ocr
     )

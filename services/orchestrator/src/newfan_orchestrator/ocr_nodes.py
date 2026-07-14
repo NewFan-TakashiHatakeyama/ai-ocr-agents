@@ -7,19 +7,21 @@ DD-02 の単文字座標補完（低確信 span を crop して /ocr 再問合�
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Optional, Protocol
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 from newfan_paddle_client import (
     LayoutParsingResponse,
+    OcrResponse,
     build_layout_blocks,
     build_spans,
     build_tables,
     encode_image,
 )
-from newfan_schemas import ExtractionState, ReviewItem, SpanSource
+from newfan_schemas import ExtractionState, ReviewItem, Span, SpanSource
 
 NodeFn = Callable[[ExtractionState], dict[str, Any]]
 ImageLoader = Callable[[str], bytes]
@@ -27,6 +29,53 @@ ImageLoader = Callable[[str], bytes]
 
 class StructureClient(Protocol):
     def layout_parsing(self, file_b64: str, *, file_type: int = 1) -> LayoutParsingResponse: ...
+
+
+class OcrClient(Protocol):
+    def ocr(self, file_b64: str, *, file_type: int = 1) -> OcrResponse: ...
+
+
+def _backfill(spans: list[Span], image_bytes: bytes, ocr_client: OcrClient, threshold: float) -> None:
+    """DD-02: 低確信 span を bbox で crop→/ocr 再認識し text/conf を改善する。
+
+    単語/単文字座標が返れば page 座標へ変換して char_boxes に格納（前方互換）。
+    pillow 未導入や再問合せ失敗時は主経路の span を維持する（§10 継続）。
+    """
+    try:
+        import io
+
+        from PIL import Image  # runtime extra（pillow）
+    except ImportError:
+        return
+
+    img: Any = None
+    for s in spans:
+        if s.conf >= threshold or not s.bbox:
+            continue
+        if img is None:
+            img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        x1, y1, x2, y2 = s.bbox
+        ox, oy = max(0, x1 - 2), max(0, y1 - 2)
+        crop = img.crop((ox, oy, x2 + 2, y2 + 2))
+        buf = io.BytesIO()
+        crop.save(buf, format="PNG")
+        try:
+            resp = ocr_client.ocr(base64.b64encode(buf.getvalue()).decode("ascii"))
+        except Exception:  # noqa: BLE001 - 再問合せ失敗は主経路維持
+            continue
+        if not resp.ocr_results:
+            continue
+        res = resp.ocr_results[0].pruned_result
+        if not res.rec_texts:
+            continue
+        bi = max(range(len(res.rec_texts)), key=lambda i: res.rec_scores[i] if i < len(res.rec_scores) else 0.0)
+        new_conf = float(res.rec_scores[bi]) if bi < len(res.rec_scores) else s.conf
+        if new_conf > s.conf:  # より確信度の高い再読を採用
+            s.text = res.rec_texts[bi]
+            s.conf = new_conf
+        wb = res.rec_word_boxes or res.text_word_boxes
+        if wb and all(isinstance(b, (list, tuple)) and len(b) == 4 for b in wb):
+            s.char_boxes = [[int(b[0]) + ox, int(b[1]) + oy, int(b[2]) + ox, int(b[3]) + oy] for b in wb]
 
 
 def file_uri_loader(uri: str) -> bytes:
@@ -45,6 +94,9 @@ def file_uri_loader(uri: str) -> bytes:
 def make_structure_ocr(
     client: StructureClient,
     image_loader: ImageLoader = file_uri_loader,
+    *,
+    ocr_client: Optional[OcrClient] = None,
+    backfill_threshold: float = 0.90,
 ) -> NodeFn:
     def _node(state: ExtractionState) -> dict[str, Any]:
         spans = []
@@ -69,6 +121,9 @@ def make_structure_ocr(
 
             elem = resp.layout_parsing_results[0]
             page_spans = build_spans(elem.pruned_result, page=page_no, start_id=next_span_id)
+            # DD-02: 低確信 span を crop→/ocr 再認識で補完（ocr_client 注入時のみ）
+            if ocr_client is not None:
+                _backfill(page_spans, data, ocr_client, backfill_threshold)
             spans.extend(page_spans)
             layout.extend(build_layout_blocks(elem.pruned_result, page=page_no))
             # 構造由来テーブル（cell_box を span でグラウンディング, §5.3）
@@ -77,7 +132,6 @@ def make_structure_ocr(
             if elem.markdown is not None and elem.markdown.text:
                 markdown_parts.append(elem.markdown.text)
 
-        # TODO(DD-02): confidence<0.90 かつ char_boxes 欠落の span を crop→/ocr 再問合せで補完。
         return {
             "spans": spans,
             "layout": layout,

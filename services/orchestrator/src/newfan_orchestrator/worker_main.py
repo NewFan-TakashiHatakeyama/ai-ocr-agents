@@ -81,6 +81,8 @@ def main() -> None:
     )
     structure = PaddleServingClient(os.environ["STRUCTURE_URL"])
     vl = PaddleServingClient(os.environ["VL_URL"]) if os.environ.get("VL_URL") else None
+    # DD-02 char_backfill 用の /ocr。未設定なら補完なし（主経路のみ）。
+    ocr = PaddleServingClient(os.environ["OCR_URL"]) if os.environ.get("OCR_URL") else None
     adapter = LLMAdapter(AnthropicProvider(model=os.environ.get("LLM_MODEL", "claude-opus-4-8")))
     bundle = PromptBundle.load(default_bundle_dir())
 
@@ -96,6 +98,7 @@ def main() -> None:
             memory=_memory(),
             structure_client=structure,
             vl_client=vl,
+            ocr_client=ocr,
             image_loader=make_dispatching_image_loader(),  # s3:// / file:// を振り分け
             context_store=store,
             export_enqueue=export_queue.enqueue,

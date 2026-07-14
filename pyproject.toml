@@ -47,6 +47,7 @@ namespace_packages = true
 module = [
     "pypdfium2", "pypdfium2.*", "langgraph.*", "boto3", "boto3.*",
     "anthropic", "anthropic.*", "sentence_transformers", "faiss", "numpy",
+    "PIL", "PIL.*",
 ]
 ignore_missing_imports = true
 
