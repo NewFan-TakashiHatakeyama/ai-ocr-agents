@@ -14,14 +14,14 @@ class Ingestor(Protocol):
 
 
 class OrchestratorClient(Protocol):
-    def resume(self, run_id: str, feedback: Optional[dict[str, Any]]) -> None:
+    def resume(self, run_id: str, tenant_id: str, feedback: Optional[dict[str, Any]]) -> None:
         """HITL 確定でグラフを resume（§4.4）。実体は再開ジョブ発行（Web 内で長時間実行しない, §4.4）。"""
         ...
 
 
 class FakeOrchestratorClient:
     def __init__(self) -> None:
-        self.resumed: list[tuple[str, Optional[dict[str, Any]]]] = []
+        self.resumed: list[tuple[str, str, Optional[dict[str, Any]]]] = []
 
-    def resume(self, run_id: str, feedback: Optional[dict[str, Any]]) -> None:
-        self.resumed.append((run_id, feedback))
+    def resume(self, run_id: str, tenant_id: str, feedback: Optional[dict[str, Any]]) -> None:
+        self.resumed.append((run_id, tenant_id, feedback))

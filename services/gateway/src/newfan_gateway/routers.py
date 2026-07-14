@@ -306,7 +306,7 @@ def confirm(
         return dto.ConfirmAccepted()
 
     repo.set_document_status(principal.tenant_id, document_id, "in_review")
-    orchestrator.resume(run.id, body.overrides)
+    orchestrator.resume(run.id, principal.tenant_id, body.overrides)
     _idempotency_store(request, idempotency_key, principal.tenant_id, {"ok": True})
     return dto.ConfirmAccepted()
 

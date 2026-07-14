@@ -103,7 +103,8 @@ class PgRepository:
     def _rls(self, tenant_id: str) -> Iterator[Session]:
         with self._session() as s:
             # RLS: 当該トランザクションの範囲でテナントを固定（§7.3）
-            s.execute(text("SET LOCAL app.tenant_id = :tid"), {"tid": tenant_id})
+            # SET はバインドパラメータ不可のため set_config(..., is_local=true) を使う
+            s.execute(text("SELECT set_config('app.tenant_id', :tid, true)"), {"tid": tenant_id})
             yield s
             s.commit()
 

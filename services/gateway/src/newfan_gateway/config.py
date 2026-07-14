@@ -17,6 +17,8 @@ class Settings:
     orchestrator_url: str = "http://orchestrator-svc:8000"
     signed_url_ttl_sec: int = 600  # §11 署名URL 10分
     cors_origins: list[str] = field(default_factory=_default_cors)
+    database_url: str | None = None  # 未設定なら InMemoryRepository（開発/テスト）
+    redis_url: str | None = None  # 未設定なら InMemoryQueue（開発/テスト）
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -29,4 +31,6 @@ class Settings:
             cors_origins=(
                 [o.strip() for o in origins.split(",")] if origins else _default_cors()
             ),
+            database_url=os.environ.get("DATABASE_URL"),
+            redis_url=os.environ.get("REDIS_URL"),
         )

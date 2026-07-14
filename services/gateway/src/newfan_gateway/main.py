@@ -1,0 +1,43 @@
+"""本番 ASGI エントリポイント（`uvicorn newfan_gateway.main:app`）。
+
+環境変数から本番アダプタを配線する:
+- DATABASE_URL 有  → PgRepository（RLS 付き, §7.3）。無ければ InMemoryRepository（開発）。
+- REDIS_URL 有      → RedisQueue（q.extract/q.export, §9）＋ QueueOrchestratorClient（resume ジョブ発行, §4.4）。
+                      無ければ InMemoryQueue ＋ FakeOrchestratorClient（開発）。
+
+ingestor/api_keys は create_app の既定（本番 IngestService / 空の APIキーストア）に委ねる。
+"""
+
+from __future__ import annotations
+
+from fastapi import FastAPI
+
+from newfan_gateway.app import create_app
+from newfan_gateway.config import Settings
+from newfan_gateway.ports import OrchestratorClient
+from newfan_gateway.queue import Queue
+from newfan_gateway.repository import Repository
+
+
+def build_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or Settings.from_env()
+
+    repo: Repository | None = None
+    if settings.database_url:
+        from newfan_gateway.db import PgRepository
+
+        repo = PgRepository(settings.database_url)
+
+    queue: Queue | None = None
+    orchestrator: OrchestratorClient | None = None
+    if settings.redis_url:
+        from newfan_gateway.prod import QueueOrchestratorClient, RedisQueue
+
+        redis_queue = RedisQueue(settings.redis_url)
+        queue = redis_queue
+        orchestrator = QueueOrchestratorClient(redis_queue)
+
+    return create_app(settings=settings, repo=repo, queue=queue, orchestrator=orchestrator)
+
+
+app = build_app()

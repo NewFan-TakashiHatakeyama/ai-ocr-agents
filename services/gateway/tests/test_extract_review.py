@@ -110,7 +110,7 @@ def test_confirm_resumes_graph(ctx: SimpleNamespace) -> None:
         f"/v1/documents/{doc_id}/confirm", headers=auth("reviewer"), json={"run_id": run_id}
     )
     assert r.status_code == 202
-    assert ctx.orch.resumed == [(run_id, None)]
+    assert ctx.orch.resumed == [(run_id, "ten_1", None)]
 
 
 def test_review_queue(ctx: SimpleNamespace) -> None:
