@@ -49,6 +49,49 @@ def test_table_cells_grounded_to_spans() -> None:
     assert all(sid in valid_ids for sid in grounded)
 
 
+def _rows_by_product(substr: str):
+    pr = _pruned()
+    spans = build_spans(pr, page=1)
+    rows = build_tables(pr, spans, page=1)[0].rows
+    return next(
+        r for r in rows if r.get("商品名") and r["商品名"].value and substr in r["商品名"].value
+    )
+
+
+def test_span_backfill_recovers_empty_html_cell() -> None:
+    """B: 表認識が空にしたセルでも、枠内 span から値を復元する。
+
+    実 fixture の「冷凍ピザ」行は人数/箱数セルが pred_html 上は空だが、
+    overall_ocr_res の span が存在するため値が復元される（None にならない）。
+    """
+    piza = _rows_by_product("ピザ")
+    assert piza["人数"].value, "空セルが span テキストから復元される"
+    assert piza["人数"].span_ids, "復元値は span にグラウンディングされる"
+
+
+def test_stacked_column_is_split() -> None:
+    """C: 縦積みの「人数 箱数」列が人数/箱数の2列に分割される。"""
+    pr = _pruned()
+    spans = build_spans(pr, page=1)
+    rows = build_tables(pr, spans, page=1)[0].rows
+    cols = {k for row in rows for k in row}
+    assert "人数" in cols and "箱数" in cols
+    assert "人数 箱数" not in cols  # 元の結合列は残らない
+
+    # 「カッ味噌味」行は縦積み値 20/10 が人数=20・箱数=10 に分かれる
+    miso = _rows_by_product("味噌")
+    assert miso["人数"].value == "20" and miso["箱数"].value == "10"
+
+
+def test_empty_padding_row_is_dropped() -> None:
+    """値が1つも無い余白行（span が空テキストのみ）は除去される。"""
+    pr = _pruned()
+    spans = build_spans(pr, page=1)
+    rows = build_tables(pr, spans, page=1)[0].rows
+    for row in rows:
+        assert any(c.value for c in row.values()), "全セル空の行は残らない"
+
+
 def test_empty_table_res_yields_no_tables() -> None:
     from newfan_paddle_client.schema import PrunedResult
 

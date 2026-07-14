@@ -9,6 +9,7 @@ web UI のブラウザ検証用。needs_review の帳票を1件 seed し、レ�
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 
 import jwt
@@ -42,22 +43,52 @@ def _page_data_uri() -> str:
     return f"data:image/png;base64,{b64}"
 
 
+# 実 PP-StructureV3 の記録 fixture（sample.png を推論した /layout-parsing 実応答）。
+# デモ明細は「実パイプライン（build_tables ＝構造解析 + B:span値補完 + C:縦積み分割）」
+# の出力をそのまま使う。値の乱れ（例: 2r0/001/00000）はこの低解像スキャンの実 OCR 品質で、
+# 構造抽出ではなく認識側の課題。座標も実 cell_box_list 由来なので画像と厳密に一致する。
+_REAL_FIXTURE = (
+    Path(__file__).resolve().parents[1]
+    / "packages/paddle_client/tests/fixtures/real_layout_parsing_sample.json"
+)
+
+
 def _line_items_table() -> TableResult:
-    # sample.png（御見積書, 793x1123）の明細表に概ね一致する列×行の座標でセル bbox を付与。
-    cols = {"商品名": (40, 327), "数量": (420, 500), "単位": (500, 565), "単価": (565, 640), "金額": (640, 753)}
-    data = [
-        ("冷凍コロッケ", "250", "袋", "85", "21,250", 375, 396),
-        ("冷凍ピザ", "180", "袋", "410", "85,600", 405, 425),
-        ("カップラーメン醤油味", "200", "個", "100", "20,000", 428, 448),
-        ("カップラーメン味噌味", "200", "個", "100", "20,000", 460, 480),
-    ]
-    rows = []
-    for name, qty, unit, price, amount, y0, y1 in data:
-        vals = {"商品名": name, "数量": qty, "単位": unit, "単価": price, "金額": amount}
-        rows.append(
-            {c: TableCell(value=vals[c], bbox=[x0, y0, x1, y1]) for c, (x0, x1) in cols.items()}
-        )
-    return TableResult(name="line_items", page=1, confidence=0.88, rows=rows)
+    """実 sample.png に対する PP-StructureV3 + build_tables の実出力を明細として返す。
+
+    fixture が無い環境向けに、実出力の構造（人数/箱数分割・合計行）を写した
+    ハンドクラフト表へフォールバックする。
+    """
+    try:
+        from newfan_paddle_client import LayoutParsingResponse, build_spans, build_tables
+
+        data = json.loads(_REAL_FIXTURE.read_text(encoding="utf-8"))
+        pr = LayoutParsingResponse.model_validate(data).layout_parsing_results[0].pruned_result
+        spans = build_spans(pr, page=1)
+        table = build_tables(pr, spans, page=1)[0]
+        table.name = "line_items"
+        return table
+    except Exception:  # noqa: BLE001 - fixture 不在等はフォールバック
+        cols = {
+            "商品名": (40, 327), "人数": (327, 420), "箱数": (327, 420),
+            "数量": (420, 500), "単位": (500, 565), "単価": (565, 640), "金額": (640, 753),
+        }
+        data_rows = [
+            ("冷凍コロッケ", "25", "10", "250", "袋", "85", "21,250", 373, 400),
+            ("冷凍ピザ", "8", "20", "160", "袋", "410", "65,600", 400, 427),
+            ("カップラーメン醤油味", "20", "10", "200", "個", "100", "20,000", 427, 453),
+            ("カップラーメン味噌味", "20", "10", "200", "個", "100", "20,000", 453, 480),
+            ("合計", None, None, None, None, None, "136,998", 907, 932),
+        ]
+        rows = []
+        for name, nin, hako, qty, unit, price, amount, y0, y1 in data_rows:
+            vals = {"商品名": name, "人数": nin, "箱数": hako, "数量": qty,
+                    "単位": unit, "単価": price, "金額": amount}
+            rows.append(
+                {c: TableCell(value=vals[c], bbox=[x0, y0, x1, y1])
+                 for c, (x0, x1) in cols.items() if vals[c] is not None}
+            )
+        return TableResult(name="line_items", page=1, confidence=0.78, rows=rows)
 
 
 def _seed(repo: InMemoryRepository) -> None:
