@@ -1,0 +1,27 @@
+# ビルドコンテキストから除外（イメージ肥大化・機密の混入防止）
+.git
+.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# vendored PaddleOCR（数GB。推論は別イメージ=PaddleX serving）
+PaddleOCR/
+
+# web フロント（別イメージ/別ホスティング）
+web/node_modules
+web/.next
+web/out
+
+# 設計資料・スクラッチ
+*.html
+*.md
+!db/**/*.md
+NewFan_*
+sample.png
+
+# ローカルデータ/成果物
+data/
+*.log

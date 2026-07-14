@@ -1,0 +1,38 @@
+{
+  "family": "newfan-orchestrator-worker",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "3072",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${TASK_ROLE_ARN}",
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "containerDefinitions": [
+    {
+      "name": "orchestrator-worker",
+      "image": "${ECR_REPO_WORKER}:${IMAGE_TAG}",
+      "essential": true,
+      "command": ["python", "-m", "newfan_orchestrator.worker_main"],
+      "environment": [
+        { "name": "APP_ENV", "value": "production" },
+        { "name": "AWS_REGION", "value": "${AWS_REGION}" },
+        { "name": "LLM_MODEL", "value": "${LLM_MODEL}" },
+        { "name": "STRUCTURE_URL", "value": "http://structure-svc:8080" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "${DB_SECRET_ARN}" },
+        { "name": "REDIS_URL", "valueFrom": "${REDIS_SECRET_ARN}" },
+        { "name": "ANTHROPIC_API_KEY", "valueFrom": "${ANTHROPIC_SECRET_ARN}" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/newfan-orchestrator-worker",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ],
+  "//": "キュー消費ワーカーのため portMappings/HTTP healthCheck なし。停止時はプロセス終了→タスク再起動。VL_URL/CONSUMER_NAME は必要に応じ environment に追加（既定: VL 無効=Option A, CONSUMER_NAME=hostname）。オートスケールは q.extract のキュー深度（§ECS README）で行う。"
+}

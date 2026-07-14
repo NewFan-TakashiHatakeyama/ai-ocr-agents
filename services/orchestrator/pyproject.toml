@@ -19,6 +19,19 @@ graph = [
     "langgraph>=0.2",
     "langgraph-checkpoint-postgres>=2.0",
 ]
+# orchestrator-svc 常駐ワーカー（worker_main）の本番依存。
+# PgContextStore/PgMemoryRepository=sqlalchemy+psycopg, RedisQueue/Consumer=redis,
+# image_loaders(s3)=boto3, LLM=anthropic, 埋め込み=e5。graph を内包する。
+runtime = [
+    "langgraph>=0.2",
+    "langgraph-checkpoint-postgres>=2.0",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.1",
+    "redis>=5.0",
+    "boto3>=1.34",
+    "newfan-llm-adapter[anthropic]",
+    "newfan-memory[embeddings]",
+]
 
 [build-system]
 requires = ["hatchling"]

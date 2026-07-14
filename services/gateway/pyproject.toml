@@ -15,11 +15,15 @@ dependencies = [
 
 [project.optional-dependencies]
 # 本番の DB / キュー / サーバ（テストは InMemory 実装で代替）
+# PgRepository は同期 SQLAlchemy(create_engine) + psycopg ドライバ（postgresql+psycopg://）。
+# asyncpg は非同期専用で同期エンジンに使えないため psycopg を採用。
 runtime = [
     "uvicorn>=0.30",
     "sqlalchemy>=2.0",
-    "asyncpg>=0.29",
+    "psycopg[binary]>=3.1",
     "redis>=5.0",
+    # gateway は in-process で ingest を実行するため取込 runtime（pypdfium2/pillow/boto3）が必要。
+    "newfan-ingest[runtime]",
 ]
 
 [build-system]
