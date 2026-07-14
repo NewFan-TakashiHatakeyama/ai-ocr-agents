@@ -10,6 +10,16 @@ import type {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000/v1";
 
+export class ApiError extends Error {
+  status: number;
+  code: string;
+  constructor(status: number, code: string, message?: string) {
+    super(message ?? `API error ${code} (${status})`);
+    this.status = status;
+    this.code = code;
+  }
+}
+
 function token(): string | undefined {
   if (typeof window !== "undefined") {
     const stored = window.localStorage.getItem("nf_token");
@@ -28,13 +38,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!res.ok) {
     let code = String(res.status);
+    let message: string | undefined;
     try {
       const body = await res.json();
       code = body?.error?.code ?? code;
+      message = body?.error?.message;
     } catch {
       /* ignore */
     }
-    throw new Error(`API error ${code} (${res.status})`);
+    throw new ApiError(res.status, code, message);
   }
   return (await res.json()) as T;
 }

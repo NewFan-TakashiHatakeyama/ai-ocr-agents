@@ -1,60 +1,79 @@
 "use client";
 
+import { useState } from "react";
+
+import { AuditBadge, VerifyBadges } from "@/components/AuditBadge";
+import { ConfidenceBar } from "@/components/ConfidenceBar";
+import { sortFields } from "@/lib/fields";
 import { useReviewStore } from "@/lib/store";
 import type { ExtractedField } from "@/lib/types";
 
-// §8.3 <FieldPanel>: pending→critical→conf昇順。conf帯は色分け
-// (<0.6赤 / <0.8黄 / >=0.8緑 / 検証済み青)。
+// §8.3 <FieldPanel>: 要確認→確定済みのセクション。由来バッジ・検証バッジ・conf帯。
+// 選択中は右パネル行とビューアbboxを双方向同期。編集はバッファ（確定時に保存）。
 
-function confColor(f: ExtractedField): string {
-  if (f.validation?.passed) return "var(--validated)";
-  if (f.confidence < 0.6) return "var(--low)";
-  if (f.confidence < 0.8) return "var(--pending)";
-  return "var(--ok)";
-}
+function Row({ f }: { f: ExtractedField }) {
+  const { selectedField, edits, select, setEdit } = useReviewStore();
+  const active = selectedField === f.name;
+  const edited = f.name in edits;
+  const current = edits[f.name] ?? f.value_normalized ?? f.value_raw ?? "";
+  const pend = f.review_status === "pending";
 
-function sortFields(fields: ExtractedField[]): ExtractedField[] {
-  return [...fields].sort((a, b) => {
-    const ap = a.review_status === "pending" ? 0 : 1;
-    const bp = b.review_status === "pending" ? 0 : 1;
-    if (ap !== bp) return ap - bp;
-    return a.confidence - b.confidence;
-  });
+  return (
+    <div
+      id={`frow-${f.name}`}
+      className={`frow ${pend ? "pend" : "done"}${active ? " sel" : ""}`}
+      onClick={() => select(f.name)}
+    >
+      <span className="fl">{f.label ?? f.name}</span>
+      {active ? (
+        <input
+          className="fv"
+          value={current}
+          onChange={(e) => setEdit(f.name, e.target.value)}
+          aria-label={`${f.label ?? f.name} を編集`}
+          autoFocus
+        />
+      ) : (
+        <span className="fv" title={current}>
+          {current || <em style={{ color: "var(--ink3)" }}>（空）</em>}
+        </span>
+      )}
+      {edited && <span className="src human">編集</span>}
+      {!edited && <AuditBadge field={f} />}
+      <VerifyBadges field={f} />
+      <ConfidenceBar field={f} />
+    </div>
+  );
 }
 
 export function FieldPanel({ fields }: { fields: ExtractedField[] }) {
-  const { selectedField, edits, select, setEdit } = useReviewStore();
+  const [onlyPending, setOnlyPending] = useState(false);
+  const sorted = sortFields(fields);
+  const pending = sorted.filter((f) => f.review_status === "pending");
+  const done = sorted.filter((f) => f.review_status !== "pending");
 
   return (
-    <div className="field-panel">
-      {sortFields(fields).map((f) => {
-        const active = selectedField === f.name;
-        const current = edits[f.name] ?? f.value_normalized ?? f.value_raw ?? "";
-        return (
-          <div
-            key={f.name}
-            className={`field-row${active ? " active" : ""}`}
-            onClick={() => select(f.name)}
-          >
-            <div className="field-label">
-              {f.label ?? f.name}
-              {f.review_status === "pending" && <span className="badge pending">要確認</span>}
-            </div>
-            <div className="field-value">
-              {active ? (
-                <input
-                  value={current}
-                  onChange={(e) => setEdit(f.name, e.target.value)}
-                  aria-label={`${f.name} を編集`}
-                />
-              ) : (
-                <span>{current || <em style={{ color: "var(--muted)" }}>（空）</em>}</span>
-              )}
-            </div>
-            <div className="conf-bar" style={{ background: confColor(f), width: `${Math.round(f.confidence * 100)}%` }} />
-          </div>
-        );
-      })}
+    <div className="fpanel">
+      <div className="fp-head">
+        フィールド
+        <span className="spacer" />
+        <button
+          className="filter"
+          style={{ cursor: "pointer" }}
+          onClick={() => setOnlyPending((v) => !v)}
+          aria-pressed={onlyPending}
+        >
+          {onlyPending ? "すべて表示" : "要確認のみ"}
+        </button>
+      </div>
+
+      {pending.length > 0 && <div className="fp-sec">要確認（{pending.length}）</div>}
+      {pending.map((f) => (
+        <Row key={f.name} f={f} />
+      ))}
+
+      {!onlyPending && done.length > 0 && <div className="fp-sec">確定済み（{done.length}）</div>}
+      {!onlyPending && done.map((f) => <Row key={f.name} f={f} />)}
     </div>
   );
 }
