@@ -16,6 +16,7 @@ from newfan_paddle_client import (
     LayoutParsingResponse,
     build_layout_blocks,
     build_spans,
+    build_tables,
     encode_image,
 )
 from newfan_schemas import ExtractionState, ReviewItem, SpanSource
@@ -48,6 +49,7 @@ def make_structure_ocr(
     def _node(state: ExtractionState) -> dict[str, Any]:
         spans = []
         layout = []
+        tables = []
         markdown_parts: list[str] = []
         errors: list[dict[str, Any]] = list(state.get("errors", []))
         next_span_id = 0
@@ -67,9 +69,11 @@ def make_structure_ocr(
 
             elem = resp.layout_parsing_results[0]
             page_spans = build_spans(elem.pruned_result, page=page_no, start_id=next_span_id)
-            next_span_id += len(page_spans)
             spans.extend(page_spans)
             layout.extend(build_layout_blocks(elem.pruned_result, page=page_no))
+            # 構造由来テーブル（cell_box を span でグラウンディング, §5.3）
+            tables.extend(build_tables(elem.pruned_result, page_spans, page=page_no))
+            next_span_id += len(page_spans)
             if elem.markdown is not None and elem.markdown.text:
                 markdown_parts.append(elem.markdown.text)
 
@@ -77,6 +81,7 @@ def make_structure_ocr(
         return {
             "spans": spans,
             "layout": layout,
+            "tables": tables,
             "layout_markdown": "\n\n".join(markdown_parts),
             "errors": errors,
         }

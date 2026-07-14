@@ -85,6 +85,30 @@ class PgContextStore:
                         "rs": f.review_status.value,
                     },
                 )
+            # 明細テーブル（構造由来, §5.3）を extraction_tables に永続化。冪等のため run 分を洗替。
+            c.execute(text("DELETE FROM extraction_tables WHERE run_id = :r"), {"r": run_id})
+            for t in tables:
+                rows_json = [
+                    {col: {"value": cell.value, "span_ids": cell.span_ids} for col, cell in row.items()}
+                    for row in t.rows
+                ]
+                c.execute(
+                    text(
+                        "INSERT INTO extraction_tables "
+                        "(id, tenant_id, run_id, name, page_no, structure_html, rows, confidence) "
+                        "VALUES (:id,:t,:r,:nm,:pg,:html, CAST(:rows AS jsonb), :cf)"
+                    ),
+                    {
+                        "id": f"tbl_{uuid.uuid4().hex[:20]}",
+                        "t": tenant_id,
+                        "r": run_id,
+                        "nm": t.name,
+                        "pg": t.page,
+                        "html": t.structure_html,
+                        "rows": json.dumps(rows_json, ensure_ascii=False),
+                        "cf": t.confidence,
+                    },
+                )
             c.execute(
                 text("UPDATE extraction_runs SET status = :st, finished_at = now() WHERE id = :r"),
                 {"st": status, "r": run_id},

@@ -42,7 +42,24 @@ def _layout(conf: float) -> dict[str, Any]:
                     "parsing_res_list": [
                         {"block_bbox": [40, 40, 520, 90], "block_label": "text", "block_content": "x", "block_id": 0, "block_order": 0}
                     ],
-                    "overall_ocr_res": {"rec_texts": ["128000"], "rec_scores": [conf], "rec_polys": [[[300, 180], [430, 180], [430, 212], [300, 212]]]},
+                    "overall_ocr_res": {
+                        "rec_texts": ["128000", "品名", "数量", "りんご", "3"],
+                        "rec_scores": [conf, 0.99, 0.98, 0.95, 0.9],
+                        "rec_polys": [
+                            [[300, 180], [430, 180], [430, 212], [300, 212]],
+                            [[20, 300], [120, 300], [120, 320], [20, 320]],
+                            [[140, 300], [240, 300], [240, 320], [140, 320]],
+                            [[20, 340], [120, 340], [120, 360], [20, 360]],
+                            [[140, 340], [240, 340], [240, 360], [140, 360]],
+                        ],
+                    },
+                    "table_res_list": [
+                        {
+                            "pred_html": "<html><body><table><tbody><tr><td>品名</td><td>数量</td></tr><tr><td>りんご</td><td>3</td></tr></tbody></table></body></html>",
+                            "cell_box_list": [[10, 295, 130, 325], [130, 295, 250, 325], [10, 335, 130, 365], [130, 335, 250, 365]],
+                            "table_ocr_pred": {"rec_texts": ["品名", "数量", "りんご", "3"], "rec_scores": [0.99, 0.98, 0.95, 0.9]},
+                        }
+                    ],
                 },
                 "markdown": {"text": "md", "isStart": True, "isEnd": True},
             }
@@ -119,6 +136,13 @@ def main() -> int:
     rows, st = _fields(engine, "run_a")
     print(f"  extraction_fields={rows} run.status={st}")
     ok &= st == "confirmed" and any(r[0] == "total_amount" and r[1] == "128000" for r in rows)
+    # 構造由来テーブルが extraction_tables に永続化されたか（§5.3）
+    with engine.begin() as c:
+        trows = c.execute(text("SELECT name, page_no, rows FROM extraction_tables WHERE run_id='run_a'"), {}).all()
+    print(f"  extraction_tables={[(r[0], r[1], len(r[2])) for r in trows]}")
+    ok &= len(trows) == 1 and trows[0][0] == "table" and len(trows[0][2]) == 1
+    tbl_ok = bool(trows) and any(cell.get("value") == "りんご" for row in trows[0][2] for cell in row.values())
+    ok &= tbl_ok
 
     # --- Phase B: HITL（needs_review → resume）---
     print("== Phase B: HITL needs_review -> resume ==")
