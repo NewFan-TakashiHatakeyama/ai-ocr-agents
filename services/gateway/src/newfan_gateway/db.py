@@ -261,6 +261,7 @@ class PgRepository:
             id=row.id, tenant_id=row.tenant_id, document_id=row.document_id, schema_id=row.schema_id,
             status=row.status, engine_versions=row.engine_versions, options=row.options,
             result_version=row.result_version, fields=fields, tables=tables, review_summary=review_summary,
+            fallback_pages=(row.metrics or {}).get("fallback_pages", []),
         )
 
     def set_document_status(self, tenant_id, document_id, status):
@@ -317,6 +318,7 @@ def _run_record(row: ExtractionRun) -> RunRecord:
         id=row.id, tenant_id=row.tenant_id, document_id=row.document_id, schema_id=row.schema_id,
         status=row.status, engine_versions=row.engine_versions, options=row.options,
         result_version=row.result_version, fields=[], tables=[], review_summary={},
+        fallback_pages=(row.metrics or {}).get("fallback_pages", []),
     )
 
 

@@ -68,12 +68,16 @@ def _seed(repo: InMemoryRepository) -> None:
             storage_uri="s3://demo/sample.png",
             original_name="御見積書_sample.png",
             mime_type="image/png",
-            page_count=1,
+            page_count=2,
             doc_type="quotation",
             external_ref="EST-00000101",
             status="needs_review",
         ),
-        [PageRecord(page_no=1, width=793, height=1123, image_uri=_page_data_uri())],
+        # p.1=構造OCR良好、p.2=品質ゲート NG で VL 補完（§5.4）。同じ画像を流用（デモ用）。
+        [
+            PageRecord(page_no=1, width=793, height=1123, image_uri=_page_data_uri()),
+            PageRecord(page_no=2, width=793, height=1123, image_uri=_page_data_uri()),
+        ],
     )
     repo.create_run(
         RunRecord(
@@ -146,6 +150,7 @@ def _seed(repo: InMemoryRepository) -> None:
             ],
             tables=[_line_items_table()],
             review_summary={"pending": 1, "auto": 3},
+            fallback_pages=[2],  # p.2 は VL 補完（バッジ/バナー露出のデモ, §5.4）
         )
     )
 

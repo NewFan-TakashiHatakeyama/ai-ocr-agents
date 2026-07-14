@@ -35,8 +35,13 @@ class ContextStore(Protocol):
         tables: list[TableResult],
         review_items: list[ReviewItem],
         status: str,
+        fallback_pages: Optional[list[int]] = None,
     ) -> None:
-        """extraction_fields/tables を保存し、run/document の status を遷移する（§4.3 finalize）。"""
+        """extraction_fields/tables を保存し、run/document の status を遷移する（§4.3 finalize）。
+
+        fallback_pages（VL フォールバックしたページ, §5.4/DD-09）は run の metrics に記録し、
+        UI がバッジ/バナーで露出できるようにする。
+        """
         ...
 
 
@@ -58,6 +63,7 @@ class InMemoryContextStore:
         self._run_status: dict[str, str] = {}
         self._saved_fields: dict[str, list[ExtractedField]] = {}
         self._saved_tables: dict[str, list[TableResult]] = {}
+        self._saved_fallback: dict[str, list[int]] = {}
         self._result_version: dict[str, int] = {}
 
     def seed_run(
@@ -101,12 +107,14 @@ class InMemoryContextStore:
         tables: list[TableResult],
         review_items: list[ReviewItem],
         status: str,
+        fallback_pages: Optional[list[int]] = None,
     ) -> None:
         seed = self._runs.get(run_id)
         if seed is None or seed.tenant_id != tenant_id:
             raise KeyError(f"unknown run {run_id}")
         self._saved_fields[run_id] = list(fields)
         self._saved_tables[run_id] = list(tables)
+        self._saved_fallback[run_id] = list(fallback_pages or [])
         self._run_status[run_id] = status
         self._document_status[seed.document_id] = status
         self._result_version[run_id] = self._result_version.get(run_id, 1)
@@ -120,3 +128,6 @@ class InMemoryContextStore:
 
     def saved_fields(self, run_id: str) -> list[ExtractedField]:
         return self._saved_fields.get(run_id, [])
+
+    def saved_fallback_pages(self, run_id: str) -> list[int]:
+        return self._saved_fallback.get(run_id, [])

@@ -60,6 +60,7 @@ class ResultResponse(BaseModel):
     fields: list[ExtractedField]
     tables: list[TableResult]
     review_summary: dict[str, Any]
+    fallback_pages: list[int] = Field(default_factory=list)  # VL フォールバックしたページ（§5.4）
 
 
 class CorrectionItem(BaseModel):

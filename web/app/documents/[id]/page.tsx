@@ -31,11 +31,13 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     () => (data ? sortFields(data.fields).filter((f) => f.review_status === "pending") : []),
     [data],
   );
+  const fallbackPages = useMemo(() => new Set(data?.fallback_pages ?? []), [data]);
   const pages = useMemo(() => {
     const s = new Set<number>();
     data?.fields.forEach((f) => f.bbox && s.add(f.page ?? 1));
+    fallbackPages.forEach((p) => s.add(p)); // VL 補完ページ（抽出フィールドが無くてもタブを出す）
     return s.size ? [...s].sort((a, b) => a - b) : [1];
-  }, [data]);
+  }, [data, fallbackPages]);
 
   useEffect(() => {
     // 選択フィールド/セルのページを表示
@@ -198,13 +200,25 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         <div className="viewer">
           <div className="v-tools">
             {pages.map((p) => (
-              <button key={p} className={`pagetab${p === page ? " on" : ""}`} onClick={() => setPage(p)}>
+              <button
+                key={p}
+                className={`pagetab${p === page ? " on" : ""}${fallbackPages.has(p) ? " vl" : ""}`}
+                onClick={() => setPage(p)}
+                title={fallbackPages.has(p) ? "VL補完ページ（構造/OCR品質が低い）" : undefined}
+              >
                 p.{p}
+                {fallbackPages.has(p) && <span className="src vl">VL</span>}
               </button>
             ))}
             <span className="spacer" />
             <span className="sub">前処理後PNG＝座標系の正（DD-01）</span>
           </div>
+          {fallbackPages.has(page) && (
+            <div className="vl-banner" role="status">
+              🅥 このページは <b>VL補完</b>（構造/OCR品質が低いため画像モデルで抽出）。
+              由来 <span className="src vl">VL</span> の値は grounding 上限 0.7・特に確認が必要です（DD-09）。
+            </div>
+          )}
           <DocViewer documentId={id} fields={data.fields} pageNo={page} />
         </div>
         <FieldPanel fields={data.fields} tables={data.tables} readOnly={readOnly} />

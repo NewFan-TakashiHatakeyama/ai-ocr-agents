@@ -126,6 +126,24 @@ def test_resume_after_review_confirms() -> None:
     assert exports and exports[0][0] == "q.export"
 
 
+def test_fallback_pages_persisted() -> None:
+    # ページ平均 conf < 0.75 → quality_gate が fallback_pages=[1]（§5.4）。
+    worker, store, _, _ = _build(conf=0.70)
+    assert worker.process({"run_id": "run_1", "tenant_id": "ten_1"}) == "needs_review"
+    assert store.saved_fallback_pages("run_1") == [1]  # needs_review 保存に露出
+    # レビュア修正で resume→確定してもページ露出は維持される
+    feedback = {"corrections": [{"field_name": "total_amount", "corrected_value": "128000"}]}
+    worker.process({"run_id": "run_1", "tenant_id": "ten_1", "resume": feedback})
+    assert store.run_status("run_1") == "confirmed"
+    assert store.saved_fallback_pages("run_1") == [1]
+
+
+def test_no_fallback_when_quality_ok() -> None:
+    worker, store, _, _ = _build(conf=0.99)
+    worker.process({"run_id": "run_1", "tenant_id": "ten_1"})
+    assert store.saved_fallback_pages("run_1") == []
+
+
 def test_worker_run_once_consumes_queue() -> None:
     worker, store, _, _ = _build(conf=0.99)
     worker._consumer.push({"run_id": "run_1", "tenant_id": "ten_1"})  # type: ignore[attr-defined]

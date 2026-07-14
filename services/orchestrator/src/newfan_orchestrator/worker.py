@@ -55,6 +55,7 @@ class ExtractionWorker:
                 tables=state.get("tables", []),
                 review_items=state.get("review_items", []),
                 status="needs_review",
+                fallback_pages=state.get("fallback_pages", []),
             )
             if self._webhook is not None:
                 self._webhook(

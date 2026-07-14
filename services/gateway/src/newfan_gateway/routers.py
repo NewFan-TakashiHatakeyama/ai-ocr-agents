@@ -231,6 +231,7 @@ def get_result(
         fields=run.fields,
         tables=run.tables,
         review_summary=run.review_summary,
+        fallback_pages=run.fallback_pages,
     )
 
 

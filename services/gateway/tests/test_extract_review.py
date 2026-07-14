@@ -66,6 +66,24 @@ def test_get_result(ctx: SimpleNamespace) -> None:
     assert body["review_summary"]["pending"] == 2
 
 
+def test_result_exposes_fallback_pages(ctx: SimpleNamespace) -> None:
+    doc_id = _upload(ctx)
+    run = RunRecord(
+        id="run_vl",
+        tenant_id="ten_1",
+        document_id=doc_id,
+        status="needs_review",
+        result_version=1,
+        fields=[ExtractedField(name="total_amount", value_normalized="1", confidence=0.7)],
+        review_summary={"pending": 1, "auto": 0},
+        fallback_pages=[2, 3],
+    )
+    ctx.repo.create_run(run)
+    r = ctx.client.get(f"/v1/documents/{doc_id}/result", headers=auth("viewer"))
+    assert r.status_code == 200
+    assert r.json()["fallback_pages"] == [2, 3]
+
+
 def test_corrections_optimistic_lock(ctx: SimpleNamespace) -> None:
     doc_id = _upload(ctx)
     run_id = _seed_needs_review_run(ctx, doc_id)

@@ -47,6 +47,8 @@ class RunRecord(BaseModel):
     fields: list[ExtractedField] = Field(default_factory=list)
     tables: list[TableResult] = Field(default_factory=list)
     review_summary: dict[str, Any] = Field(default_factory=dict)
+    # VL フォールバックしたページ番号（品質ゲート NG, §5.4/DD-09）。UI のバッジ/バナー用。
+    fallback_pages: list[int] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=_now)
 
 

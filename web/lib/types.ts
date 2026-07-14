@@ -44,6 +44,7 @@ export interface ResultResponse {
   fields: ExtractedField[];
   tables: TableResult[];
   review_summary: Record<string, number>;
+  fallback_pages?: number[]; // VL フォールバックしたページ（§5.4）
 }
 
 export interface DocumentMeta {

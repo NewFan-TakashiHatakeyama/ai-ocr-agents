@@ -40,6 +40,7 @@ def make_finalize(store: ContextStore, enqueue: EnqueueFn | None = None) -> Node
             tables=state.get("tables", []),
             review_items=[],
             status="confirmed",
+            fallback_pages=state.get("fallback_pages", []),
         )
         if enqueue is not None:
             enqueue(

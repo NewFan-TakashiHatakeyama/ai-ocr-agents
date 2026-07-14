@@ -49,7 +49,9 @@ class PgContextStore:
             ]
             return LoadedContext(document_id=document_id, schema=schema, pages=pages)
 
-    def save_result(self, tenant_id, run_id, *, fields, tables, review_items, status) -> None:
+    def save_result(
+        self, tenant_id, run_id, *, fields, tables, review_items, status, fallback_pages=None
+    ) -> None:
         with self._engine.begin() as c:
             c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
             for f in fields:
@@ -112,9 +114,17 @@ class PgContextStore:
                         "cf": t.confidence,
                     },
                 )
+            # fallback_pages（VL 露出用, §5.4）は metrics JSONB へマージ（既存キーは保持）。
             c.execute(
-                text("UPDATE extraction_runs SET status = :st, finished_at = now() WHERE id = :r"),
-                {"st": status, "r": run_id},
+                text(
+                    "UPDATE extraction_runs SET status = :st, finished_at = now(), "
+                    "metrics = COALESCE(metrics, '{}'::jsonb) || CAST(:m AS jsonb) WHERE id = :r"
+                ),
+                {
+                    "st": status,
+                    "r": run_id,
+                    "m": json.dumps({"fallback_pages": sorted(set(fallback_pages or []))}),
+                },
             )
             c.execute(
                 text(
