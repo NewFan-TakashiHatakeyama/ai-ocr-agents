@@ -1,0 +1,18 @@
+# ルール抽出プロンプト（詳細設計 §4.6.3）。出力ルールは status=draft で保存し §5.8.4 検証後に active。
+name: rule_extract
+output: json
+template: |
+  以下は同一テナント・同一帳票種別で人間が行った修正ログです。
+  再利用可能な明示ルールを抽出してください。出力はJSON配列のみ。
+
+  修正ログ: {corrections}  # [{field, from, to, doc_type, supplier, context}]
+
+  ルール型:
+  - regex_replace: {pattern, replacement, condition}
+  - vocab_map:     {from, to, scope}         # 固有名詞・勘定科目の写像
+  - format:        {field, format, example}  # 例: 伝票番号は ^7\d{5}$
+  - checksum:      {field, algorithm}
+  - llm_hint:      {hint_text}               # 決定論化できない知識
+
+  各ルールに evidence_ids（根拠修正ログID）と適用条件（doc_type/supplier/field）を必ず付与。
+  過剰一般化を避け、根拠3件未満のパターンは llm_hint として出力すること。

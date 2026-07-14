@@ -1,0 +1,67 @@
+# structure-svc: PP-StructureV3 サービング設定（詳細設計 §2.2 / §5.3, DD-02 / DD-03）
+#
+# 用途: paddlex --serve --pipeline inference/structure/pipeline_config.yaml
+#   （または高安定性サービング SDK の server/pipeline_config.yaml）
+#
+# 本ファイルは「設計で固定すべき上書き値 + Serving 設定」を持つ。各 SubModule の
+# 既定値・モデルメタは paddleocr のバージョンに依存するため、本番投入前に
+# inference/scripts/export_base_config.py で当該バージョンの完全 base config を生成し、
+# 本ファイルの値をマージした authoritative config を作ること（付録C-1/C-2）。
+
+pipeline_name: PP-StructureV3
+
+# DD-01/ADR-0002: 前処理は ingest 側で実施済み。二重前処理を避けるため無効化する。
+use_doc_preprocessor: False
+# 帳票用途では数式・チャート解析は不要（高速化, DD-03）
+use_formula_recognition: False
+use_chart_recognition: False
+use_seal_recognition: True
+use_table_recognition: True
+use_region_detection: True
+
+SubModules:
+  LayoutDetection:
+    module_name: layout_detection
+    model_name: PP-DocLayoutV3
+    model_dir: null
+    threshold: 0.3
+    layout_nms: True
+
+SubPipelines:
+  # DD-03: 汎用 OCR サブモジュールを PP-OCRv6_medium に明示固定（3.7 既定に依存しない）。
+  GeneralOCR:
+    pipeline_name: OCR
+    use_textline_orientation: True
+    SubModules:
+      TextDetection:
+        module_name: text_detection
+        model_name: PP-OCRv6_medium_det
+        model_dir: null
+      TextRecognition:
+        module_name: text_recognition
+        model_name: PP-OCRv6_medium_rec
+        model_dir: null
+        score_thresh: 0.0
+
+  # 表内 OCR も v6_medium に固定（pp_structurev3.py の TableRecognition.GeneralOCR 経路）
+  TableRecognition:
+    pipeline_name: table_recognition_v2
+    SubPipelines:
+      GeneralOCR:
+        pipeline_name: OCR
+        SubModules:
+          TextDetection:
+            module_name: text_detection
+            model_name: PP-OCRv6_medium_det
+            model_dir: null
+          TextRecognition:
+            module_name: text_recognition
+            model_name: PP-OCRv6_medium_rec
+            model_dir: null
+
+Serving:
+  # ペイロード削減: 可視化画像を返さない（span/layout/markdown のみ利用, 報告 §5）
+  visualize: False
+  extra:
+    # ingest がページ分割して 1 枚ずつ送るため 10 ページ制限は実害なしだが明示解除
+    max_num_input_imgs: null

@@ -1,0 +1,25 @@
+# LLM 補正プロンプト（詳細設計 §4.6.2, DD-10）
+name: llm_correct
+output: json
+template: |
+  あなたはOCR結果の校正者です。視覚的に妥当な範囲でのみ修正します。出力はJSONのみ。
+
+  # 対象
+  field={field_name} / 型={field_type} / 期待形式={format}
+  OCR原文="{value_raw}" / 文字別confidence={char_confs}
+  周辺文脈(同一ブロック原文): {context}
+
+  # このテナントの過去の類似修正例（新しい順）
+  {few_shot_examples}   # [{doc_type, supplier, from, to, note}]
+
+  # 制約（違反時は changed=false, needs_review=true とすること）
+  - 置換は混同文字表 {confusion_pairs} の組合せ、または上記類似修正例に
+    合致する場合のみ提案できる。
+  - 桁数を増減させる修正は、char_confsの低い文字に限定し、rationaleに
+    視覚的根拠を必ず記載する。
+  - 原文にない情報の付加・意味的な書き換えは禁止。
+
+  # 出力
+  {"corrected":"...","changed":true,"needs_review":false,
+   "used_pairs":[["1","7"]],"memory_refs":["c_881"],
+   "rationale":"...","confidence":0.93}

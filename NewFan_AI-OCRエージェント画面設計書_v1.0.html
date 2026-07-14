@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NewFan AI-OCRエージェント 画面設計書 v1.0</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+JP:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+/* ============ tokens ============ */
+:root{
+  --bg:#f6f8fa;
+  --surface:#ffffff;
+  --glass:rgba(255,255,255,.72);
+  --glass-strong:rgba(255,255,255,.88);
+  --line:#e8ecf1;
+  --line-strong:#d9dfe7;
+  --ink:#1c2128;
+  --ink2:#5d6673;
+  --ink3:#98a1af;
+  --brand:#3d8bfd;
+  --brand-deep:#2d6fe0;
+  --brand-soft:#eaf3ff;
+  --grad:linear-gradient(135deg,#5aa7ff 0%,#7ad8cf 100%);
+  --red:#e5484d;   --red-soft:#fdecec;
+  --amber:#f0a020; --amber-soft:#fdf3e2;
+  --green:#16a06b; --green-soft:#e7f7f0;
+  --blue:#2e90fa;  --blue-soft:#e9f2ff;
+  --violet:#8b7cf6;--violet-soft:#f0edfe;
+  --r-s:8px; --r-m:12px; --r-l:16px; --r-xl:20px;
+  --sh-s:0 1px 2px rgba(16,24,40,.05);
+  --sh-m:0 6px 24px rgba(16,24,40,.07);
+  --sh-l:0 16px 48px rgba(16,24,40,.10);
+  --mono:ui-monospace,"SF Mono","Cascadia Code",Consolas,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:24px}
+body{
+  font-family:"Inter","Noto Sans JP","Hiragino Sans","Yu Gothic UI",sans-serif;
+  background:var(--bg);color:var(--ink);
+  font-size:14.5px;line-height:1.75;
+  font-feature-settings:"palt";
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:#cfe6ff}
+
+/* ============ doc layout ============ */
+.toc{
+  position:fixed;top:0;left:0;bottom:0;width:236px;z-index:50;
+  background:var(--glass);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-right:1px solid var(--line);padding:22px 14px;overflow-y:auto;
+}
+.toc-logo{display:flex;align-items:center;gap:9px;padding:2px 8px 16px;border-bottom:1px solid var(--line);margin-bottom:12px}
+.logo-mark{width:26px;height:26px;border-radius:8px;background:var(--grad);position:relative;flex:none;box-shadow:0 2px 8px rgba(90,167,255,.4)}
+.logo-mark::after{content:"";position:absolute;inset:7px 6px;border:2px solid #fff;border-radius:3px;border-bottom-width:4px}
+.toc-logo b{font-size:13px;letter-spacing:.02em}
+.toc-logo span{display:block;font-size:10px;color:var(--ink3);font-weight:500}
+.toc a{display:block;padding:5.5px 10px;border-radius:8px;color:var(--ink2);text-decoration:none;font-size:12.5px;font-weight:500}
+.toc a:hover{background:#fff;color:var(--ink)}
+.toc a.on{background:var(--brand-soft);color:var(--brand-deep);font-weight:700}
+.toc .grp{font-size:10px;font-weight:700;letter-spacing:.14em;color:var(--ink3);margin:16px 10px 4px;text-transform:uppercase}
+.doc{margin-left:236px;padding:48px 56px 120px;max-width:1156px}
+@media(max-width:1080px){.toc{display:none}.doc{margin-left:0;padding:32px 20px 80px}}
+
+/* ============ typography / doc parts ============ */
+.eyebrow{font-size:11px;font-weight:700;letter-spacing:.16em;color:var(--brand-deep);text-transform:uppercase}
+h1{font-size:34px;font-weight:800;letter-spacing:-.015em;line-height:1.3;margin:10px 0 8px}
+h2{font-size:22px;font-weight:800;letter-spacing:-.01em;margin:0 0 6px}
+h3{font-size:16px;font-weight:700;margin:28px 0 10px}
+.lead{color:var(--ink2);max-width:760px}
+.sec{margin-top:84px;scroll-margin-top:32px}
+.sec-head{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid var(--line-strong);padding-bottom:14px;margin-bottom:22px}
+.sec-no{font-family:var(--mono);font-size:12px;color:var(--ink3);font-weight:600}
+.scr-id{display:inline-block;font-family:var(--mono);font-size:11.5px;font-weight:700;color:var(--brand-deep);background:var(--brand-soft);border-radius:6px;padding:2px 8px;margin-left:6px;vertical-align:2px}
+.meta-table{width:100%;border-collapse:collapse;margin:22px 0;background:var(--surface);border-radius:var(--r-m);overflow:hidden;box-shadow:var(--sh-s);font-size:13px}
+.meta-table th{width:180px;text-align:left;background:#fbfcfe;color:var(--ink2);font-weight:600;padding:10px 16px;border-bottom:1px solid var(--line)}
+.meta-table td{padding:10px 16px;border-bottom:1px solid var(--line)}
+.meta-table tr:last-child th,.meta-table tr:last-child td{border-bottom:none}
+.callout{display:flex;gap:12px;background:var(--brand-soft);border:1px solid #d5e7ff;border-radius:var(--r-m);padding:14px 18px;margin:18px 0;font-size:13.5px;color:#274a86}
+.callout::before{content:"※";font-weight:800;color:var(--brand-deep)}
+p.note{font-size:13px;color:var(--ink2);margin:10px 0}
+
+/* spec tables */
+.spec{width:100%;border-collapse:collapse;margin:14px 0 6px;background:var(--surface);border-radius:var(--r-m);overflow:hidden;box-shadow:var(--sh-s);font-size:12.8px}
+.spec th{background:#fbfcfe;text-align:left;font-weight:700;color:var(--ink2);padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+.spec td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+.spec tr:last-child td{border-bottom:none}
+.spec .no{width:34px;text-align:center;font-family:var(--mono);font-weight:700;color:var(--brand-deep)}
+.spec .ref{font-family:var(--mono);font-size:11px;color:var(--ink3);white-space:nowrap}
+code{font-family:var(--mono);font-size:.92em;background:#f0f3f7;border-radius:5px;padding:1px 6px;color:#334}
+
+/* ============ mockup frame ============ */
+.stage{background:radial-gradient(circle at 1px 1px,#dfe5ec 1px,transparent 0) 0 0/18px 18px,linear-gradient(#f2f5f8,#eef2f6);border:1px solid var(--line);border-radius:var(--r-xl);padding:30px;margin:20px 0 8px}
+.frame{background:var(--surface);border-radius:14px;box-shadow:var(--sh-l);overflow:hidden;border:1px solid var(--line);position:relative}
+.frame-bar{display:flex;align-items:center;gap:7px;padding:9px 14px;background:linear-gradient(#fdfefe,#f7f9fb);border-bottom:1px solid var(--line)}
+.dot{width:10px;height:10px;border-radius:50%}
+.dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
+.frame-url{margin-left:12px;flex:1;max-width:420px;background:#eef1f5;border-radius:7px;font-family:var(--mono);font-size:10.5px;color:var(--ink3);padding:3.5px 12px}
+.screen{position:relative;background:var(--bg)}
+
+/* app shell in mocks */
+.app{display:flex;min-height:560px}
+.side{width:216px;flex:none;background:var(--glass);backdrop-filter:blur(10px);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 10px}
+.side-logo{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:800;padding:4px 8px 12px}
+.side-logo .logo-mark{width:22px;height:22px;border-radius:7px}
+.side-logo .logo-mark::after{inset:6px 5px;border-width:1.5px;border-bottom-width:3px}
+.nav-new{display:flex;align-items:center;gap:8px;margin:2px 6px 12px;padding:8px 12px;border:1px solid var(--line-strong);border-radius:10px;background:#fff;font-size:12.5px;font-weight:600;color:var(--ink);box-shadow:var(--sh-s)}
+.nav-new::before{content:"+";font-weight:800;color:var(--brand-deep)}
+.nav-item{display:flex;align-items:center;gap:9px;padding:7.5px 12px;border-radius:9px;font-size:12.5px;color:var(--ink2);font-weight:500}
+.nav-item.on{background:#fff;color:var(--ink);font-weight:700;box-shadow:var(--sh-s)}
+.nav-item .ic{width:15px;height:15px;flex:none}
+.nav-cap{font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--ink3);margin:14px 12px 4px}
+.nav-doc{padding:5.5px 12px;font-size:11.8px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:8px}
+.nav-doc:hover{background:#fff}
+.side-user{margin-top:auto;display:flex;align-items:center;gap:9px;padding:9px 10px;border-top:1px solid var(--line);font-size:12px}
+.avatar{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#ffd08a,#ff9d7a);flex:none;display:grid;place-items:center;font-size:10.5px;font-weight:800;color:#7c3f00}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{display:flex;align-items:center;gap:12px;padding:11px 20px;background:var(--glass-strong);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);position:relative;z-index:5}
+.topbar .ttl{font-size:13.5px;font-weight:700}
+.topbar .sub{font-size:11px;color:var(--ink3)}
+.spacer{flex:1}
+
+/* buttons / chips / inputs */
+.btn{display:inline-flex;align-items:center;gap:7px;padding:7.5px 15px;border-radius:10px;font-size:12.5px;font-weight:700;border:1px solid var(--line-strong);background:#fff;color:var(--ink);box-shadow:var(--sh-s);white-space:nowrap}
+.btn.primary{background:var(--brand-deep);border-color:var(--brand-deep);color:#fff;box-shadow:0 4px 14px rgba(45,111,224,.28)}
+.btn.grad{background:var(--grad);border:none;color:#fff;box-shadow:0 4px 16px rgba(90,167,255,.35)}
+.btn.ghost{background:transparent;border-color:transparent;box-shadow:none;color:var(--ink2)}
+.btn.sm{padding:4.5px 11px;font-size:11.5px;border-radius:8px}
+.btn.disabled{opacity:.45}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:2.5px 10px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
+.chip::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.st-uploaded{background:#f0f3f7;color:var(--ink2)}
+.st-processing{background:var(--violet-soft);color:#6a58e8}
+.st-review{background:var(--amber-soft);color:#b06a00}
+.st-inreview{background:#fff3d6;color:#9a5b00}
+.st-confirmed{background:var(--green-soft);color:#0b7a50}
+.st-exported{background:var(--blue-soft);color:#1b6fd0}
+.st-failed{background:var(--red-soft);color:#c02a2f}
+.kbd{font-family:var(--mono);font-size:10.5px;font-weight:700;background:#fff;border:1px solid var(--line-strong);border-bottom-width:2px;border-radius:6px;padding:1px 6px;color:var(--ink2)}
+.inp{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line-strong);border-radius:10px;padding:7px 12px;font-size:12.5px;color:var(--ink3)}
+
+/* confidence bar & source badge */
+.conf{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;font-weight:700}
+.conf .bar{width:52px;height:5px;border-radius:99px;background:#eceff3;overflow:hidden;position:relative}
+.conf .bar i{position:absolute;inset:0;border-radius:99px}
+.conf.lo{color:var(--red)}.conf.lo .bar i{width:58%;background:var(--red)}
+.conf.mid{color:#c07a00}.conf.mid .bar i{width:72%;background:var(--amber)}
+.conf.hi{color:var(--green)}.conf.hi .bar i{width:94%;background:var(--green)}
+.conf.ok{color:var(--blue)}.conf.ok .bar i{width:99%;background:var(--blue)}
+.src{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;border-radius:6px;padding:2px 7px}
+.src.ocr{background:#f0f3f7;color:var(--ink2)}
+.src.llm{background:var(--violet-soft);color:#6a58e8}
+.src.rule{background:var(--blue-soft);color:#1b6fd0}
+.src.human{background:var(--green-soft);color:#0b7a50}
+.src.vl{background:var(--amber-soft);color:#b06a00}
+.vbadge{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--blue);background:var(--blue-soft);border-radius:5px;padding:1.5px 6px}
+.vbadge::before{content:"✓"}
+
+/* markers */
+.mk{position:absolute;width:22px;height:22px;border-radius:50%;background:var(--ink);color:#fff;font-size:11.5px;font-weight:800;display:grid;place-items:center;box-shadow:0 3px 10px rgba(0,0,0,.3),0 0 0 2.5px #fff;z-index:40;font-family:var(--mono)}
+
+/* design-system showcase */
+.swatches{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin:16px 0}
+.sw{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-m);overflow:hidden;box-shadow:var(--sh-s)}
+.sw .c{height:58px}
+.sw .t{padding:8px 12px;font-size:11.5px}
+.sw .t b{display:block;font-size:12px}
+.sw .t code{background:none;padding:0;color:var(--ink3);font-size:10.5px}
+.comp-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+@media(max-width:900px){.comp-grid{grid-template-columns:1fr}}
+.comp{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:18px 20px;box-shadow:var(--sh-s)}
+.comp h4{font-size:12px;font-weight:700;color:var(--ink3);letter-spacing:.08em;margin-bottom:12px}
+.comp .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px}
+.type-line{display:flex;align-items:baseline;gap:16px;border-bottom:1px dashed var(--line);padding:10px 0}
+.type-line .lab{width:190px;flex:none;font-family:var(--mono);font-size:10.5px;color:var(--ink3)}
+
+/* screen list & flow */
+.flow-wrap{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);padding:22px;box-shadow:var(--sh-s);margin:16px 0;overflow-x:auto}
+
+/* footer */
+.doc-foot{margin-top:90px;border-top:1px solid var(--line-strong);padding-top:18px;color:var(--ink3);font-size:12px;display:flex;gap:18px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<!-- ================= 文書TOC ================= -->
+<nav class="toc" id="toc">
+  <div class="toc-logo"><div class="logo-mark"></div><div><b>NewFan AI-OCR</b><span>画面設計書 v1.0</span></div></div>
+  <a href="#cover" class="on">表紙・改訂情報</a>
+  <div class="grp">Design System</div>
+  <a href="#ds">1. デザインコンセプト</a>
+  <a href="#ds-comp">2. 共通コンポーネント</a>
+  <div class="grp">Information Architecture</div>
+  <a href="#ia">3. 画面一覧・遷移図</a>
+  <a href="#shell">4. 共通レイアウト</a>
+  <div class="grp">Screens</div>
+  <a href="#scr01">SCR-01 チャットホーム</a>
+  <a href="#scr02">SCR-02 ドキュメント一覧</a>
+  <a href="#scr03">SCR-03 検証画面（HITL）</a>
+  <a href="#scr04">SCR-04 ダッシュボード</a>
+  <a href="#scr05">SCR-05 ルール管理</a>
+  <a href="#scr06">SCR-06 スキーマ管理</a>
+  <div class="grp">Guidelines</div>
+  <a href="#resp">7. レスポンシブ / A11y</a>
+  <a href="#api">8. 画面⇔API対応表</a>
+</nav>
+
+<main class="doc">
+
+<!-- ================= 表紙 ================= -->
+<section id="cover">
+  <div class="eyebrow">NewFan Inc. — Internal Design Specification</div>
+  <h1>AI-OCRエージェント 画面設計書</h1>
+  <p class="lead">詳細設計書 v1.0（§8 HITL検証UI詳細設計ほか）を上位文書とする画面設計書。デザイン方針は「ChatGPT / Gemini に代表される、白基調・余白主体のシンプルな配色」に「透明感（フロストガラス、空色→アクアの淡いアクセント）」と「親しみやすさ（大きめの角丸、柔らかな影、平易なUI文言）」を重ねる。</p>
+  <table class="meta-table">
+    <tr><th>文書バージョン</th><td>画面設計 v1.0（2026-07-14）</td></tr>
+    <tr><th>準拠文書</th><td>詳細設計書 v1.0（§6 API・§8 UI・§11 RBAC）／ 技術設計書 v2.0（PP-OCRv6ベース）</td></tr>
+    <tr><th>対象画面</th><td>SCR-01〜SCR-06（ログイン・パスワード再設定等の汎用認証画面は本書対象外、Auth基盤の標準UIを使用）</td></tr>
+    <tr><th>対象デバイス</th><td>PCファースト（検証画面は幅1280px以上を推奨）。タブレット＝閲覧・承認中心、モバイル＝キュー確認・簡易承認（§7）</td></tr>
+    <tr><th>本書の読み方</th><td>各画面のモックアップ上の <span style="display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--ink);color:#fff;font-size:11px;font-weight:800;font-family:var(--mono);vertical-align:-4px">1</span> マーカー番号が、直下の「項目定義表」の No. に対応する</td></tr>
+  </table>
+  <div class="callout">モックアップ内の帳票・数値・会社名はすべて架空のサンプル。confidence閾値（0.90 / 0.80 / 0.60）等の初期値は詳細設計書 §2.5 の仮置き値であり、PoC実測により較正される。</div>
+</section>
+
+<!-- ================= 1. デザインコンセプト ================= -->
+<section class="sec" id="ds">
+  <div class="sec-head"><span class="sec-no">01</span><h2>デザインコンセプト・トークン</h2></div>
+  <p class="lead">キーワードは <b>「澄んだ道具」</b>。帳票という業務の現場に置かれても圧迫感がなく、AIの判断根拠（confidence・由来・検証結果）が色と形で直感的に読めること。装飾は排し、彩度の高い色は「AIの状態表示」だけに使う。</p>
+
+  <h3>1-1. カラーパレット</h3>
+  <div class="swatches">
+    <div class="sw"><div class="c" style="background:#f6f8fa;border-bottom:1px solid var(--line)"></div><div class="t"><b>雲白 / bg</b><code>#F6F8FA</code></div></div>
+    <div class="sw"><div class="c" style="background:#fff;border-bottom:1px solid var(--line)"></div><div class="t"><b>純白 / surface</b><code>#FFFFFF</code></div></div>
+    <div class="sw"><div class="c" style="background:rgba(255,255,255,.72);backdrop-filter:blur(4px);background-image:linear-gradient(45deg,#e8edf3 25%,transparent 25%,transparent 75%,#e8edf3 75%),linear-gradient(45deg,#e8edf3 25%,#fff 25%,#fff 75%,#e8edf3 75%);background-size:16px 16px;background-position:0 0,8px 8px"></div><div class="t"><b>硝子 / glass</b><code>rgba(255,255,255,.72)+blur14</code></div></div>
+    <div class="sw"><div class="c" style="background:#1c2128"></div><div class="t"><b>墨 / ink</b><code>#1C2128</code></div></div>
+    <div class="sw"><div class="c" style="background:var(--grad)"></div><div class="t"><b>空→アクア / brand</b><code>#5AA7FF → #7AD8CF</code></div></div>
+    <div class="sw"><div class="c" style="background:#2d6fe0"></div><div class="t"><b>ブランド濃 / action</b><code>#2D6FE0</code></div></div>
+  </div>
+  <table class="spec">
+    <tr><th>セマンティック</th><th>色</th><th>用途（唯一の用途に限定する）</th></tr>
+    <tr><td><b style="color:var(--red)">危険 Red</b></td><td><code>#E5484D</code> / soft <code>#FDECEC</code></td><td>confidence &lt; 0.60、失敗ステータス、破壊的操作</td></tr>
+    <tr><td><b style="color:#c07a00">注意 Amber</b></td><td><code>#F0A020</code> / soft <code>#FDF3E2</code></td><td>confidence 0.60–0.79、要確認（pending）、VLフォールバック由来</td></tr>
+    <tr><td><b style="color:var(--green)">良好 Green</b></td><td><code>#16A06B</code> / soft <code>#E7F7F0</code></td><td>confidence ≥ 0.80、確定・自動承認</td></tr>
+    <tr><td><b style="color:var(--blue)">検証済 Blue</b></td><td><code>#2E90FA</code> / soft <code>#E9F2FF</code></td><td>決定論チェック合格（auto-elevation, conf≥0.98）、エクスポート済み</td></tr>
+    <tr><td><b style="color:#6a58e8">AI Violet</b></td><td><code>#8B7CF6</code> / soft <code>#F0EDFE</code></td><td>LLM補正由来バッジ、処理中（エージェント稼働）</td></tr>
+  </table>
+
+  <h3>1-2. タイポグラフィ</h3>
+  <div class="comp" style="margin-top:8px">
+    <div class="type-line"><span class="lab">Display / 28–34 · 800</span><span style="font-size:26px;font-weight:800;letter-spacing:-.015em">こんにちは、佐藤さん</span></div>
+    <div class="type-line"><span class="lab">Heading / 16–22 · 700</span><span style="font-size:17px;font-weight:700">検証画面 — 株式会社サンプル商事 請求書</span></div>
+    <div class="type-line"><span class="lab">Body / 13–14.5 · 400–500</span><span>抽出した値は帳票画像の根拠箇所と対応付けて表示されます。</span></div>
+    <div class="type-line"><span class="lab">Data / Mono 11–12 · 600</span><span style="font-family:var(--mono);font-size:12px;font-weight:600">conf 0.72 · bbox [812,540,940,566] · run_01J8MZ</span></div>
+    <p class="note" style="margin-top:12px">和文＝Noto Sans JP、欧文・数値＝Inter、ID/座標/確信度＝monospace。金額・確信度など「読み違えると事故になる数値」は必ずmonoで表示し、書体で情報種別を判別できるようにする。</p>
+  </div>
+</section>
+
+<!-- ================= 2. 共通コンポーネント ================= -->
+<section class="sec" id="ds-comp">
+  <div class="sec-head"><span class="sec-no">02</span><h2>共通コンポーネント</h2></div>
+  <div class="comp-grid">
+    <div class="comp">
+      <h4>BUTTONS</h4>
+      <div class="row"><span class="btn grad">＋ 帳票をアップロード</span><span class="btn primary">すべて確認して確定</span><span class="btn">再抽出</span><span class="btn ghost">キャンセル</span></div>
+      <div class="row"><span class="btn sm">CSVダウンロード</span><span class="btn sm" style="color:var(--red);border-color:#f3c1c3">ルールを退役</span><span class="btn primary disabled">確定（要確認 2件）</span></div>
+      <p class="note">グラデーションは「新規アップロード」等の入口1箇所のみ。実行系はブランド濃単色。要確認が残る間、確定ボタンはdisabled＋残数表示。</p>
+    </div>
+    <div class="comp">
+      <h4>STATUS CHIPS（documents.status と1:1）</h4>
+      <div class="row"><span class="chip st-uploaded">アップロード済</span><span class="chip st-processing">処理中</span><span class="chip st-review">要確認</span><span class="chip st-inreview">確認中</span></div>
+      <div class="row"><span class="chip st-confirmed">確定</span><span class="chip st-exported">連携済</span><span class="chip st-failed">失敗</span></div>
+    </div>
+    <div class="comp">
+      <h4>CONFIDENCE BAR（§8.3 色分け）</h4>
+      <div class="row"><span class="conf lo"><span class="bar"><i></i></span>0.58</span><span style="font-size:11.5px;color:var(--ink2)">&lt; 0.60 要注意</span></div>
+      <div class="row"><span class="conf mid"><span class="bar"><i></i></span>0.72</span><span style="font-size:11.5px;color:var(--ink2)">0.60–0.79 要確認</span></div>
+      <div class="row"><span class="conf hi"><span class="bar"><i></i></span>0.94</span><span style="font-size:11.5px;color:var(--ink2)">≥ 0.80 良好</span></div>
+      <div class="row"><span class="conf ok"><span class="bar"><i></i></span>0.98</span><span style="font-size:11.5px;color:var(--ink2)">検証合格（auto-elevation）</span></div>
+      <p class="note">色に依存しないよう数値を常に併記（アクセシビリティ §7）。</p>
+    </div>
+    <div class="comp">
+      <h4>由来バッジ（AuditBadge）・検証バッジ</h4>
+      <div class="row"><span class="src ocr">OCR原値</span><span class="src llm">LLM補正</span><span class="src rule">ルール適用</span><span class="src human">人手修正</span><span class="src vl">VL補完</span></div>
+      <div class="row"><span class="vbadge">V-SUM 合計検算</span><span class="vbadge">V-REGNO 登録番号</span><span class="vbadge">V-BANK 口座形式</span></div>
+      <p class="note">ホバーで rationale・memory_refs・used_pairs（混同文字ペア）をツールチップ表示。値の由来は必ず可視化する（詳細設計 §11 監査要件）。</p>
+    </div>
+    <div class="comp">
+      <h4>KEYBOARD / INPUT</h4>
+      <div class="row"><span class="kbd">n</span><span class="kbd">p</span><span style="font-size:12px;color:var(--ink2)">次/前の要確認へ</span><span class="kbd">Enter</span><span style="font-size:12px;color:var(--ink2)">承認</span><span class="kbd">⌘</span>＋<span class="kbd">Enter</span><span style="font-size:12px;color:var(--ink2)">確定</span></div>
+      <div class="row" style="margin-top:6px"><span class="inp" style="flex:1">🔍 帳票名・取引先・external_ref で検索</span></div>
+    </div>
+    <div class="comp">
+      <h4>TOAST / 競合通知（409 楽観ロック）</h4>
+      <div style="display:flex;align-items:center;gap:10px;background:var(--glass-strong);backdrop-filter:blur(8px);border:1px solid var(--line-strong);border-left:3px solid var(--amber);border-radius:12px;padding:10px 14px;box-shadow:var(--sh-m);font-size:12.5px">
+        <b>他のメンバーが先に更新しました。</b><span style="color:var(--ink2)">最新の結果を読み込み、あなたの編集との差分を表示します。</span><span class="btn sm">差分を見る</span>
+      </div>
+      <p class="note">エラーは謝罪ではなく「何が起きたか＋次の一手」を提示（<code>E1006</code>）。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 3. 画面一覧・遷移 ================= -->
+<section class="sec" id="ia">
+  <div class="sec-head"><span class="sec-no">03</span><h2>画面一覧・遷移図</h2></div>
+  <table class="spec">
+    <tr><th>画面ID</th><th>画面名</th><th>パス</th><th>主目的</th><th>最小ロール</th><th>主要API（§6）</th></tr>
+    <tr><td class="no">01</td><td><b>チャットホーム</b></td><td class="ref">/chat</td><td>アップロード・自然言語での指示・進捗確認（生成AIベースUI/UXの入口）</td><td>viewer（書込みはuploader+）</td><td class="ref">POST /documents · /chat(SSE) · /extract</td></tr>
+    <tr><td class="no">02</td><td><b>ドキュメント一覧 / レビューキュー</b></td><td class="ref">/documents</td><td>状態別の一覧・優先度順キュー・一括操作</td><td>viewer</td><td class="ref">GET /documents · GET /review/queue</td></tr>
+    <tr><td class="no">03</td><td><b>検証画面（HITL）</b></td><td class="ref">/documents/{id}/review</td><td>画像×抽出結果の照合・修正・確定</td><td>reviewer</td><td class="ref">GET /result · POST /corrections · POST /confirm</td></tr>
+    <tr><td class="no">04</td><td><b>ダッシュボード</b></td><td class="ref">/dashboard</td><td>STP率・精度・コスト・学習効果のKPI監視</td><td>admin</td><td class="ref">（メトリクス集計API）</td></tr>
+    <tr><td class="no">05</td><td><b>ルール管理</b></td><td class="ref">/rules</td><td>AI生成ルールの検証レポート確認・有効化/退役</td><td>admin</td><td class="ref">GET/PATCH /tenants/{id}/rules</td></tr>
+    <tr><td class="no">06</td><td><b>スキーマ管理</b></td><td class="ref">/schemas</td><td>抽出項目（テンプレートの代替となる「意味定義」）の版管理</td><td>admin</td><td class="ref">GET/PUT /schemas</td></tr>
+  </table>
+
+  <div class="flow-wrap">
+    <svg viewBox="0 0 1000 300" width="100%" style="min-width:860px" font-family="Inter,'Noto Sans JP',sans-serif">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#98a1af"/></marker>
+        <linearGradient id="gd" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5aa7ff"/><stop offset="1" stop-color="#7ad8cf"/></linearGradient>
+      </defs>
+      <!-- boxes -->
+      <g font-size="12.5" font-weight="700" fill="#1c2128">
+        <rect x="20" y="120" width="120" height="52" rx="12" fill="#fff" stroke="#d9dfe7"/><text x="80" y="142" text-anchor="middle" font-size="11" fill="#5d6673" font-weight="600">認証基盤</text><text x="80" y="158" text-anchor="middle">ログイン</text>
+        <rect x="200" y="112" width="160" height="66" rx="14" fill="url(#gd)"/><text x="280" y="139" text-anchor="middle" fill="#fff">SCR-01</text><text x="280" y="157" text-anchor="middle" fill="#fff">チャットホーム</text>
+        <rect x="430" y="112" width="170" height="66" rx="14" fill="#fff" stroke="#d9dfe7"/><text x="515" y="139" text-anchor="middle" fill="#2d6fe0">SCR-02</text><text x="515" y="157" text-anchor="middle">一覧 / レビューキュー</text>
+        <rect x="680" y="102" width="180" height="86" rx="14" fill="#fff" stroke="#2d6fe0" stroke-width="1.6"/><text x="770" y="132" text-anchor="middle" fill="#2d6fe0">SCR-03</text><text x="770" y="150" text-anchor="middle">検証画面（HITL）</text><text x="770" y="168" text-anchor="middle" font-size="10" fill="#5d6673" font-weight="500">修正 → 確定 → 学習</text>
+        <rect x="430" y="20" width="140" height="48" rx="12" fill="#fff" stroke="#d9dfe7"/><text x="500" y="40" text-anchor="middle" fill="#2d6fe0" font-size="11">SCR-04</text><text x="500" y="56" text-anchor="middle" font-size="12">ダッシュボード</text>
+        <rect x="430" y="228" width="140" height="48" rx="12" fill="#fff" stroke="#d9dfe7"/><text x="500" y="248" text-anchor="middle" fill="#2d6fe0" font-size="11">SCR-05</text><text x="500" y="264" text-anchor="middle" font-size="12">ルール管理</text>
+        <rect x="600" y="228" width="140" height="48" rx="12" fill="#fff" stroke="#d9dfe7"/><text x="670" y="248" text-anchor="middle" fill="#2d6fe0" font-size="11">SCR-06</text><text x="670" y="264" text-anchor="middle" font-size="12">スキーマ管理</text>
+      </g>
+      <!-- arrows -->
+      <g stroke="#98a1af" stroke-width="1.6" fill="none" marker-end="url(#ar)">
+        <path d="M140 146 H196"/>
+        <path d="M360 138 H426"/>
+        <path d="M600 138 H676"/>
+        <path d="M770 188 C770 235 620 250 574 250" opacity=".0"/>
+      </g>
+      <g stroke="#98a1af" stroke-width="1.6" fill="none" marker-end="url(#ar)" stroke-dasharray="4 4">
+        <path d="M280 112 C300 60 380 44 426 44"/>
+        <path d="M280 178 C300 236 380 252 426 252"/>
+        <path d="M770 188 C760 226 740 244 744 245" transform="translate(0,0)" opacity="0"/>
+      </g>
+      <g font-size="10.5" fill="#5d6673" font-weight="600">
+        <text x="168" y="138">ログイン後</text>
+        <text x="372" y="130">帳票を開く</text>
+        <text x="612" y="130">要確認を開く</text>
+        <text x="318" y="52">サイドナビ（admin）</text>
+      </g>
+      <!-- confirm return arrow -->
+      <g stroke="#16a06b" stroke-width="1.8" fill="none" marker-end="url(#ar)">
+        <path d="M770 188 C770 214 640 210 604 176"/>
+      </g>
+      <text x="700" y="212" font-size="10.5" fill="#16a06b" font-weight="700">確定 → 一覧へ戻る（webhook: document.confirmed）</text>
+    </svg>
+  </div>
+  <p class="note">SCR-04〜06 はサイドナビから常時到達可能（admin権限）。破線＝ナビゲーション遷移、実線＝業務フロー遷移。</p>
+</section>
+
+<!-- ================= 4. 共通レイアウト ================= -->
+<section class="sec" id="shell">
+  <div class="sec-head"><span class="sec-no">04</span><h2>共通レイアウト（アプリシェル）</h2></div>
+  <p class="lead">全画面共通の骨格。左＝フロストガラスのサイドナビ（216px）、上＝ページヘッダ（ガラス、blur 10px）。ChatGPT系の構造を踏襲しつつ、最近のドキュメントを「会話履歴」のように一覧する。</p>
+  <table class="spec">
+    <tr><th class="no">No</th><th>領域</th><th>仕様</th><th class="ref">参照</th></tr>
+    <tr><td class="no">1</td><td>サイドナビ</td><td>ロゴ／「＋ 新規」（アップロード or チャット開始）／主要画面ナビ（ロールで出し分け：ダッシュボード・ルール・スキーマはadminのみ）／最近のドキュメント（status chip付き、最大20件）／ユーザーメニュー。幅216px、<code>rgba(255,255,255,.72)+blur</code></td><td class="ref">§11 RBAC</td></tr>
+    <tr><td class="no">2</td><td>トップバー</td><td>画面タイトル・コンテキスト（doc名/状態）・グローバル検索・通知。sticky＋ガラス</td><td class="ref">—</td></tr>
+    <tr><td class="no">3</td><td>通知</td><td>webhookイベント（needs_review / confirmed / failed）をベルにバッジ表示。クリックで該当画面へ</td><td class="ref">§6.4</td></tr>
+  </table>
+</section>
+
+<!-- ================= SCR-01 チャットホーム ================= -->
+<style>
+.chat-body{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:34px 40px;gap:20px;background:
+  radial-gradient(600px 260px at 50% 30%,rgba(122,216,207,.14),transparent 70%),
+  radial-gradient(700px 300px at 45% 20%,rgba(90,167,255,.14),transparent 70%),var(--bg)}
+.hello{font-size:25px;font-weight:800;letter-spacing:-.01em}
+.hello b{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.chat-card{width:640px;max-width:100%;background:var(--glass-strong);backdrop-filter:blur(14px);border:1px solid #fff;outline:1px solid var(--line);border-radius:20px;box-shadow:var(--sh-l);padding:16px 18px 12px;position:relative}
+.chat-input{display:flex;align-items:center;gap:10px;color:var(--ink3);font-size:13.5px;min-height:28px}
+.chat-tools{display:flex;align-items:center;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+.tool-pill{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;color:var(--ink2);border:1px dashed var(--line-strong);border-radius:999px;padding:4px 12px}
+.send{margin-left:auto;width:32px;height:32px;border-radius:10px;background:var(--brand-deep);display:grid;place-items:center;box-shadow:0 4px 12px rgba(45,111,224,.3)}
+.send svg{width:15px;height:15px;stroke:#fff;stroke-width:2.4;fill:none}
+.suggs{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;max-width:660px}
+.sugg{background:#fff;border:1px solid var(--line);border-radius:999px;padding:7px 16px;font-size:12.5px;color:var(--ink2);box-shadow:var(--sh-s)}
+.proc-card{width:640px;max-width:100%;background:#fff;border:1px solid var(--line);border-radius:16px;box-shadow:var(--sh-s);padding:14px 18px;display:flex;align-items:center;gap:14px}
+.spin{width:26px;height:26px;border-radius:50%;background:conic-gradient(#8b7cf6,#e9e6fd 70%);position:relative;flex:none;animation:rot 1.6s linear infinite}
+.spin::after{content:"";position:absolute;inset:5px;border-radius:50%;background:#fff}
+@keyframes rot{to{transform:rotate(1turn)}}
+.pbar{height:5px;border-radius:99px;background:#eef1f5;overflow:hidden;margin-top:7px}
+.pbar i{display:block;height:100%;width:62%;background:var(--grad);border-radius:99px}
+.confirm-card{width:640px;max-width:100%;background:#fff;border:1px solid #d5e7ff;border-left:3px solid var(--brand);border-radius:16px;box-shadow:var(--sh-s);padding:14px 18px}
+</style>
+<section class="sec" id="scr01">
+  <div class="sec-head"><span class="sec-no">05</span><h2>チャットホーム<span class="scr-id">SCR-01</span></h2></div>
+  <p class="lead">「帳票を渡して、日本語で頼む」だけで抽出が始まる入口。テンプレート登録画面が存在しないことを、この画面の簡潔さ自体で体現する。書込み系のエージェント操作（再抽出・スキーマ変更）は必ず承認カードを挟む（詳細設計 §3.3）。</p>
+
+  <div class="stage"><div class="frame">
+    <div class="frame-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><div class="frame-url">app.newfan-ocr.jp/chat</div></div>
+    <div class="screen"><div class="app">
+      <div class="side">
+        <div class="side-logo"><div class="logo-mark"></div>NewFan OCR</div>
+        <div class="nav-new">新規</div>
+        <div class="nav-item on"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a8 8 0 1 1-4-6.9"/><path d="M21 3v6h-6"/></svg>チャット</div>
+        <div class="nav-item"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>ドキュメント</div>
+        <div class="nav-item"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5m0 14h16M8 15v-4m4 4V8m4 7v-6"/></svg>ダッシュボード</div>
+        <div class="nav-item"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.2-1.6l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.8-1.6L13 2h-4l-.7 2.9a7 7 0 0 0-2.8 1.6l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 3 12"/></svg>ルール / スキーマ</div>
+        <div class="nav-cap">最近のドキュメント</div>
+        <div class="nav-doc">📄 サンプル商事_請求書_6月分 <span class="chip st-review" style="font-size:9px;padding:1px 7px">要確認</span></div>
+        <div class="nav-doc">📄 FAX注文書_20260713.tiff</div>
+        <div class="nav-doc">📄 △△物流_納品書_0712</div>
+        <div class="side-user"><span class="avatar">佐</span><div><b style="font-size:11.5px">佐藤 未来</b><div style="font-size:10px;color:var(--ink3)">reviewer</div></div></div>
+      </div>
+      <div class="main">
+        <div class="chat-body">
+          <div class="hello">こんにちは、佐藤さん。<b>帳票を任せてください。</b></div>
+          <div class="chat-card" style="position:relative">
+            <span class="mk" style="top:-11px;left:-11px">1</span>
+            <div class="chat-input"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#98a1af" stroke-width="2"><path d="M21 12.5V7a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v10a4 4 0 0 0 4 4h5.5"/><path d="M12 8v8M8 12h8" opacity="0"/><path d="M16 16l3 3m0-3l-3 3" opacity="0"/><path d="M8 12h8M12 8v8"/></svg>帳票をドラッグ＆ドロップ、または質問・指示を入力…</div>
+            <div class="chat-tools">
+              <span class="tool-pill">📎 ファイル（PDF / 画像 / TIFF / Office）</span>
+              <span class="tool-pill">請求書スキーマ v4</span>
+              <div class="send"><svg viewBox="0 0 24 24"><path d="M12 19V6M6 12l6-6 6 6"/></svg></div>
+            </div>
+          </div>
+          <div class="suggs" style="position:relative">
+            <span class="mk" style="top:-10px;left:-14px">2</span>
+            <span class="sugg">要確認の請求書を順に見せて</span><span class="sugg">このFAX注文書をまとめて抽出して</span><span class="sugg">先月のSTP率は？</span>
+          </div>
+          <div class="proc-card" style="position:relative">
+            <span class="mk" style="top:-11px;left:-11px">3</span>
+            <div class="spin"></div>
+            <div style="flex:1"><b style="font-size:12.5px">サンプル商事_請求書_6月分.pdf を抽出中</b><span style="font-size:11px;color:var(--ink3)">　OCR完了 → 項目抽出中（run_01J8MZ）</span><div class="pbar"><i></i></div></div>
+            <span class="chip st-processing">処理中</span>
+          </div>
+          <div class="confirm-card" style="position:relative">
+            <span class="mk" style="top:-11px;left:-11px">4</span>
+            <div style="display:flex;align-items:center;gap:10px"><b style="font-size:12.5px">エージェントの提案：</b><span style="font-size:12.5px;color:var(--ink2)">スキーマに「支払方法」を追加して再抽出しますか？（新しいRunを発行します）</span><span class="spacer"></span><span class="btn sm primary">承認して実行</span><span class="btn sm ghost">今回はしない</span></div>
+          </div>
+        </div>
+      </div>
+    </div></div>
+  </div></div>
+
+  <table class="spec">
+    <tr><th class="no">No</th><th>項目</th><th>種別</th><th>仕様・挙動</th><th class="ref">参照</th></tr>
+    <tr><td class="no">1</td><td>入力カード</td><td>複合入力</td><td>D&amp;D／ファイル選択（複数可）→ <code>POST /documents</code>。テキストは <code>POST /chat</code>（SSE）。使用スキーマをピル表示（クリックで変更）。アップロード完了後「抽出を開始」を自動提案</td><td class="ref">§6.3</td></tr>
+    <tr><td class="no">2</td><td>サジェスト</td><td>チップ</td><td>ロール・直近状態から動的生成（要確認あり→レビュー導線を最優先）。クリックで即送信</td><td class="ref">—</td></tr>
+    <tr><td class="no">3</td><td>進捗カード</td><td>ストリーム表示</td><td>SSEの<code>tool_call</code>イベントでノード進捗（OCR→抽出→検証）を更新。完了時に status chip が「要確認/確定」へ変化し、検証画面への導線ボタンを表示</td><td class="ref">§3.1</td></tr>
+    <tr><td class="no">4</td><td>承認カード</td><td>confirm_request</td><td>書込み系ツール（rerun_extract / update_schema / manage_rules）は必ず本カードで承認を取得してから実行。SSEイベント<code>confirm_request</code>に対応</td><td class="ref">§3.3 / §4.5</td></tr>
+  </table>
+  <p class="note"><b>空状態：</b>初回テナントは「サンプル請求書で試す」ボタンを中央に表示し、デモ帳票1枚で抽出→検証の一連を体験できるようにする。<b>エラー：</b>非対応形式は入力カード直下に「PDF・画像・TIFF・Word/Excelに対応しています（E1001）」を赤帯ではなく淡色で表示。</p>
+</section>
+
+<!-- ================= SCR-02 ドキュメント一覧 ================= -->
+<style>
+.list-tools{display:flex;align-items:center;gap:10px;padding:12px 20px;background:var(--bg)}
+.tab2{display:flex;background:#eceff3;border-radius:10px;padding:3px}
+.tab2 span{padding:5px 14px;border-radius:8px;font-size:12px;font-weight:700;color:var(--ink2)}
+.tab2 .on{background:#fff;color:var(--ink);box-shadow:var(--sh-s)}
+.filter{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--line-strong);border-radius:9px;padding:5px 11px;font-size:11.5px;font-weight:600;color:var(--ink2)}
+.filter::after{content:"▾";font-size:9px;color:var(--ink3)}
+.dtable{width:100%;border-collapse:collapse;background:#fff;font-size:12px}
+.dtable th{position:sticky;top:0;text-align:left;font-size:10.5px;font-weight:700;letter-spacing:.05em;color:var(--ink3);background:#fbfcfe;border-bottom:1px solid var(--line);padding:9px 14px;white-space:nowrap}
+.dtable td{padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
+.dtable tr.sel td{background:var(--brand-soft)}
+.dtable .docname{font-weight:700;color:var(--ink)}
+.dtable .sub{font-size:10.5px;color:var(--ink3);font-weight:500}
+.prio{display:inline-grid;place-items:center;min-width:30px;height:22px;border-radius:7px;font-family:var(--mono);font-size:11px;font-weight:800}
+.prio.p1{background:var(--red-soft);color:var(--red)}
+.prio.p2{background:var(--amber-soft);color:#b06a00}
+.prio.p3{background:#f0f3f7;color:var(--ink2)}
+.minisum{display:flex;gap:3px}
+.minisum i{width:9px;height:9px;border-radius:3px;display:inline-block}
+</style>
+<section class="sec" id="scr02">
+  <div class="sec-head"><span class="sec-no">06</span><h2>ドキュメント一覧 / レビューキュー<span class="scr-id">SCR-02</span></h2></div>
+  <p class="lead">「すべて」と「レビューキュー」の2タブ構成。キューは優先度スコア順（<code>w1×critical残数 + w2×経過時間 + w3×金額規模</code>、詳細設計 §8.5）で、上から順に <span class="kbd">Enter</span> で開けば最短動線になる。</p>
+
+  <div class="stage"><div class="frame">
+    <div class="frame-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><div class="frame-url">app.newfan-ocr.jp/documents?tab=queue</div></div>
+    <div class="screen"><div class="app" style="min-height:520px">
+      <div class="side">
+        <div class="side-logo"><div class="logo-mark"></div>NewFan OCR</div>
+        <div class="nav-new">新規</div>
+        <div class="nav-item"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a8 8 0 1 1-4-6.9"/><path d="M21 3v6h-6"/></svg>チャット</div>
+        <div class="nav-item on"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>ドキュメント</div>
+        <div class="nav-item"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5m0 14h16M8 15v-4m4 4V8m4 7v-6"/></svg>ダッシュボード</div>
+        <div class="side-user"><span class="avatar">佐</span><div><b style="font-size:11.5px">佐藤 未来</b><div style="font-size:10px;color:var(--ink3)">reviewer</div></div></div>
+      </div>
+      <div class="main">
+        <div class="topbar"><span class="ttl">ドキュメント</span><span class="spacer"></span><span class="inp" style="width:250px;position:relative">🔍 帳票名・取引先で検索<span class="mk" style="top:-12px;right:-12px;left:auto">3</span></span><span class="btn sm grad">＋ アップロード</span></div>
+        <div class="list-tools" style="position:relative">
+          <span class="mk" style="top:6px;left:6px">1</span>
+          <div class="tab2"><span>すべて</span><span class="on">レビューキュー（4）</span></div>
+          <span class="filter" style="position:relative">状態: 要確認<span class="mk" style="top:-13px;right:-13px;left:auto">2</span></span>
+          <span class="filter">種別: すべて</span>
+          <span class="filter">期間: 直近30日</span>
+        </div>
+        <div style="overflow:auto;position:relative">
+          <span class="mk" style="top:44px;right:14px">4</span>
+          <table class="dtable">
+            <tr><th>優先度</th><th>帳票</th><th>取引先</th><th>種別</th><th>状態</th><th>フィールド確信度</th><th>金額</th><th>担当</th><th>更新</th></tr>
+            <tr class="sel"><td><span class="prio p1">86</span></td><td><span class="docname">サンプル商事_請求書_6月分.pdf</span><div class="sub">doc_01J8MZ · 2ページ</div></td><td>株式会社サンプル商事</td><td>請求書</td><td><span class="chip st-review">要確認</span></td><td><div class="minisum"><i style="background:var(--amber)"></i><i style="background:var(--amber)"></i><i style="background:var(--green)"></i><i style="background:var(--green)"></i><i style="background:var(--blue)"></i></div><span class="sub">要確認2 / 全16</span></td><td style="font-family:var(--mono);font-weight:700">¥178,000</td><td>—</td><td class="sub">2分前</td></tr>
+            <tr><td><span class="prio p2">54</span></td><td><span class="docname">FAX注文書_20260713.tiff</span><div class="sub">doc_01J8MX · 5ページ · <span class="src vl">VL補完 p.3</span></div></td><td>△△物流 株式会社</td><td>注文書</td><td><span class="chip st-inreview">確認中</span></td><td><div class="minisum"><i style="background:var(--red)"></i><i style="background:var(--amber)"></i><i style="background:var(--green)"></i><i style="background:var(--green)"></i></div><span class="sub">要確認5 / 全22</span></td><td style="font-family:var(--mono);font-weight:700">¥64,900</td><td><span class="avatar" style="width:20px;height:20px;font-size:9px">田</span></td><td class="sub">18分前</td></tr>
+            <tr><td><span class="prio p3">21</span></td><td><span class="docname">□□印刷_納品書_0710.pdf</span><div class="sub">doc_01J8MQ · 1ページ</div></td><td>□□印刷 株式会社</td><td>納品書</td><td><span class="chip st-review">要確認</span></td><td><div class="minisum"><i style="background:var(--amber)"></i><i style="background:var(--green)"></i></div><span class="sub">要確認1 / 全9</span></td><td style="font-family:var(--mono);font-weight:700">¥12,650</td><td>—</td><td class="sub">1時間前</td></tr>
+            <tr><td><span class="prio p3">—</span></td><td><span class="docname">◇◇建材_請求書_6月.pdf</span><div class="sub">doc_01J8ML · 3ページ</div></td><td>◇◇建材 株式会社</td><td>請求書</td><td><span class="chip st-confirmed">確定</span></td><td><span class="sub">STP（自動確定）</span></td><td style="font-family:var(--mono);font-weight:700">¥231,000</td><td><span class="src rule" style="font-size:9px">ルール×3</span></td><td class="sub">3時間前</td></tr>
+            <tr><td><span class="prio p3">—</span></td><td><span class="docname">☆☆商店_請求書_6月.jpg</span><div class="sub">doc_01J8MH · 1ページ · スマホ撮影</div></td><td>☆☆商店</td><td>請求書</td><td><span class="chip st-exported">連携済</span></td><td><span class="sub">STP</span></td><td style="font-family:var(--mono);font-weight:700">¥8,800</td><td>—</td><td class="sub">昨日</td></tr>
+          </table>
+        </div>
+      </div>
+    </div></div>
+  </div></div>
+
+  <table class="spec">
+    <tr><th class="no">No</th><th>項目</th><th>種別</th><th>仕様・挙動</th><th class="ref">参照</th></tr>
+    <tr><td class="no">1</td><td>タブ</td><td>切替</td><td>「すべて」＝<code>GET /documents</code>（カーソルページング）、「レビューキュー」＝<code>GET /review/queue</code>（優先度降順・件数バッジ）。行 <span class="kbd">Enter</span>/クリックで SCR-03 へ</td><td class="ref">§6.2 / §8.5</td></tr>
+    <tr><td class="no">2</td><td>フィルタ</td><td>セレクト</td><td>状態（status enum 8種）・種別（doc_type）・期間。選択はURLクエリに反映（共有可能）</td><td class="ref">§7.2</td></tr>
+    <tr><td class="no">3</td><td>検索</td><td>テキスト</td><td>帳票名・取引先・external_ref の部分一致。300msデバウンス</td><td class="ref">—</td></tr>
+    <tr><td class="no">4</td><td>一覧行</td><td>行</td><td>確信度サマリ＝フィールド色の帯（要確認数/全数を併記）。VL補完ページを含む場合はバッジ表示。担当（review_tasks）とソフトロック中はアバター表示。優先度は キュータブのみ数値表示</td><td class="ref">§8.5</td></tr>
+  </table>
+  <p class="note"><b>空状態：</b>キュー0件時は「🎉 レビュー待ちはありません。STP率は本日92%です」とダッシュボード導線を表示。<b>ロック：</b>他者確認中の行を開くと閲覧専用＋「田中さんが確認中（残り4:12）」を表示（ソフトロック5分TTL）。</p>
+</section>
+
+<!-- ================= SCR-03 検証画面 ================= -->
+<style>
+.rv-head{display:flex;align-items:center;gap:12px;padding:10px 18px;background:var(--glass-strong);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);position:relative;z-index:6}
+.rv-prog{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:700}
+.rv-prog .seg{display:flex;height:7px;width:130px;border-radius:99px;overflow:hidden;background:#eceff3}
+.rv-body{display:flex;min-height:640px}
+.viewer{flex:1.12;background:#e9edf2;position:relative;display:flex;flex-direction:column}
+.v-tools{display:flex;align-items:center;gap:8px;padding:8px 14px;background:var(--glass);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);font-size:11px;color:var(--ink2);position:relative;z-index:5}
+.v-tools .pg{font-family:var(--mono);font-weight:700}
+.pagetab{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line-strong);background:#fff;border-radius:7px;padding:2px 9px;font-size:10.5px;font-weight:700}
+.pagetab.vl{border-color:#f3ddb0;background:var(--amber-soft);color:#b06a00}
+.v-canvas{flex:1;display:grid;place-items:center;padding:22px;position:relative;overflow:hidden}
+.paper{width:430px;background:#fff;border-radius:6px;box-shadow:0 14px 40px rgba(20,30,50,.16);padding:26px 30px;position:relative;font-size:9.5px;line-height:1.55;color:#252a31}
+.paper h5{text-align:center;font-size:15px;letter-spacing:.5em;text-indent:.5em;font-weight:800;margin:2px 0 12px}
+.inv-top{display:flex;justify-content:space-between;font-size:8.5px;color:#5d6673;margin-bottom:8px}
+.inv-to{font-size:11px;font-weight:700;border-bottom:1.5px solid #252a31;display:inline-block;padding:0 20px 2px 2px;margin-bottom:6px}
+.inv-issuer{position:absolute;right:30px;top:74px;text-align:left;font-size:8.5px;line-height:1.6}
+.inv-issuer b{font-size:10px}
+.seal{position:absolute;right:-6px;top:6px;width:30px;height:30px;border:1.6px solid #d33;border-radius:50%;color:#d33;display:grid;place-items:center;font-size:8px;font-weight:700;transform:rotate(8deg);opacity:.85}
+.inv-total{margin:14px 0 10px;display:flex;align-items:center;gap:12px}
+.inv-total .lab{font-size:9px;font-weight:700}
+.inv-total .val{font-size:15px;font-weight:800;font-family:var(--mono);border-bottom:2px solid #252a31;padding:0 14px 1px 4px}
+.itbl{width:100%;border-collapse:collapse;font-size:8.5px;margin-top:4px}
+.itbl th{background:#f2f5f8;border:1px solid #ccd3db;padding:3px 6px;font-weight:700}
+.itbl td{border:1px solid #ccd3db;padding:3px 6px}
+.itbl .r{text-align:right;font-family:var(--mono)}
+.inv-bank{margin-top:10px;font-size:8.5px}
+.bbox{position:absolute;border:2px solid;border-radius:4px;pointer-events:none}
+.bbox .tag{position:absolute;top:-15px;left:-2px;font-size:7.5px;font-weight:800;color:#fff;border-radius:4px 4px 4px 0;padding:1px 5px;letter-spacing:.02em;white-space:nowrap}
+.bx-ok{border-color:var(--green)}.bx-ok .tag{background:var(--green)}
+.bx-val{border-color:var(--blue)}.bx-val .tag{background:var(--blue)}
+.bx-pend{border-color:var(--amber);box-shadow:0 0 0 4px rgba(240,160,32,.18);animation:pulse 1.8s ease-in-out infinite}
+.bx-pend .tag{background:var(--amber)}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 4px rgba(240,160,32,.18)}50%{box-shadow:0 0 0 8px rgba(240,160,32,.06)}}
+.bx-lo{border-color:var(--red)}.bx-lo .tag{background:var(--red)}
+.pop{position:absolute;width:284px;background:var(--glass-strong);backdrop-filter:blur(16px);border:1px solid #fff;outline:1px solid var(--line-strong);border-radius:14px;box-shadow:var(--sh-l);padding:12px 14px;z-index:20;font-size:11px}
+.pop h6{font-size:11px;font-weight:800;display:flex;align-items:center;gap:7px;margin-bottom:8px}
+.crop{display:flex;gap:3px;justify-content:center;background:#fff;border:1px solid var(--line);border-radius:9px;padding:8px 6px;margin-bottom:9px}
+.crop .ch{width:26px;height:34px;border:1px solid var(--line);border-radius:5px;display:grid;place-items:center;font-family:var(--mono);font-size:17px;font-weight:800;position:relative}
+.crop .ch.bad{border-color:var(--red);background:var(--red-soft);color:var(--red)}
+.crop .ch.bad::after{content:attr(data-conf);position:absolute;bottom:-14px;font-size:7.5px;color:var(--red);font-weight:700}
+.pop .opt{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:9px;padding:6px 9px;margin-bottom:6px;background:#fff}
+.pop .opt.rec{border-color:var(--brand);background:var(--brand-soft)}
+.pop .opt .v{font-family:var(--mono);font-weight:800;font-size:12px}
+.pop .why{font-size:9.5px;color:var(--ink2);border-top:1px dashed var(--line);padding-top:7px;margin-top:3px}
+.fpanel{width:398px;flex:none;background:#fff;border-left:1px solid var(--line);display:flex;flex-direction:column}
+.fp-head{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);font-size:11.5px;font-weight:700}
+.frow{display:flex;align-items:center;gap:9px;padding:9px 14px;border-bottom:1px solid var(--line);font-size:11.5px}
+.frow .fl{width:112px;flex:none;color:var(--ink2);font-weight:600;font-size:10.5px}
+.frow .fv{flex:1;font-weight:700;font-family:var(--mono);font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.frow.pend{background:linear-gradient(90deg,var(--amber-soft),#fff 70%);border-left:3px solid var(--amber)}
+.frow.sel{outline:2px solid var(--brand);outline-offset:-2px;border-radius:2px}
+.frow.done .fv{color:var(--ink2)}
+.fp-sec{font-size:10px;font-weight:800;letter-spacing:.1em;color:var(--ink3);padding:9px 14px 3px;background:#fbfcfe}
+.gridedit{margin:8px 14px;border:1px solid var(--line-strong);border-radius:10px;overflow:hidden}
+.gridedit table{width:100%;border-collapse:collapse;font-size:10.5px}
+.gridedit th{background:#f6f8fa;padding:5px 8px;font-weight:700;color:var(--ink2);border-bottom:1px solid var(--line);text-align:left}
+.gridedit td{padding:5px 8px;border-bottom:1px solid var(--line);font-family:var(--mono)}
+.gridedit tr:last-child td{border-bottom:none}
+.cell-warn{background:var(--amber-soft);outline:1.5px solid var(--amber);outline-offset:-1.5px;border-radius:4px;font-weight:800;color:#8a5400}
+.rv-foot{display:flex;align-items:center;gap:14px;padding:8px 18px;border-top:1px solid var(--line);background:var(--glass-strong);backdrop-filter:blur(8px);font-size:10.5px;color:var(--ink2)}
+</style>
+<section class="sec" id="scr03">
+  <div class="sec-head"><span class="sec-no">07</span><h2>検証画面（HITL）<span class="scr-id">SCR-03</span></h2><span style="font-size:11px;font-weight:700;color:#b06a00;background:var(--amber-soft);border-radius:6px;padding:2px 8px">本プロダクトの中核画面</span></div>
+  <p class="lead">左＝帳票画像（前処理後PNG＝座標系の正、DD-01）、右＝フィールドパネル。<b>「AIの読み・直し・根拠」がすべて1画面で照合できる</b>ことが要件。要確認フィールドは常に最上部・琥珀色で、キーボードだけで一巡できる。</p>
+
+  <div class="stage"><div class="frame">
+    <div class="frame-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><div class="frame-url">app.newfan-ocr.jp/documents/doc_01J8MZ/review</div></div>
+    <div class="screen">
+      <div class="rv-head">
+        <span class="btn sm ghost">← 一覧</span>
+        <div><b style="font-size:13px">サンプル商事_請求書_6月分.pdf</b><span class="sub" style="font-size:10.5px;color:var(--ink3)">　run_01J8MZ · スキーマ: 請求書 v4</span></div>
+        <span class="chip st-inreview">確認中</span>
+        <span class="spacer"></span>
+        <div class="rv-prog" style="position:relative"><span class="mk" style="top:-13px;left:-13px">7</span><span class="seg"><i style="width:87%;background:var(--green)"></i><i style="width:13%;background:var(--amber)"></i></span>確定 14 · <b style="color:#b06a00">要確認 2</b></div>
+        <span class="btn primary disabled">確定（要確認 2件）</span>
+      </div>
+      <div class="rv-body">
+        <div class="viewer">
+          <div class="v-tools">
+            <span class="pagetab">p.1</span><span class="pagetab vl">p.2 · VL補完</span>
+            <span class="spacer"></span>
+            <span class="pg">100%</span><span class="btn sm ghost">＋</span><span class="btn sm ghost">−</span><span class="btn sm ghost">⟳</span><span class="btn sm">原本を表示</span>
+          </div>
+          <div class="v-canvas">
+            <div class="paper">
+              <div class="inv-top"><span>請求書番号: INV-2026-0630-118</span><span>請求日: 2026年6月30日</span></div>
+              <h5>請求書</h5>
+              <div class="inv-to">NewFan株式会社 御中</div>
+              <div style="font-size:8.5px;color:#5d6673">下記のとおりご請求申し上げます。</div>
+              <div class="inv-issuer"><b>株式会社サンプル商事</b><br>東京都渋谷区神南1-2-3<br>TEL 03-1234-5678<br>登録番号 T1234567890123<div class="seal">社印</div></div>
+              <div class="inv-total"><span class="lab">ご請求金額</span><span class="val">¥118,000 -</span><span style="font-size:8px;color:#5d6673">（税込）</span></div>
+              <div style="font-size:8.5px;margin-bottom:2px">お支払期限: 2026年7月31日</div>
+              <table class="itbl">
+                <tr><th>品目</th><th style="width:34px">数量</th><th style="width:52px">単価</th><th style="width:32px">税率</th><th style="width:58px">金額</th></tr>
+                <tr><td>データ整備業務（6月分）</td><td class="r">1</td><td class="r">100,000</td><td class="r">10%</td><td class="r">100,000</td></tr>
+                <tr><td>帳票スキャン代行</td><td class="r">10</td><td class="r">5,000</td><td class="r">10%</td><td class="r">50,000</td></tr>
+                <tr><td>資料印刷（軽減税率対象）</td><td class="r">1</td><td class="r">10,000</td><td class="r">8%</td><td class="r">10,000</td></tr>
+                <tr><td colspan="4" style="text-align:right;font-weight:700">小計</td><td class="r">160,000</td></tr>
+                <tr><td colspan="4" style="text-align:right;font-weight:700">消費税</td><td class="r">15,800</td></tr>
+                <tr><td colspan="4" style="text-align:right;font-weight:700">合計</td><td class="r" style="font-weight:800">178,000*</td></tr>
+              </table>
+              <div class="inv-bank">お振込先: みどり銀行 渋谷支店 普通 1234567 ｶ)ｻﾝﾌﾟﾙｼｮｳｼﾞ</div>
+              <!-- bboxes -->
+              <div class="bbox bx-ok" style="left:196px;top:74px;width:110px;height:14px"><span class="tag">取引先名 0.97</span></div>
+              <div class="bbox bx-val" style="left:196px;top:120px;width:128px;height:12px"><span class="tag">登録番号 ✓V-REGNO</span></div>
+              <div class="bbox bx-val" style="right:30px;top:26px;width:118px;height:12px"><span class="tag">請求日 ✓V-DATE</span></div>
+              <div class="bbox bx-pend" style="left:86px;top:158px;width:104px;height:22px"><span class="tag">合計金額 0.72</span></div>
+              <div class="bbox bx-pend" style="left:28px;top:190px;width:150px;height:12px"><span class="tag">支払期日 0.64</span></div>
+              <div class="bbox bx-ok" style="left:64px;top:330px;width:230px;height:12px"><span class="tag">振込先 0.91</span></div>
+              <span class="mk" style="left:60px;top:120px">1</span>
+              <span class="mk" style="left:198px;top:166px">2</span>
+            </div>
+            <!-- char diff popover -->
+            <div class="pop" style="right:18px;bottom:96px">
+              <span class="mk" style="top:-11px;left:-11px">3</span>
+              <h6>合計金額（税込）<span class="conf mid" style="margin-left:auto"><span class="bar"><i></i></span>0.72</span></h6>
+              <div class="crop">
+                <span class="ch">¥</span><span class="ch">1</span><span class="ch bad" data-conf="0.41">1</span><span class="ch">8</span><span class="ch">,</span><span class="ch">0</span><span class="ch">0</span><span class="ch">0</span>
+              </div>
+              <div class="opt"><span class="kbd">1</span><span class="v">¥118,000</span><span class="src ocr">OCR原値</span></div>
+              <div class="opt rec"><span class="kbd">2</span><span class="v">¥178,000</span><span class="src llm">LLM補正</span><span class="vbadge">V-SUM</span><span style="margin-left:auto;font-size:9px;font-weight:800;color:var(--brand-deep)">推奨</span></div>
+              <div class="opt" style="color:var(--ink3)"><span class="kbd">e</span>手入力…</div>
+              <div class="why">根拠: 混同ペア <b>1↔7</b>（2文字目 conf 0.41）。明細合計 ¥178,000 と一致（V-SUM）。類似修正 <code>cor_01H8…</code>（同一取引先・5月分）</div>
+            </div>
+          </div>
+        </div>
+        <div class="fpanel">
+          <div class="fp-head">フィールド<span class="spacer"></span><span class="filter" style="font-size:10px;padding:3px 9px">要確認のみ</span></div>
+          <div class="fp-sec">要確認（2）</div>
+          <div class="frow pend sel" style="position:relative"><span class="mk" style="top:-3px;left:-11px">4</span><span class="fl">合計金額（税込）</span><span class="fv">¥178,000</span><span class="src llm">LLM補正</span><span class="conf mid"><span class="bar"><i></i></span>0.72</span></div>
+          <div class="frow pend"><span class="fl">支払期日</span><span class="fv">2026-07-31</span><span class="src ocr">OCR原値</span><span class="conf mid"><span class="bar"><i style="width:64%"></i></span>0.64</span></div>
+          <div class="fp-sec">確定済み（14）</div>
+          <div class="frow done" style="position:relative"><span class="mk" style="top:-3px;left:-11px">5</span><span class="fl">取引先名</span><span class="fv">株式会社サンプル商事</span><span class="src ocr">OCR原値</span><span class="conf hi"><span class="bar"><i></i></span>0.97</span></div>
+          <div class="frow done"><span class="fl">請求日</span><span class="fv">2026-06-30</span><span class="vbadge">V-DATE</span><span class="conf ok"><span class="bar"><i></i></span>0.99</span></div>
+          <div class="frow done"><span class="fl">登録番号</span><span class="fv">T1234567890123</span><span class="vbadge">V-REGNO</span><span class="conf ok"><span class="bar"><i></i></span>0.98</span></div>
+          <div class="frow done"><span class="fl">振込先</span><span class="fv">みどり銀行 渋谷支店 普通 1234567</span><span class="vbadge">V-BANK</span><span class="conf hi"><span class="bar"><i style="width:91%"></i></span>0.91</span></div>
+          <div class="fp-sec" style="position:relative">明細（3行）<span class="mk" style="top:2px;right:10px;left:auto">6</span></div>
+          <div class="gridedit">
+            <table>
+              <tr><th>品目</th><th>数量</th><th>単価</th><th>税率</th><th>金額</th></tr>
+              <tr><td style="font-family:inherit">データ整備業務（6月分）</td><td>1</td><td>100,000</td><td>10%</td><td>100,000</td></tr>
+              <tr><td style="font-family:inherit">帳票スキャン代行</td><td><span class="cell-warn">10</span></td><td>5,000</td><td>10%</td><td>50,000</td></tr>
+              <tr><td style="font-family:inherit">資料印刷（軽減税率）</td><td>1</td><td>10,000</td><td>8%</td><td>10,000</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="rv-foot" style="position:relative">
+        <span class="mk" style="top:-12px;left:6px">8</span>
+        <span><span class="kbd">n</span>/<span class="kbd">p</span> 次/前の要確認</span>
+        <span><span class="kbd">Enter</span> 承認</span>
+        <span><span class="kbd">1</span>/<span class="kbd">2</span> 候補採択</span>
+        <span><span class="kbd">e</span> 編集</span>
+        <span><span class="kbd">t</span> 明細へ</span>
+        <span><span class="kbd">⌘</span>＋<span class="kbd">Enter</span> 確定</span>
+        <span class="spacer"></span>
+        <span style="position:relative"><span class="mk" style="top:-13px;right:-13px;left:auto">9</span>由来: <span class="src ocr">OCR</span><span class="src llm">LLM</span><span class="src rule">ルール</span><span class="src human">人手</span><span class="src vl">VL</span></span>
+      </div>
+    </div>
+  </div></div>
+
+  <table class="spec">
+    <tr><th class="no">No</th><th>項目</th><th>種別</th><th>仕様・挙動</th><th class="ref">参照</th></tr>
+    <tr><td class="no">1</td><td>bboxオーバーレイ</td><td>SVG/絶対配置</td><td>座標変換 <code>display = bbox × (renderedWidth / page.width)</code>。色＝フィールド状態（琥珀=要確認・緑=良好・青=検証合格・赤=低確信）。ラベルにフィールド名＋conf。クリックで右パネルの該当行を選択</td><td class="ref">§8.3 DocViewer</td></tr>
+    <tr><td class="no">2</td><td>選択ハイライト</td><td>状態</td><td>選択中フィールドのbboxはパルス発光＋スムーズスクロールで中央へ。右パネル行とは常に双方向同期</td><td class="ref">§8.3</td></tr>
+    <tr><td class="no">3</td><td>文字差分ポップオーバー</td><td>ガラスカード</td><td>char_boxes を用い該当文字だけをセル拡大。低confセルは赤＋数値表示。候補は <span class="kbd">1</span>=OCR原値／<span class="kbd">2</span>=補正案（推奨には根拠バッジ）／<span class="kbd">e</span>=手入力。「根拠」に混同ペア・V-SUM整合・memory_refs を明示。DD-10により候補は混同表/修正メモリ由来のみ</td><td class="ref">§5.3.2 / §8.3 CharDiffPopover</td></tr>
+    <tr><td class="no">4</td><td>フィールド行</td><td>リスト</td><td>並び＝pending→critical→conf昇順。編集は500msデバウンスで <code>POST /corrections</code> 自動保存（version付き楽観ロック）。承認で review_status=approved</td><td class="ref">§6.3 / §8.3 FieldPanel</td></tr>
+    <tr><td class="no">5</td><td>確定済み行</td><td>リスト</td><td>再編集可能（編集すると pending に戻る）。検証バッジホバーでチェック内訳（V-SUM: 160,000+15,800+2,200…）を表示</td><td class="ref">§5.7.3</td></tr>
+    <tr><td class="no">6</td><td>明細グリッド</td><td>表エディタ</td><td>セル選択で該当セルbboxをビューアにハイライト。行追加/削除、列型検証（数量×単価=金額のV-QTY違反セルを琥珀表示）。<span class="kbd">t</span>でフォーカス</td><td class="ref">§8.3 TableGridEditor</td></tr>
+    <tr><td class="no">7</td><td>進捗・確定</td><td>ConfirmBar</td><td>要確認&gt;0の間disabled＋残数表示。0件で活性化し <span class="kbd">⌘Enter</span> 可。確定→<code>POST /confirm</code>（202）→ グラフresume → 学習 → webhook。pending残しの強制確定は二段確認ダイアログ</td><td class="ref">§3.2 / §8.3 ConfirmBar</td></tr>
+    <tr><td class="no">8</td><td>ショートカット</td><td>常時表示</td><td>§8.4の全キーを常時フッタ表示（習熟後は折りたたみ可）。全操作がキーボード完結すること</td><td class="ref">§8.4</td></tr>
+    <tr><td class="no">9</td><td>由来凡例</td><td>凡例</td><td>AuditBadgeの凡例。VL補完ページ（琥珀タブ）は当該ページ全フィールドがレビュー必須である旨をタブホバーで説明</td><td class="ref">DD-09 / §11</td></tr>
+  </table>
+
+  <h3>状態バリエーション</h3>
+  <div class="comp-grid">
+    <div class="comp">
+      <h4>A. 全件確認済み → 確定可能</h4>
+      <div style="display:flex;align-items:center;gap:12px;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:10px 14px">
+        <span class="rv-prog"><span class="seg"><i style="width:100%;background:var(--green)"></i></span>確定 16 · 要確認 0</span>
+        <span class="spacer"></span><span class="btn primary">確定して連携へ　<span class="kbd" style="border-color:rgba(255,255,255,.5);background:transparent;color:#fff">⌘Enter</span></span>
+      </div>
+      <p class="note">確定後トースト「確定しました。会計システムへ連携します（export.delivered で完了通知）」。ボタン名は結果まで一貫（確定→確定しました）。</p>
+    </div>
+    <div class="comp">
+      <h4>B. VL補完ページ表示中</h4>
+      <div style="display:flex;align-items:center;gap:10px;background:var(--amber-soft);border:1px solid #f3ddb0;border-radius:12px;padding:10px 14px;font-size:12px">
+        <span class="src vl">VL補完</span><b>このページはVLモデルによる画像ベース補完です。</b><span style="color:#8a5400">全フィールドの目視確認が必要です（自動確定されません）。</span>
+      </div>
+      <p class="note">ページタブを琥珀化し、バナーを常時表示。VL由来フィールドは grounding 0.7 上限（DD-09）。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= SCR-04 ダッシュボード ================= -->
+<style>
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:16px 20px 4px}
+.kpi{background:#fff;border:1px solid var(--line);border-radius:14px;padding:13px 16px;box-shadow:var(--sh-s)}
+.kpi .k{font-size:10.5px;font-weight:700;color:var(--ink3)}
+.kpi .v{font-size:23px;font-weight:800;font-family:var(--mono);letter-spacing:-.02em;margin:2px 0}
+.kpi .d{font-size:10.5px;font-weight:700}
+.up{color:var(--green)}.dn{color:var(--red)}
+.db-row{display:grid;grid-template-columns:1.5fr 1fr 1fr;gap:12px;padding:12px 20px 20px}
+.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--sh-s)}
+.card h5{font-size:11px;font-weight:800;color:var(--ink2);margin-bottom:12px;letter-spacing:.04em}
+.bars{display:flex;align-items:flex-end;gap:10px;height:120px;padding:0 4px}
+.bars .b{flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;font-size:9px;color:var(--ink3);font-weight:600}
+.bars .b i{width:100%;border-radius:6px 6px 3px 3px;background:linear-gradient(180deg,#5aa7ff,#8cc4ff)}
+.bars .b.hot i{background:var(--grad)}
+.donut{width:110px;height:110px;border-radius:50%;background:conic-gradient(var(--green) 0 82%,var(--amber) 82% 96%,var(--red) 96% 100%);position:relative;margin:6px auto}
+.donut::after{content:"82%";position:absolute;inset:16px;background:#fff;border-radius:50%;display:grid;place-items:center;font-family:var(--mono);font-weight:800;font-size:17px}
+.leg{display:flex;flex-direction:column;gap:5px;font-size:10.5px;color:var(--ink2);margin-top:8px}
+.leg i{width:9px;height:9px;border-radius:3px;display:inline-block;margin-right:6px}
+.lstat{display:flex;justify-content:space-between;align-items:center;font-size:11.5px;padding:7px 2px;border-bottom:1px dashed var(--line)}
+.lstat b{font-family:var(--mono);font-size:13px}
+</style>
+<section class="sec" id="scr04">
+  <div class="sec-head"><span class="sec-no">08</span><h2>ダッシュボード<span class="scr-id">SCR-04</span></h2></div>
+  <p class="lead">運用者（admin）が「自動化がどれだけ進んだか」「学習が効いているか」「コストは適正か」を1画面で判断する。KPIは可観測性設計（詳細設計 §12.1）のメトリクスと1:1対応。</p>
+  <div class="stage"><div class="frame">
+    <div class="frame-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><div class="frame-url">app.newfan-ocr.jp/dashboard?range=30d</div></div>
+    <div class="screen">
+      <div class="topbar"><span class="ttl">ダッシュボード</span><span class="spacer"></span><span class="filter">種別: すべて</span><span class="filter" style="position:relative">期間: 直近30日<span class="mk" style="top:-13px;right:-13px;left:auto">1</span></span><span class="btn sm">CSVダウンロード</span></div>
+      <div class="kpis" style="position:relative">
+        <span class="mk" style="top:4px;left:8px">2</span>
+        <div class="kpi"><div class="k">STP率（自動確定）</div><div class="v">82.4%</div><div class="d up">▲ +3.1pt / 前月</div></div>
+        <div class="kpi"><div class="k">フィールド精度（サンプル監査）</div><div class="v">96.8%</div><div class="d up">▲ +0.4pt</div></div>
+        <div class="kpi"><div class="k">VLフォールバック率</div><div class="v">6.2%</div><div class="d dn">▼ -1.8pt（良化）</div></div>
+        <div class="kpi"><div class="k">LLMコスト</div><div class="v">¥41,230</div><div class="d" style="color:var(--ink3)">¥16.5 / ドキュメント</div></div>
+      </div>
+      <div class="db-row">
+        <div class="card" style="position:relative"><span class="mk" style="top:-11px;left:-11px">3</span><h5>STP率の推移（週次）</h5>
+          <div class="bars">
+            <div class="b"><i style="height:52%"></i>W1</div><div class="b"><i style="height:58%"></i>W2</div><div class="b"><i style="height:57%"></i>W3</div><div class="b"><i style="height:66%"></i>W4</div><div class="b"><i style="height:71%"></i>W5</div><div class="b"><i style="height:74%"></i>W6</div><div class="b"><i style="height:79%"></i>W7</div><div class="b hot"><i style="height:82%"></i>今週</div>
+          </div>
+        </div>
+        <div class="card"><h5>処理内訳（今月 2,498件）</h5>
+          <div class="donut"></div>
+          <div class="leg"><span><i style="background:var(--green)"></i>自動確定（STP） 82%</span><span><i style="background:var(--amber)"></i>人手レビュー後確定 14%</span><span><i style="background:var(--red)"></i>失敗・再実行 4%</span></div>
+        </div>
+        <div class="card" style="position:relative"><span class="mk" style="top:-11px;left:-11px">4</span><h5>学習の効き（修正の再利用）</h5>
+          <div class="lstat"><span>修正メモリ由来の自動補正</span><b>312<span style="font-size:9px;color:var(--green)"> 採択88%</span></b></div>
+          <div class="lstat"><span>ルール自動適用</span><b>1,204</b></div>
+          <div class="lstat"><span>新規ルール（要承認）</span><b style="color:#b06a00">3</b></div>
+          <div class="lstat" style="border:none"><span>レビュー時間 中央値</span><b>1分42秒</b></div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+  <table class="spec">
+    <tr><th class="no">No</th><th>項目</th><th>仕様・挙動</th><th class="ref">参照</th></tr>
+    <tr><td class="no">1</td><td>期間/種別フィルタ</td><td>全カードに適用。URLクエリ同期。既定30日</td><td class="ref">—</td></tr>
+    <tr><td class="no">2</td><td>KPIカード</td><td><code>stp_rate</code>・<code>field_accuracy_sampled</code>・<code>fallback_page_ratio</code>・<code>llm_cost_jpy_total</code> に対応。精度カードは「週次サンプル監査（50フィールド/テナント）」由来である旨をツールチップで明示（過信防止）</td><td class="ref">§12.1–12.2</td></tr>
+    <tr><td class="no">3</td><td>STP推移</td><td>週次バー。クリックで当該週のレビュー済み一覧へドリルダウン</td><td class="ref">§12.1</td></tr>
+    <tr><td class="no">4</td><td>学習の効き</td><td>「修正メモリ再利用」「ルール適用」「新規ルール承認待ち」を表示。承認待ちクリックで SCR-05 へ。<b>学習が価値になっていることを運用者に見せる本プロダクトの差別化ウィジェット</b></td><td class="ref">§5.8 / correction_reuse_hits_total</td></tr>
+  </table>
+</section>
+
+<!-- ================= SCR-05 ルール管理 ================= -->
+<style>
+.rulejson{background:#0f1620;color:#c8e3ff;border-radius:12px;padding:12px 14px;font-family:var(--mono);font-size:10.5px;line-height:1.7;overflow-x:auto}
+.rulejson .k{color:#7ad8cf}.rulejson .s{color:#ffd08a}
+.rtype{font-family:var(--mono);font-size:10px;font-weight:700;border-radius:6px;padding:2px 7px}
+.rt-regex{background:var(--blue-soft);color:#1b6fd0}.rt-vocab{background:var(--green-soft);color:#0b7a50}.rt-hint{background:var(--violet-soft);color:#6a58e8}.rt-format{background:#f0f3f7;color:var(--ink2)}
+</style>
+<section class="sec" id="scr05">
+  <div class="sec-head"><span class="sec-no">09</span><h2>ルール管理<span class="scr-id">SCR-05</span></h2></div>
+  <p class="lead">修正学習エージェントが抽出したルール（draft）を、検証レポート付きで人が承認・退役する画面。「AIが学んだこと」を透明に管理し、勝手に振る舞いが変わらない安心感をつくる（ルールライフサイクル：詳細設計 §5.8.4）。</p>
+  <div class="stage"><div class="frame">
+    <div class="frame-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><div class="frame-url">app.newfan-ocr.jp/rules</div></div>
+    <div class="screen">
+      <div class="topbar"><span class="ttl">ルール管理</span><span class="chip st-review" style="margin-left:4px">承認待ち 3</span><span class="spacer"></span><span class="filter">状態: すべて</span><span class="filter">帳票種別: 請求書</span></div>
+      <div style="padding:14px 20px;display:grid;grid-template-columns:1.55fr 1fr;gap:14px">
+        <div>
+          <table class="dtable" style="border:1px solid var(--line);border-radius:12px;overflow:hidden">
+            <tr><th>ルール</th><th>種別</th><th>対象</th><th>状態</th><th>検証レポート</th><th>適用数</th><th></th></tr>
+            <tr class="sel"><td><b>伝票番号は先頭「7」の6桁</b><div class="sub">rul_01J8… · agent生成 · 根拠6件</div></td><td><span class="rtype rt-format">format</span></td><td>請求書 · サンプル商事 · 伝票番号</td><td><span class="chip st-review">承認待ち</span></td><td style="position:relative"><span class="mk" style="top:-12px;left:-12px">2</span><b class="up">再現 6/6</b> · 回帰 0</td><td class="sub">—</td><td><span class="btn sm primary">有効化</span></td></tr>
+            <tr><td><b>「株式会社サンフル商事」→「サンプル商事」</b><div class="sub">rul_01J8… · agent生成 · 根拠12件</div></td><td><span class="rtype rt-vocab">vocab_map</span></td><td>すべて · サンプル商事 · 取引先名</td><td><span class="chip st-confirmed">有効</span></td><td><b class="up">再現 12/13</b> · 回帰 0</td><td class="sub" style="font-family:var(--mono);font-weight:700">418</td><td><span class="btn sm">退役</span></td></tr>
+            <tr><td><b>金額の「.」は桁区切り誤読として扱う</b><div class="sub">rul_01J7… · agent生成 · 根拠9件</div></td><td><span class="rtype rt-regex">regex_replace</span></td><td>請求書 · すべて · money_jpy</td><td><span class="chip st-confirmed">有効</span></td><td><b class="up">再現 9/9</b> · 回帰 0</td><td class="sub" style="font-family:var(--mono);font-weight:700">771</td><td><span class="btn sm">退役</span></td></tr>
+            <tr><td><b>この取引先の日付は和暦表記</b><div class="sub">rul_01J6… · agent生成 · 根拠3件（決定論化不可）</div></td><td><span class="rtype rt-hint">llm_hint</span></td><td>納品書 · □□印刷 · 日付</td><td><span class="chip st-processing">検証中</span></td><td>ホールドアウト実行中…</td><td class="sub">—</td><td><span class="btn sm ghost">詳細</span></td></tr>
+            <tr><td><b>数量「1O」→「10」</b><div class="sub">rul_01J5… · 人手作成</div></td><td><span class="rtype rt-vocab">vocab_map</span></td><td>すべて · すべて · number</td><td><span class="chip st-failed">退役</span></td><td class="sub">回帰1件のため差戻し</td><td class="sub" style="font-family:var(--mono)">96</td><td><span class="btn sm ghost">履歴</span></td></tr>
+          </table>
+        </div>
+        <div class="card" style="position:relative"><span class="mk" style="top:-11px;left:-11px">1</span>
+          <h5>選択中のルール — rul_01J8…</h5>
+          <div class="rulejson">{<br>&nbsp;&nbsp;<span class="k">"rule_type"</span>: <span class="s">"format"</span>,<br>&nbsp;&nbsp;<span class="k">"field"</span>: <span class="s">"伝票番号"</span>,<br>&nbsp;&nbsp;<span class="k">"pattern"</span>: <span class="s">"^7\\d{5}$"</span>,<br>&nbsp;&nbsp;<span class="k">"on_violation"</span>: <span class="s">"needs_review"</span>,<br>&nbsp;&nbsp;<span class="k">"evidence_ids"</span>: [<span class="s">"cor_01H8…"</span>, …6件]<br>}</div>
+          <p class="note" style="margin-top:10px">根拠となった修正ログ6件へのリンク、適用プレビュー（直近の帳票3件に対する dry-run 結果）、監査ログ（誰がいつ有効化したか）を表示。</p>
+          <div style="display:flex;gap:8px"><span class="btn sm primary">有効化</span><span class="btn sm">dry-run を見る</span><span class="btn sm ghost" style="color:var(--red)">破棄</span></div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+  <table class="spec">
+    <tr><th class="no">No</th><th>項目</th><th>仕様・挙動</th><th class="ref">参照</th></tr>
+    <tr><td class="no">1</td><td>ルール詳細</td><td>rule_json・根拠修正ログ・dry-runプレビュー・監査履歴。有効化/退役は <code>PATCH /rules/{id}</code>、全操作をaudit_logsへ</td><td class="ref">§5.8.4 / §11</td></tr>
+    <tr><td class="no">2</td><td>検証レポート</td><td>「過去修正の再現率 ≥90% かつ 確定済み正解値への回帰0件」で有効化ボタン活性。未達はグレーアウト＋理由表示</td><td class="ref">§2.5 rules.validation_pass</td></tr>
+  </table>
+</section>
+
+<!-- ================= SCR-06 スキーマ管理 ================= -->
+<style>
+.tgl{width:30px;height:17px;border-radius:99px;background:#d9dfe7;position:relative;display:inline-block;vertical-align:middle}
+.tgl::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;box-shadow:var(--sh-s)}
+.tgl.on{background:var(--brand-deep)}.tgl.on::after{left:15px}
+.srow{display:flex;align-items:center;gap:12px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:9px 14px;margin-bottom:8px;font-size:12px}
+.srow .h{width:16px;color:var(--ink3);cursor:grab}
+.srow .nm{width:170px;font-weight:700}
+.srow .nm .sub{font-family:var(--mono);font-size:9.5px;color:var(--ink3);font-weight:500;display:block}
+.typepill{font-family:var(--mono);font-size:10.5px;font-weight:700;background:#f0f3f7;border-radius:7px;padding:3px 9px;color:var(--ink2)}
+.srow label{font-size:10.5px;color:var(--ink2);display:inline-flex;align-items:center;gap:5px}
+</style>
+<section class="sec" id="scr06">
+  <div class="sec-head"><span class="sec-no">10</span><h2>スキーマ管理<span class="scr-id">SCR-06</span></h2></div>
+  <p class="lead">従来OCRの「テンプレート登録」を置き換える<b>「意味定義」</b>の管理画面。座標は一切登場せず、欲しい項目の名前・型・重要度だけを定義する。変更は必ず新しい版として保存（版管理：詳細設計 §5.5）。</p>
+  <div class="stage"><div class="frame">
+    <div class="frame-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><div class="frame-url">app.newfan-ocr.jp/schemas/invoice</div></div>
+    <div class="screen">
+      <div class="topbar"><span class="ttl">スキーマ: 請求書</span><span class="chip st-confirmed">v4 · 有効</span><span class="btn sm ghost">v3 と比較</span><span class="spacer"></span><span class="btn sm ghost">変更を破棄</span><span class="btn sm primary" style="position:relative">新しい版として保存（v5）<span class="mk" style="top:-13px;right:-13px;left:auto">2</span></span></div>
+      <div style="padding:16px 20px">
+        <div class="srow" style="position:relative"><span class="mk" style="top:-11px;left:-11px">1</span><span class="h">⠿</span><span class="nm">取引先名<span class="sub">issuer_name</span></span><span class="typepill">string ▾</span><label><span class="tgl on"></span>必須</label><label><span class="tgl on"></span>critical</label><span class="spacer"></span><span class="btn sm ghost">削除</span></div>
+        <div class="srow"><span class="h">⠿</span><span class="nm">合計金額（税込）<span class="sub">total_amount</span></span><span class="typepill">money_jpy ▾</span><label><span class="tgl on"></span>必須</label><label><span class="tgl on"></span>critical</label><span class="spacer"></span><span class="btn sm ghost">削除</span></div>
+        <div class="srow"><span class="h">⠿</span><span class="nm">登録番号<span class="sub">registration_no</span></span><span class="typepill">jp_invoice_reg_no ▾</span><label><span class="tgl"></span>必須</label><label><span class="tgl on"></span>critical</label><span class="spacer"></span><span class="btn sm ghost">削除</span></div>
+        <div class="srow" style="border-color:#cfe0ff;background:var(--brand-soft)"><span class="h">⠿</span><span class="nm">支払方法<span class="sub">payment_method（追加中）</span></span><span class="typepill">string ▾</span><label><span class="tgl"></span>必須</label><label><span class="tgl"></span>critical</label><span class="spacer"></span><span class="btn sm ghost">削除</span></div>
+        <div class="srow" style="align-items:flex-start"><span class="h">⠿</span><span class="nm">明細<span class="sub">line_items</span></span><span class="typepill">table ▾</span>
+          <div style="flex:1;font-size:10.5px;color:var(--ink2)">列: 品目(string) · 数量(number) · 単価(money_jpy) · 税率(tax_rate_jp) · 金額(money_jpy)　<span style="color:var(--brand-deep);font-weight:700">列を編集</span></div>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:4px"><span class="btn sm">＋ 項目を追加</span><span class="btn sm ghost" style="position:relative">💬 チャットで追加を依頼<span class="mk" style="top:-13px;right:-13px;left:auto">3</span></span></div>
+      </div>
+    </div>
+  </div></div>
+  <table class="spec">
+    <tr><th class="no">No</th><th>項目</th><th>仕様・挙動</th><th class="ref">参照</th></tr>
+    <tr><td class="no">1</td><td>項目行</td><td>型は正規化器レジストリ（§5.6）から選択。criticalトグルON＝閾値0.90＋レビュー方針厳格化。並び替えは表示順のみ（抽出結果に影響しない旨をツールチップ）</td><td class="ref">§5.5–5.6</td></tr>
+    <tr><td class="no">2</td><td>版保存</td><td>更新は常に新版作成（<code>PUT /schemas</code>）。有効版の切替時、進行中Runには影響しない（Run開始時にschema_idを固定記録）</td><td class="ref">§7.2 field_schemas</td></tr>
+    <tr><td class="no">3</td><td>チャット連携</td><td>SCR-01のエージェント経由でも編集可能（update_schemaツール→承認カード→本画面と同一の版管理を通る）</td><td class="ref">§4.5</td></tr>
+  </table>
+</section>
+
+<!-- ================= 7. レスポンシブ / A11y ================= -->
+<style>
+.phone{width:250px;background:#fff;border:1px solid var(--line-strong);border-radius:26px;box-shadow:var(--sh-l);padding:12px 10px;margin:0 auto}
+.phone .notch{width:70px;height:5px;border-radius:99px;background:#e2e7ee;margin:0 auto 10px}
+.qcard{border:1px solid var(--line);border-radius:14px;padding:10px 12px;margin-bottom:8px;font-size:11px}
+.focus-demo{display:inline-flex;padding:7px 15px;border-radius:10px;background:#fff;border:1px solid var(--line-strong);font-size:12.5px;font-weight:700;outline:2.5px solid var(--brand);outline-offset:2px}
+</style>
+<section class="sec" id="resp">
+  <div class="sec-head"><span class="sec-no">11</span><h2>レスポンシブ / アクセシビリティ方針</h2></div>
+  <div class="comp-grid">
+    <div class="comp">
+      <h4>ブレークポイントと提供機能</h4>
+      <table class="spec" style="margin-top:0">
+        <tr><th>幅</th><th>対象</th><th>提供範囲</th></tr>
+        <tr><td class="ref">≥1280px</td><td>PC</td><td>全機能。SCR-03は本レイアウト</td></tr>
+        <tr><td class="ref">768–1279px</td><td>タブレット</td><td>SCR-03は上下分割（画像上/フィールド下）。承認・候補採択中心、明細の複雑編集は非推奨バナー</td></tr>
+        <tr><td class="ref">&lt;768px</td><td>モバイル</td><td>キュー確認・単純承認・チャットのみ（右図）。文字差分の1タップ採択に最適化</td></tr>
+      </table>
+      <h4 style="margin-top:16px">アクセシビリティ（品質基準）</h4>
+      <div class="row" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="focus-demo">フォーカスリング常時可視</span><span style="font-size:12px;color:var(--ink2)">:focus-visible / 2.5px ブランド色</span></div>
+      <p class="note">・コントラストAA以上（薄墨#5D6673を本文最小濃度とする）<br>・色だけに依存しない（confidenceは数値併記、状態はテキストchip）<br>・トースト/進捗は <code>aria-live="polite"</code>、確定完了は <code>assertive</code><br>・SCR-03は全操作キーボード完結（§8.4）、bboxにはフィールド名のaria-label<br>・<code>prefers-reduced-motion</code> でパルス/スピナーを静的表示に切替</p>
+    </div>
+    <div class="comp">
+      <h4>モバイル：レビューキュー（参考）</h4>
+      <div class="phone">
+        <div class="notch"></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><div class="logo-mark" style="width:20px;height:20px;border-radius:6px"></div><b style="font-size:12px">要確認 4件</b><span class="spacer"></span><span class="avatar" style="width:22px;height:22px;font-size:9px">佐</span></div>
+        <div class="qcard" style="border-left:3px solid var(--amber)">
+          <b>サンプル商事_請求書_6月分</b><div style="color:var(--ink3);font-size:10px;margin:2px 0 6px">要確認2 · ¥178,000 · 2分前</div>
+          <div style="display:flex;align-items:center;gap:6px;background:var(--amber-soft);border-radius:9px;padding:6px 8px;font-size:10.5px"><b>合計金額</b><span style="font-family:var(--mono);font-weight:800">¥178,000</span><span class="src llm" style="font-size:8.5px">LLM補正</span><span class="spacer"></span><span class="btn sm primary" style="padding:3px 9px;font-size:10px">採用</span></div>
+        </div>
+        <div class="qcard"><b>FAX注文書_20260713</b><div style="color:var(--ink3);font-size:10px">要確認5 · 田中さん確認中</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 8. API対応表 ================= -->
+<section class="sec" id="api">
+  <div class="sec-head"><span class="sec-no">12</span><h2>画面 ⇔ API・イベント対応表</h2></div>
+  <table class="spec">
+    <tr><th>画面</th><th>読み込み</th><th>書き込み</th><th>リアルタイム</th></tr>
+    <tr><td><b>SCR-01</b> チャットホーム</td><td class="ref">GET /documents（最近）</td><td class="ref">POST /documents · POST /documents/{id}/extract · POST /chat</td><td class="ref">SSE: token / tool_call / confirm_request / done</td></tr>
+    <tr><td><b>SCR-02</b> 一覧/キュー</td><td class="ref">GET /documents · GET /review/queue</td><td class="ref">—（一括再実行は /extract）</td><td class="ref">webhook起点の通知バッジ（needs_review 等）</td></tr>
+    <tr><td><b>SCR-03</b> 検証</td><td class="ref">GET /documents/{id}/result · GET /pages/{n}/image</td><td class="ref">POST /corrections（自動保存・version付） · POST /confirm</td><td class="ref">409差分マージ / 確定完了トースト（document.confirmed）</td></tr>
+    <tr><td><b>SCR-04</b> ダッシュボード</td><td class="ref">メトリクス集計API（stp_rate ほか §12.1）</td><td class="ref">—</td><td class="ref">—（日次更新）</td></tr>
+    <tr><td><b>SCR-05</b> ルール管理</td><td class="ref">GET /tenants/{id}/rules</td><td class="ref">PATCH /rules/{id}（active/retired）</td><td class="ref">検証中→完了の状態ポーリング</td></tr>
+    <tr><td><b>SCR-06</b> スキーマ管理</td><td class="ref">GET /schemas</td><td class="ref">PUT /schemas（新版作成）</td><td class="ref">—</td></tr>
+  </table>
+  <div class="callout">実装時は <code>packages/schemas</code>（Pydantic）から生成したOpenAPIクライアントを共用し、本書のフィールド名（confidence / grounding_score / review_status 等）と型定義の齟齬をCIで検知すること。</div>
+</section>
+
+<footer class="doc-foot">
+  <span>© 2026 株式会社NewFan — AI-OCRエージェント 画面設計書 v1.0</span>
+  <span>準拠: 詳細設計書 v1.0 / 技術設計書 v2.0（PP-OCRv6ベース）</span>
+  <span>フォント: Inter + Noto Sans JP（オフライン時はシステムフォントに自動フォールバック）</span>
+</footer>
+</main>
+
+<script>
+// 文書TOCのスクロール連動（現在地ハイライト）
+(function(){
+  var links=[].slice.call(document.querySelectorAll('.toc a'));
+  var map={};links.forEach(function(a){var id=a.getAttribute('href').slice(1);var el=document.getElementById(id);if(el)map[id]=a});
+  if(!('IntersectionObserver' in window))return;
+  var io=new IntersectionObserver(function(es){
+    es.forEach(function(e){if(e.isIntersecting){links.forEach(function(a){a.classList.remove('on')});var a=map[e.target.id];if(a)a.classList.add('on')}})
+  },{rootMargin:'-20% 0px -70% 0px'});
+  Object.keys(map).forEach(function(id){io.observe(document.getElementById(id))});
+})();
+</script>
+</body>
+</html>

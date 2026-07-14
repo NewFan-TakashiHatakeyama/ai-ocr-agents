@@ -1,0 +1,51 @@
+# vl-svc: PaddleOCR-VL-1.6 サービング設定（詳細設計 §5.4, DD-09）
+#
+# 難読ページのフォールバック専用。GPU 専用プールで運用（§2.3）。genai バックエンド
+# （vLLM 等）を別コンテナで起動し server_url で接続する。
+# ベースは PaddleOCR/deploy/paddleocr_vl_docker/pipeline_config_vllm.yaml。
+#
+# 注意: VL 由来フィールドは grounding_score ≤ 0.7 → 常にレビュー行き（DD-09）。この制約は
+# orchestrator 側（vl_fallback ノード）で強制する。本設定はサービング挙動のみを定義する。
+
+pipeline_name: PaddleOCR-VL-1.6
+batch_size: 64
+use_queues: True
+
+# VL 側でも前処理は行わない（ingest 側で実施済み, ADR-0002）
+use_doc_preprocessor: False
+use_layout_detection: True
+use_chart_recognition: False
+use_seal_recognition: False
+format_block_content: False
+merge_layout_blocks: True
+markdown_ignore_labels:
+  - number
+  - footnote
+  - header
+  - header_image
+  - footer
+  - footer_image
+  - aside_text
+
+SubModules:
+  LayoutDetection:
+    module_name: layout_detection
+    model_name: PP-DocLayoutV3
+    model_dir: null
+    batch_size: 8
+    threshold: 0.3
+    layout_nms: True
+  VLRecognition:
+    module_name: vl_recognition
+    model_name: PaddleOCR-VL-1.6-0.9B
+    model_dir: null
+    batch_size: 4096
+    genai_config:
+      backend: vllm-server
+      # genai サーバ（別コンテナ）。compose の paddleocr-vlm-server を指す
+      server_url: http://paddleocr-vlm-server:8080/v1
+
+Serving:
+  visualize: False
+  extra:
+    max_num_input_imgs: null

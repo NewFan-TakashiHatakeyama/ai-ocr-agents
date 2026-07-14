@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+uv.lock
+
+# Node
+node_modules/
+.next/
+dist/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data / scratch
+/data/
+*.local.json
+
+# ベンダ参照（独自 .git を持つ公式クローン。submodule 化するまでは追跡しない。README/ADR-0001 参照）
+/PaddleOCR/

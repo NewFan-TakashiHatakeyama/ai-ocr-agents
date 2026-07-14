@@ -1,0 +1,20 @@
+# cp terraform.tfvars.example terraform.tfvars して環境値を設定する
+region = "ap-northeast-1"
+env    = "production"
+
+# 既存 VPC（VPC 自体は別管理を想定）
+vpc_id             = "vpc-xxxxxxxx"
+private_subnet_ids = ["subnet-aaaa", "subnet-bbbb"]
+public_subnet_ids  = ["subnet-cccc", "subnet-dddd"]
+
+# ALB HTTPS 用 ACM 証明書
+acm_certificate_arn = "arn:aws:acm:ap-northeast-1:123456789012:certificate/xxxx"
+
+# CI が push した共通イメージタグ
+image_tag = "2026.07-1"
+
+# DATABASE_URL を格納した Secrets Manager シークレット
+db_secret_arn = "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:newfan/db-xxxx"
+
+# SQS 採用時のみ true（既定 Redis Streams では false のまま）
+enable_sqs_queue_scaling = false

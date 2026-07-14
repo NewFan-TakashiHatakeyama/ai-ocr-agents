@@ -1,0 +1,24 @@
+# ocr-svc（照合用）: PP-OCRv6_small 単体 OCR（§5.3.2 two-model agreement）
+#
+# medium と small の認識不一致で conf を減点する照合用途。§13 のコスト余地がある場合のみ
+# 併載する（two_model_check オプション有効時）。別ポートで起動する。
+
+pipeline_name: OCR
+
+use_doc_preprocessor: False
+use_textline_orientation: True
+
+SubModules:
+  TextDetection:
+    module_name: text_detection
+    model_name: PP-OCRv6_small_det
+    model_dir: null
+  TextRecognition:
+    module_name: text_recognition
+    model_name: PP-OCRv6_small_rec
+    model_dir: null
+    score_thresh: 0.0
+    return_word_box: True
+
+Serving:
+  visualize: False

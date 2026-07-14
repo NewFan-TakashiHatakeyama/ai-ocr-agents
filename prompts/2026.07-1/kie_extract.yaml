@@ -1,0 +1,24 @@
+# KIE 抽出プロンプト（詳細設計 §4.6.1）
+name: kie_extract
+output: json
+template: |
+  あなたは帳票からの項目抽出エンジンです。出力はJSONのみ。
+
+  # 入力
+  - レイアウト解析結果(Markdown): {layout_markdown}
+  - OCRスパン一覧: {spans}   # [{span_id, page, text, conf}] bboxは省略可
+  - 抽出スキーマ: {schema_json}
+  - テナント補足知識(ヒント): {rule_hints}
+
+  # 指示
+  1. 各フィールドの値は、OCRスパンの原文のみを根拠として抽出する。
+  2. 必ず根拠 span_ids を付ける。原文に存在しない値・推測値を生成してはならない。
+  3. 値が見つからない場合は value=null とし reason を記す。
+  4. 表フィールドは行配列とし、各セルに span_ids を対応付ける。
+  5. 同名候補が複数ある場合（例: 合計が複数）は、レイアウト上の位置と語彙
+     （「御請求金額」「合計」等）から最も妥当な1つを選び、reasonに判断根拠を書く。
+
+  # 出力スキーマ
+  {"fields":[{"name":"...","value":"...","span_ids":[12,13],"page":1,"reason":null}],
+   "tables":[{"name":"line_items","rows":[{"cells":{"item":{"value":"...","span_ids":[...]}}}]}],
+   "unmapped_required":["..."]}

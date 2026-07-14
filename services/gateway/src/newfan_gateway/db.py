@@ -1,0 +1,254 @@
+# mypy: ignore-errors
+"""PostgreSQL リポジトリ（本番 DB 接続 + RLS, §7 / §11）。
+
+runtime extra（sqlalchemy）が必要。CI では未実行（DB 前提）。テーブルの正本は Alembic
+マイグレーション（§15）。本モジュールの ORM モデルは gateway が参照する列のみをミラーする。
+
+テナント分離: リクエスト毎に `SET LOCAL app.tenant_id` を発行し RLS を効かせる（§7.3）。
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from typing import Iterator, Optional
+
+from sqlalchemy import JSON, Integer, String, Text, create_engine, select, text
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+from newfan_gateway.records import (
+    CorrectionRecord,
+    DocumentRecord,
+    JobRecord,
+    PageRecord,
+    RunRecord,
+)
+from newfan_schemas import ExtractedField, TableResult
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Document(Base):
+    __tablename__ = "documents"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    storage_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    original_name: Mapped[Optional[str]] = mapped_column(Text)
+    mime_type: Mapped[str] = mapped_column(Text, nullable=False)
+    page_count: Mapped[Optional[int]] = mapped_column(Integer)
+    doc_type: Mapped[Optional[str]] = mapped_column(Text)
+    external_ref: Mapped[Optional[str]] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String, default="uploaded")
+
+
+class Page(Base):
+    __tablename__ = "pages"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    document_id: Mapped[str] = mapped_column(String, nullable=False)
+    page_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[Optional[int]] = mapped_column(Integer)
+    height: Mapped[Optional[int]] = mapped_column(Integer)
+    image_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    preproc: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ExtractionRun(Base):
+    __tablename__ = "extraction_runs"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    document_id: Mapped[str] = mapped_column(String, nullable=False)
+    schema_id: Mapped[Optional[str]] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="processing")
+    engine_versions: Mapped[dict] = mapped_column(JSON, default=dict)
+    options: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_version: Mapped[int] = mapped_column(Integer, default=1)
+    # gateway 読み取り用の非正規化フィールド/テーブル（正本は extraction_fields/_tables）
+    fields_json: Mapped[list] = mapped_column(JSON, default=list)
+    tables_json: Mapped[list] = mapped_column(JSON, default=list)
+    review_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    ref_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="queued")
+    error_code: Mapped[Optional[str]] = mapped_column(String)
+
+
+class CorrectionLog(Base):
+    __tablename__ = "correction_logs"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    document_id: Mapped[str] = mapped_column(String, nullable=False)
+    run_id: Mapped[str] = mapped_column(String, nullable=False)
+    field_name: Mapped[str] = mapped_column(String, nullable=False)
+    original_value: Mapped[Optional[str]] = mapped_column(Text)
+    corrected_value: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(Text)
+
+
+class PgRepository:
+    """Repository の PostgreSQL 実装。"""
+
+    def __init__(self, dsn: str) -> None:
+        self._engine = create_engine(dsn, future=True)
+        self._session = sessionmaker(self._engine, expire_on_commit=False)
+
+    @contextmanager
+    def _rls(self, tenant_id: str) -> Iterator[Session]:
+        with self._session() as s:
+            # RLS: 当該トランザクションの範囲でテナントを固定（§7.3）
+            s.execute(text("SET LOCAL app.tenant_id = :tid"), {"tid": tenant_id})
+            yield s
+            s.commit()
+
+    def create_document(self, doc: DocumentRecord, pages: list[PageRecord]) -> None:
+        with self._rls(doc.tenant_id) as s:
+            s.add(Document(**doc.model_dump(exclude={"created_at"})))
+            for p in pages:
+                s.add(
+                    Page(
+                        id=f"{doc.id}:{p.page_no}",
+                        tenant_id=doc.tenant_id,
+                        document_id=doc.id,
+                        page_no=p.page_no,
+                        width=p.width,
+                        height=p.height,
+                        image_uri=p.image_uri,
+                        preproc=p.preproc,
+                    )
+                )
+
+    def get_document(self, tenant_id: str, document_id: str) -> Optional[DocumentRecord]:
+        with self._rls(tenant_id) as s:
+            row = s.get(Document, document_id)
+            return _doc_record(row) if row else None
+
+    def list_documents(self, tenant_id, *, status, cursor, limit):
+        with self._rls(tenant_id) as s:
+            stmt = select(Document).order_by(Document.id.desc()).limit(limit + 1)
+            if status:
+                stmt = stmt.where(Document.status == status)
+            rows = list(s.scalars(stmt))
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+            return [_doc_record(r) for r in rows], (rows[-1].id if has_more else None)
+
+    def get_pages(self, tenant_id, document_id):
+        with self._rls(tenant_id) as s:
+            rows = s.scalars(select(Page).where(Page.document_id == document_id))
+            return [
+                PageRecord(
+                    page_no=r.page_no,
+                    width=r.width,
+                    height=r.height,
+                    image_uri=r.image_uri,
+                    preproc=r.preproc,
+                )
+                for r in rows
+            ]
+
+    def has_active_run(self, tenant_id, document_id):
+        with self._rls(tenant_id) as s:
+            stmt = select(ExtractionRun).where(
+                ExtractionRun.document_id == document_id,
+                ExtractionRun.status.in_(("processing", "needs_review")),
+            )
+            return s.scalars(stmt).first() is not None
+
+    def create_run(self, run: RunRecord) -> None:
+        with self._rls(run.tenant_id) as s:
+            s.add(
+                ExtractionRun(
+                    id=run.id,
+                    tenant_id=run.tenant_id,
+                    document_id=run.document_id,
+                    schema_id=run.schema_id,
+                    status=run.status,
+                    engine_versions=run.engine_versions,
+                    options=run.options,
+                    result_version=run.result_version,
+                    fields_json=[f.model_dump() for f in run.fields],
+                    tables_json=[t.model_dump() for t in run.tables],
+                    review_summary=run.review_summary,
+                )
+            )
+
+    def get_run(self, tenant_id, run_id):
+        with self._rls(tenant_id) as s:
+            row = s.get(ExtractionRun, run_id)
+            return _run_record(row) if row else None
+
+    def get_latest_run(self, tenant_id, document_id):
+        with self._rls(tenant_id) as s:
+            stmt = (
+                select(ExtractionRun)
+                .where(ExtractionRun.document_id == document_id)
+                .order_by(ExtractionRun.id.desc())
+                .limit(1)
+            )
+            row = s.scalars(stmt).first()
+            return _run_record(row) if row else None
+
+    def set_document_status(self, tenant_id, document_id, status):
+        with self._rls(tenant_id) as s:
+            row = s.get(Document, document_id)
+            if row:
+                row.status = status
+
+    def create_job(self, job: JobRecord) -> None:
+        with self._rls(job.tenant_id) as s:
+            s.add(Job(id=job.id, tenant_id=job.tenant_id, kind=job.kind, ref_id=job.ref_id, status=job.status))
+
+    def get_job(self, tenant_id, job_id):
+        with self._rls(tenant_id) as s:
+            row = s.get(Job, job_id)
+            if not row:
+                return None
+            return JobRecord(
+                id=row.id, tenant_id=row.tenant_id, kind=row.kind, ref_id=row.ref_id,
+                status=row.status, error_code=row.error_code,
+            )
+
+    def add_corrections(self, corrections: list[CorrectionRecord]) -> None:
+        if not corrections:
+            return
+        with self._rls(corrections[0].tenant_id) as s:
+            for c in corrections:
+                s.add(
+                    CorrectionLog(
+                        id=c.id, tenant_id=c.tenant_id, document_id=c.document_id,
+                        run_id=c.run_id, field_name=c.field_name,
+                        original_value=c.original_value, corrected_value=c.corrected_value,
+                        note=c.note,
+                    )
+                )
+
+    def list_review_runs(self, tenant_id):
+        with self._rls(tenant_id) as s:
+            stmt = select(ExtractionRun).where(ExtractionRun.status == "needs_review")
+            return [_run_record(r) for r in s.scalars(stmt)]
+
+
+def _doc_record(row: Document) -> DocumentRecord:
+    return DocumentRecord(
+        id=row.id, tenant_id=row.tenant_id, storage_uri=row.storage_uri,
+        original_name=row.original_name, mime_type=row.mime_type, page_count=row.page_count,
+        doc_type=row.doc_type, external_ref=row.external_ref, status=row.status,
+    )
+
+
+def _run_record(row: ExtractionRun) -> RunRecord:
+    return RunRecord(
+        id=row.id, tenant_id=row.tenant_id, document_id=row.document_id, schema_id=row.schema_id,
+        status=row.status, engine_versions=row.engine_versions, options=row.options,
+        result_version=row.result_version,
+        fields=[ExtractedField.model_validate(f) for f in (row.fields_json or [])],
+        tables=[TableResult.model_validate(t) for t in (row.tables_json or [])],
+        review_summary=row.review_summary or {},
+    )

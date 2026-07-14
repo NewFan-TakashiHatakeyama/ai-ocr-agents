@@ -1,0 +1,26 @@
+{
+  "logId": "00000000-0000-0000-0000-000000000001",
+  "errorCode": 0,
+  "errorMsg": "Success",
+  "result": {
+    "ocrResults": [
+      {
+        "prunedResult": {
+          "rec_texts": ["¥128,000"],
+          "rec_scores": [0.734],
+          "rec_polys": [
+            [[300, 180], [430, 180], [430, 212], [300, 212]]
+          ],
+          "rec_boxes": [[300, 180, 430, 212]],
+          "textline_orientation_angles": [-1]
+        },
+        "ocrImage": null,
+        "docPreprocessingImage": null,
+        "inputImage": null
+      }
+    ],
+    "dataInfo": {
+      "numPages": 1
+    }
+  }
+}

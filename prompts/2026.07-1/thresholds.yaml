@@ -1,0 +1,23 @@
+# 主要設定パラメータ（詳細設計 §2.5 初期値・仮置き）。テナント設定(tenants.settings)で上書き可。
+conf:
+  threshold:
+    critical: 0.90
+    standard: 0.80
+    low_impact: 0.60
+  always_review_fields: []      # テナント設定で指定
+fallback:
+  page_mean_score: 0.75
+  empty_block_ratio: 0.30
+memory:
+  knn_topk: 5
+  sim_threshold: 0.75
+rules:
+  min_evidence: 5
+  validation_pass: 0.90         # 回帰0件
+ocr:
+  timeout_sec: 30               # /ページ
+llm:
+  correct:
+    max_fields_parallel: 8
+job:
+  max_attempts: 3

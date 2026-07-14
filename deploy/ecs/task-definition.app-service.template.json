@@ -1,0 +1,50 @@
+{
+  "family": "${SERVICE_NAME}",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "${CPU:-512}",
+  "memory": "${MEMORY:-1024}",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${TASK_ROLE_ARN}",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "containerDefinitions": [
+    {
+      "name": "${SERVICE_NAME}",
+      "image": "${ECR_REPO}:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        {
+          "name": "${SERVICE_NAME}",
+          "containerPort": 8000,
+          "protocol": "tcp",
+          "appProtocol": "http"
+        }
+      ],
+      "environment": [
+        { "name": "APP_ENV", "value": "${APP_ENV:-production}" },
+        { "name": "AWS_REGION", "value": "${AWS_REGION}" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "${DB_SECRET_ARN}" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/${SERVICE_NAME}",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8000/healthz || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      }
+    }
+  ]
+}

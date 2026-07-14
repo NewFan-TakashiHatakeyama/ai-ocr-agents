@@ -1,0 +1,53 @@
+[project]
+name = "newfan-ocr"
+version = "0.1.0"
+description = "NewFan テンプレートレスAI-OCRエージェント（MVP）"
+requires-python = ">=3.12"
+readme = "README.md"
+
+[tool.uv.workspace]
+members = ["packages/*", "services/*"]
+
+[tool.uv.sources]
+newfan-schemas = { workspace = true }
+newfan-paddle-client = { workspace = true }
+newfan-normalizers = { workspace = true }
+newfan-validators = { workspace = true }
+newfan-ingest = { workspace = true }
+newfan-orchestrator = { workspace = true }
+newfan-llm-adapter = { workspace = true }
+newfan-gateway = { workspace = true }
+newfan-memory = { workspace = true }
+newfan-export = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.11",
+    "ruff>=0.6",
+    "respx>=0.21",
+    "pyyaml>=6.0",
+    "types-pyyaml>=6.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+namespace_packages = true
+
+# optional-dependency（runtime/graph extra）は既定環境に無いため未解決 import を許容する
+[[tool.mypy.overrides]]
+module = [
+    "pypdfium2", "pypdfium2.*", "langgraph.*", "boto3", "boto3.*",
+    "anthropic", "anthropic.*", "sentence_transformers", "faiss", "numpy",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["packages", "services", "inference"]

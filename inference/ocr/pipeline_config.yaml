@@ -1,0 +1,36 @@
+# ocr-svc: PP-OCRv6 単体 OCR サービング設定（詳細設計 §5.3.2, DD-02 / 付録C-3）
+#
+# 用途: crop 再認識・単文字/単語座標補完・two-model 照合。
+#   paddlex --serve --pipeline inference/ocr/pipeline_config.yaml
+#
+# 付録C-3: サービング POST /ocr のリクエストボディに returnWordBox は無いため、
+# ここで return_word_box を常時有効化して単語/単文字座標を得る（無改造イメージ）。
+# 応答フィールド名は実測で newfan_paddle_client.schema.OverallOcrRes に確定する。
+
+pipeline_name: OCR
+
+# DD-01/ADR-0002: 前処理は ingest 側。ここでは無効化。
+use_doc_preprocessor: False
+use_textline_orientation: True
+
+SubModules:
+  TextDetection:
+    module_name: text_detection
+    model_name: PP-OCRv6_medium_det
+    model_dir: null
+  TextLineOrientation:
+    module_name: textline_orientation
+    model_name: PP-LCNet_x1_0_textline_ori
+    model_dir: null
+  TextRecognition:
+    module_name: text_recognition
+    model_name: PP-OCRv6_medium_rec
+    model_dir: null
+    score_thresh: 0.0
+    # 単文字/単語座標を常時返す（付録C-3）
+    return_word_box: True
+
+Serving:
+  visualize: False
+  extra:
+    max_num_input_imgs: null

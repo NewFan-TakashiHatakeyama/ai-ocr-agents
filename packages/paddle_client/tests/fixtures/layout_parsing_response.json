@@ -1,0 +1,78 @@
+{
+  "logId": "00000000-0000-0000-0000-000000000000",
+  "errorCode": 0,
+  "errorMsg": "Success",
+  "result": {
+    "layoutParsingResults": [
+      {
+        "prunedResult": {
+          "parsing_res_list": [
+            {
+              "block_bbox": [40, 40, 520, 90],
+              "block_label": "doc_title",
+              "block_content": "請求書",
+              "block_id": 0,
+              "block_order": 0
+            },
+            {
+              "block_bbox": [40, 120, 520, 220],
+              "block_label": "text",
+              "block_content": "株式会社サンプル御中\n御請求金額 ¥128,000",
+              "block_id": 1,
+              "block_order": 1
+            },
+            {
+              "block_bbox": [40, 260, 780, 520],
+              "block_label": "table",
+              "block_content": "",
+              "block_id": 2,
+              "block_order": 2
+            }
+          ],
+          "overall_ocr_res": {
+            "rec_texts": ["請求書", "株式会社サンプル御中", "御請求金額", "¥128,000"],
+            "rec_scores": [0.998, 0.972, 0.965, 0.734],
+            "rec_polys": [
+              [[60, 44], [200, 44], [200, 86], [60, 86]],
+              [[48, 128], [320, 128], [320, 160], [48, 160]],
+              [[48, 180], [180, 180], [180, 210], [48, 210]],
+              [[300, 180], [430, 180], [430, 212], [300, 212]]
+            ],
+            "textline_orientation_angles": [-1, -1, -1, -1]
+          },
+          "table_res_list": [
+            {
+              "block_bbox": [40, 260, 780, 520],
+              "pred_html": "<table><tr><td>品目</td><td>数量</td><td>単価</td><td>金額</td></tr><tr><td>コンサル費</td><td>1</td><td>128,000</td><td>128,000</td></tr></table>",
+              "cell_box_list": [
+                [[44, 264], [200, 264], [200, 300], [44, 300]]
+              ],
+              "table_ocr_pred": {
+                "rec_texts": ["品目", "数量", "単価", "金額", "コンサル費", "1", "128,000", "128,000"],
+                "rec_scores": [0.99, 0.99, 0.98, 0.98, 0.95, 0.99, 0.93, 0.93],
+                "rec_polys": [
+                  [[44, 264], [120, 264], [120, 300], [44, 300]]
+                ],
+                "rec_boxes": [[44, 264, 120, 300]]
+              }
+            }
+          ],
+          "doc_preprocessor_res": {
+            "angle": 0
+          }
+        },
+        "markdown": {
+          "text": "# 請求書\n\n株式会社サンプル御中\n\n御請求金額 ¥128,000\n",
+          "images": null,
+          "isStart": true,
+          "isEnd": true
+        },
+        "outputImages": null,
+        "inputImage": null
+      }
+    ],
+    "dataInfo": {
+      "numPages": 1
+    }
+  }
+}

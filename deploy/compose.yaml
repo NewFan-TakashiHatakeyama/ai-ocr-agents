@@ -1,0 +1,49 @@
+# ローカル/結合テスト用 compose（詳細設計 §14.1 結合テスト）
+#
+# 本番は ECS（ADR-0003）。この compose は ECS タスク定義のローカルプロキシ
+# （1 service = 1 task definition）。ローカルで通した構成を deploy/ecs/ の task-def に写像する。
+#
+# 推論層（structure / ocr / vl）をまず起動し、paddle_client の契約テスト fixture 録画や
+# ingest→orchestrator の E2E に使う。data 層（Postgres/Redis）は段階的に追加する。
+#
+# コスト最小トポロジ（ADR-0003 Option A）では structure/ocr は Fargate CPU 相当で動かすため、
+# OpenVINO CPU イメージ／`--device cpu` で確認する。GPU が要るのは vl-svc（既定無効）のみ。
+# 推論イメージタグ・GPU 構成は環境依存（付録C-1/C-4）。
+
+services:
+  structure-svc:
+    image: ${PADDLEX_SERVING_IMAGE:-ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr:latest}
+    command: >-
+      paddlex --serve
+      --pipeline /configs/pipeline_config.yaml
+      --host 0.0.0.0 --port 8080
+    volumes:
+      - ./../inference/structure/pipeline_config.yaml:/configs/pipeline_config.yaml:ro
+    ports:
+      - "8081:8080"
+    # GPU を使う場合は deploy.resources.reservations.devices を有効化
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  ocr-svc:
+    image: ${PADDLEX_SERVING_IMAGE:-ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr:latest}
+    command: >-
+      paddlex --serve
+      --pipeline /configs/pipeline_config.yaml
+      --host 0.0.0.0 --port 8080
+    volumes:
+      - ./../inference/ocr/pipeline_config.yaml:/configs/pipeline_config.yaml:ro
+    ports:
+      - "8082:8080"
+
+  # vl-svc は PaddleOCR/deploy/paddleocr_vl_docker の compose（gateway + pipeline +
+  # genai server）を基に別ファイルで構成する。GPU 専用プールに分離（§2.3）。
+  # vl-svc:
+  #   extends:
+  #     file: ../PaddleOCR/deploy/paddleocr_vl_docker/hps/compose.yaml
+  #     service: pipeline

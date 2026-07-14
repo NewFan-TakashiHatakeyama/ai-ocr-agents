@@ -1,0 +1,15 @@
+[project]
+name = "newfan-validators"
+version = "0.1.0"
+description = "決定論バリデータ V-*（§5.7.3）"
+requires-python = ">=3.12"
+dependencies = [
+    "newfan-schemas",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/newfan_validators"]
