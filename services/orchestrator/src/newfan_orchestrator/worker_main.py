@@ -1,0 +1,97 @@
+# mypy: ignore-errors
+"""orchestrator-svc 常駐エントリ（`python -m newfan_orchestrator.worker_main`, §2.1 / §9）。
+
+環境変数から本番アダプタを配線し、q.extract を消費し続ける ECS タスク本体。
+gateway の `newfan_gateway.main` に対応する。SIGTERM で graceful shutdown。
+
+必須 env: DATABASE_URL, REDIS_URL, STRUCTURE_URL
+任意 env: VL_URL（既定無効, ADR-0003 Option A）, LLM_MODEL, CONSUMER_NAME, POLL_BLOCK_MS
+
+チェックポイントは PostgresSaver（プロセス跨ぎ resume, §4.4）。structure/LLM は実クライアント。
+memory は共有ストア接続が未整備のため e5+InMemory で degrade（本番は memory-svc ストアへ）。
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import socket
+from typing import Any
+
+from newfan_llm_adapter import LLMAdapter, PromptBundle, default_bundle_dir
+from newfan_llm_adapter.anthropic_provider import AnthropicProvider
+from newfan_memory import MemoryService
+from newfan_paddle_client import PaddleServingClient
+
+from newfan_orchestrator.graph import build_graph
+from newfan_orchestrator.pg_persistence import PgContextStore
+from newfan_orchestrator.redis_io import RedisQueue, RedisStreamConsumer
+from newfan_orchestrator.worker import ExtractionWorker
+
+_STOP = False
+
+
+def _handle_sigterm(*_: Any) -> None:
+    global _STOP
+    _STOP = True
+
+
+def _pg_dsn() -> str:
+    # PostgresSaver / psycopg は plain な postgresql:// を期待（SQLAlchemy の +psycopg を除去）。
+    return os.environ["DATABASE_URL"].replace("+psycopg", "")
+
+
+def _memory() -> MemoryService:
+    from newfan_memory import InMemoryMemoryRepository
+
+    try:
+        from newfan_memory.e5_embedder import E5Embedder
+
+        embedder: Any = E5Embedder()
+    except Exception:  # noqa: BLE001 - 埋め込み extra 未導入時は degrade
+        from newfan_memory import HashingEmbedder
+
+        embedder = HashingEmbedder()
+    return MemoryService(embedder, InMemoryMemoryRepository())
+
+
+def main() -> None:
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGINT, _handle_sigterm)
+
+    store = PgContextStore(os.environ["DATABASE_URL"])
+    export_queue = RedisQueue(os.environ["REDIS_URL"])
+    consumer = RedisStreamConsumer(
+        os.environ["REDIS_URL"],
+        "q.extract",
+        "orchestrator",
+        os.environ.get("CONSUMER_NAME", socket.gethostname()),
+    )
+    structure = PaddleServingClient(os.environ["STRUCTURE_URL"])
+    vl = PaddleServingClient(os.environ["VL_URL"]) if os.environ.get("VL_URL") else None
+    adapter = LLMAdapter(AnthropicProvider(model=os.environ.get("LLM_MODEL", "claude-opus-4-8")))
+    bundle = PromptBundle.load(default_bundle_dir())
+
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    with PostgresSaver.from_conn_string(_pg_dsn()) as checkpointer:
+        checkpointer.setup()
+        graph = build_graph(
+            checkpointer=checkpointer,
+            adapter=adapter,
+            bundle=bundle,
+            memory=_memory(),
+            structure_client=structure,
+            vl_client=vl,
+            context_store=store,
+            export_enqueue=export_queue.enqueue,
+        )
+        worker = ExtractionWorker(graph, store, consumer)
+        print("[worker] orchestrator-svc 起動: q.extract を消費します")
+        while not _STOP:
+            worker.run_once()  # consume は block_ms 待機するため busy-loop にならない
+    print("[worker] SIGTERM 受信: 停止しました")
+
+
+if __name__ == "__main__":
+    main()
