@@ -39,6 +39,7 @@ class LayoutBlock(BaseModel):
 
 class ExtractedField(BaseModel):
     name: str
+    label: Optional[str] = None  # 表示名（field_schemas 由来。§6.3 result / HITL UI で使用）
     value_raw: Optional[str] = None
     value_normalized: Optional[str] = None
     span_ids: list[int] = Field(default_factory=list)

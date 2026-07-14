@@ -52,6 +52,12 @@ def kie_extract(
     rule_hints: str = "",
 ) -> KieResult:
     span_map = {s.span_id: s for s in spans}
+    # スキーマから name→label を引く（HITL UI / §6.3 result の表示名）
+    label_map = {
+        f.get("name"): f.get("label")
+        for f in (schema_json.get("fields") or [])
+        if isinstance(f, dict)
+    }
     system = "あなたは帳票からの項目抽出エンジンです。出力はJSONのみ。"
     user = render(
         bundle.kie_template,
@@ -74,6 +80,7 @@ def kie_extract(
         result.fields.append(
             ExtractedField(
                 name=name,
+                label=label_map.get(name),
                 value_raw=(str(item["value"]) if item.get("value") is not None else None),
                 span_ids=valid_ids,
                 page=item.get("page"),

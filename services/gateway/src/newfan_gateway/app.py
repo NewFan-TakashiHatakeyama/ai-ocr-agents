@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from newfan_gateway.auth import ApiKeyStore, InMemoryApiKeyStore
@@ -33,7 +34,17 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="NewFan AI-OCR Gateway", version="0.1.0")
 
-    app.state.settings = settings or Settings.from_env()
+    resolved_settings = settings or Settings.from_env()
+    # CORS: web UI（別オリジン）から Bearer 認証で叩けるようにする（§6.1 は同一 API 前提だが
+    # ブラウザ SPA は cross-origin。cookie 不使用のため allow_credentials は不要）。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=resolved_settings.cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.state.settings = resolved_settings
     app.state.repo = repo or InMemoryRepository()
     app.state.queue = queue or InMemoryQueue()
     app.state.orchestrator = orchestrator or FakeOrchestratorClient()
