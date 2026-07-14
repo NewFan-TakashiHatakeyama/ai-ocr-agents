@@ -1,0 +1,167 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --pending: #f59e0b;
+  --ok: #10b981;
+  --low: #ef4444;
+  --validated: #3b82f6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+a {
+  color: inherit;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.nav a {
+  margin-right: 16px;
+  text-decoration: none;
+  color: var(--muted);
+}
+
+.container {
+  padding: 20px;
+}
+
+/* 検証画面（§8.2 左右2ペイン） */
+.verify {
+  display: grid;
+  grid-template-columns: 1fr 420px;
+  gap: 0;
+  height: calc(100vh - 110px);
+}
+
+.viewer {
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: #f8fafc;
+  padding: 16px;
+}
+
+.viewer-stage {
+  position: relative;
+  display: inline-block;
+}
+
+.viewer-stage img {
+  display: block;
+  max-width: 100%;
+}
+
+.bbox {
+  position: absolute;
+  border: 2px solid transparent;
+  pointer-events: none;
+}
+
+.bbox.selected {
+  border-color: var(--validated);
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.field-panel {
+  overflow: auto;
+  padding: 12px;
+}
+
+.field-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+.field-row.active {
+  border-color: var(--validated);
+}
+
+.field-label {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.field-value {
+  font-size: 15px;
+  margin-top: 4px;
+}
+
+.field-value input {
+  width: 100%;
+  font-size: 15px;
+  padding: 4px 6px;
+}
+
+.conf-bar {
+  height: 6px;
+  border-radius: 3px;
+  margin-top: 6px;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+}
+
+.badge.pending {
+  background: var(--pending);
+  color: #fff;
+}
+
+.confirm-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border);
+}
+
+.btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  background: var(--validated);
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+table.list {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table.list th,
+table.list td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}

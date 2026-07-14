@@ -29,6 +29,7 @@ dev = [
     "respx>=0.21",
     "pyyaml>=6.0",
     "types-pyyaml>=6.0",
+    "alembic>=1.13",
 ]
 
 [tool.ruff]

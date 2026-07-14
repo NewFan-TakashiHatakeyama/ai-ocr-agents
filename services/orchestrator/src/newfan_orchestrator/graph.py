@@ -23,6 +23,7 @@ def build_graph(
     bundle: Optional[PromptBundle] = None,
     memory: Optional[MemoryService] = None,
     structure_client: Optional[StructureClient] = None,
+    vl_client: Optional[StructureClient] = None,
     image_loader: ImageLoader = file_uri_loader,
 ) -> Any:
     """§4.1 のグラフを構築して compile 済みグラフを返す。
@@ -42,6 +43,9 @@ def build_graph(
         if structure_client
         else nodes.structure_ocr
     )
+    vl_node = (
+        ocr_nodes.make_vl_fallback(vl_client, image_loader) if vl_client else nodes.vl_fallback
+    )
     try:
         from langgraph.graph import END, START, StateGraph
     except ModuleNotFoundError as exc:  # pragma: no cover - 実行環境依存
@@ -54,7 +58,7 @@ def build_graph(
     g.add_node("load_context", nodes.load_context)
     g.add_node("structure_ocr", structure_node)
     g.add_node("quality_gate", nodes.quality_gate)
-    g.add_node("vl_fallback", nodes.vl_fallback)
+    g.add_node("vl_fallback", vl_node)
     g.add_node("memory_lookup", memory_lookup_node)
     g.add_node("kie_extract", kie_node)
     g.add_node("deterministic_normalize", nodes.deterministic_normalize)

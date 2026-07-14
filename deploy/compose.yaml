@@ -47,3 +47,33 @@ services:
   #   extends:
   #     file: ../PaddleOCR/deploy/paddleocr_vl_docker/hps/compose.yaml
   #     service: pipeline
+
+  # --- data 層（結合テスト用, §14.1） ---
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: newfan
+      POSTGRES_PASSWORD: newfan
+      POSTGRES_DB: newfan
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U newfan"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  # マイグレーション適用（postgres 起動後に 1 回実行）。
+  #   DATABASE_URL=postgresql://newfan:newfan@localhost:5432/newfan \
+  #     uv run alembic -c db/alembic.ini upgrade head
+  # （compose の migrate ジョブ化はイメージ整備後に追加）
+
+volumes:
+  pgdata:

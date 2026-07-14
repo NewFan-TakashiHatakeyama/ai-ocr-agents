@@ -17,7 +17,7 @@ from newfan_paddle_client import (
     build_spans,
     encode_image,
 )
-from newfan_schemas import ExtractionState
+from newfan_schemas import ExtractionState, ReviewItem, SpanSource
 
 NodeFn = Callable[[ExtractionState], dict[str, Any]]
 ImageLoader = Callable[[str], bytes]
@@ -75,5 +75,61 @@ def make_structure_ocr(
             "layout_markdown": "\n\n".join(markdown_parts),
             "errors": errors,
         }
+
+    return _node
+
+
+def make_vl_fallback(
+    client: StructureClient,
+    image_loader: ImageLoader = file_uri_loader,
+) -> NodeFn:
+    """vl_fallback ノード（§5.4, DD-09）を vl-svc で実体化する。
+
+    品質ゲート NG ページ（fallback_pages）のみ VL に送る。得られた span は source='vl' で
+    既存 OCR span と**併存**（破棄しない）。VL 由来は grounding 上限 0.7（confidence_score が
+    SpanSource.VL を見て強制、DD-09）。VL 失敗ページは review_items 直行（未抽出ページ, §4.3）。
+    """
+
+    def _node(state: ExtractionState) -> dict[str, Any]:
+        fallback_pages = sorted(set(state.get("fallback_pages", [])))
+        if not fallback_pages:
+            return {}
+
+        pages_by_no = {int(p["page_no"]): p for p in state.get("pages", [])}
+        spans = list(state.get("spans", []))
+        layout = list(state.get("layout", []))
+        review_items = list(state.get("review_items", []))
+        errors: list[dict[str, Any]] = list(state.get("errors", []))
+        next_span_id = max((s.span_id for s in spans), default=-1) + 1
+
+        for page_no in fallback_pages:
+            page = pages_by_no.get(page_no)
+            if page is None:
+                continue
+            try:
+                data = image_loader(str(page["image_uri"]))
+                resp = client.layout_parsing(encode_image(data), file_type=1)
+            except Exception as exc:  # noqa: BLE001 - 失敗ページはレビュー直行（§4.3）
+                errors.append({"page": page_no, "stage": "vl_fallback", "error": str(exc)})
+                review_items.append(
+                    ReviewItem(field_name=f"page_{page_no}", reason="VLフォールバック失敗（未抽出ページ）", page=page_no)
+                )
+                continue
+
+            if not resp.layout_parsing_results:
+                review_items.append(
+                    ReviewItem(field_name=f"page_{page_no}", reason="VL結果なし（未抽出ページ）", page=page_no)
+                )
+                continue
+
+            elem = resp.layout_parsing_results[0]
+            vl_spans = build_spans(
+                elem.pruned_result, page=page_no, start_id=next_span_id, source=SpanSource.VL
+            )
+            next_span_id += len(vl_spans)
+            spans.extend(vl_spans)  # 既存 OCR span を破棄せず併存
+            layout.extend(build_layout_blocks(elem.pruned_result, page=page_no))
+
+        return {"spans": spans, "layout": layout, "review_items": review_items, "errors": errors}
 
     return _node
