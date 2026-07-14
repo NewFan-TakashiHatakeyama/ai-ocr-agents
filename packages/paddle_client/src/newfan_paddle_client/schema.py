@@ -57,7 +57,9 @@ class TableOcrPred(_Loose):
 
 
 class TableRes(_Loose):
-    cell_box_list: Optional[list[Poly]] = None
+    # 実 PP-StructureV3 は 4値 bbox のリスト [[x1,y1,x2,y2],...]（点列 Poly ではない）を返す。
+    # 未使用フィールドかつサービング差分に強くするため Any で温存する（付録C-3, 実測で確定）。
+    cell_box_list: Optional[list[Any]] = None
     pred_html: Optional[str] = None
     table_ocr_pred: Optional[TableOcrPred] = None
     block_bbox: Optional[list[float]] = None
