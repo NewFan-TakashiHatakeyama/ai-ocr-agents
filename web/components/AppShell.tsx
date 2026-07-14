@@ -67,13 +67,29 @@ export function AppShell({ active, children }: { active: string; children: React
 
         <div className="nav-sec">管理{!isAdmin && "（admin）"}</div>
         {(["dash", "rule", "schema"] as const).map((k) => {
-          const label = { dash: "ダッシュボード", rule: "ルール管理", schema: "スキーマ管理" }[k];
+          const meta = {
+            dash: { label: "ダッシュボード", href: "/dashboard", key: "dashboard" },
+            rule: { label: "ルール管理", href: "/rules", key: "rules" },
+            schema: { label: "スキーマ管理", href: "/schemas", key: "schemas" },
+          }[k];
+          if (!isAdmin) {
+            return (
+              <div key={k} className="nav-item disabled" title={`${meta.label}（admin 専用）`}>
+                <NavIcon d={ICON[k]} />
+                {meta.label}
+                <span className="sub" style={{ marginLeft: "auto" }}>admin</span>
+              </div>
+            );
+          }
           return (
-            <div key={k} className="nav-item disabled" title={`${label}（準備中）`}>
+            <Link
+              key={k}
+              href={meta.href}
+              className={`nav-item${active === meta.key ? " on" : ""}`}
+            >
               <NavIcon d={ICON[k]} />
-              {label}
-              <span className="sub" style={{ marginLeft: "auto" }}>準備中</span>
-            </div>
+              {meta.label}
+            </Link>
           );
         })}
 

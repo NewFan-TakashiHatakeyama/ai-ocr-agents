@@ -80,3 +80,46 @@ export interface SignedUrl {
 export interface ApiError {
   error: { code: string; message: string; details: Record<string, unknown>; request_id: string };
 }
+
+// ---- 管理画面（SCR-04/05/06） ----
+
+export interface SchemaFieldDto {
+  name: string;
+  label?: string | null;
+  type: string;
+  required: boolean;
+  critical: boolean;
+  columns?: Record<string, unknown>[] | null;
+}
+
+export interface SchemaDto {
+  doc_type: string;
+  version: number;
+  fields: SchemaFieldDto[];
+}
+
+export interface RuleDto {
+  id: string;
+  doc_type?: string | null;
+  supplier_key?: string | null;
+  field_name?: string | null;
+  rule_type: string;
+  rule_json: Record<string, unknown>;
+  status: string;
+  validation_report?: { reproduction_rate?: number; regressions?: number } | null;
+  source_correction_ids: string[];
+  created_by: string;
+  activatable: boolean;
+}
+
+export interface MetricsResponse {
+  total_documents: number;
+  status_counts: Record<string, number>;
+  stp_rate: number;
+  corrections_total: number;
+  active_rules: number;
+  pending_rules: number;
+  memories_total: number;
+  field_accuracy_sampled?: number | null;
+  llm_cost_jpy_total?: number | null;
+}

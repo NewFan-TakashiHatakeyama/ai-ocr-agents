@@ -3,8 +3,12 @@
 import type {
   CorrectionItem,
   DocumentList,
+  MetricsResponse,
   ResultResponse,
   ReviewQueueItem,
+  RuleDto,
+  SchemaDto,
+  SchemaFieldDto,
   SignedUrl,
 } from "./types";
 
@@ -74,4 +78,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ run_id: runId }),
     }),
+
+  // 管理画面（SCR-04/05/06, admin）
+  listSchemas: () => request<{ items: SchemaDto[] }>(`/schemas`),
+  putSchema: (docType: string, fields: SchemaFieldDto[]) =>
+    request<SchemaDto>(`/schemas`, {
+      method: "PUT",
+      body: JSON.stringify({ doc_type: docType, fields }),
+    }),
+  listRules: (status?: string) =>
+    request<{ items: RuleDto[] }>(`/rules${status ? `?status=${status}` : ""}`),
+  patchRule: (ruleId: string, status: string) =>
+    request<RuleDto>(`/rules/${ruleId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
+  metrics: () => request<MetricsResponse>(`/metrics/summary`),
 };
