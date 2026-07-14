@@ -20,7 +20,6 @@ import socket
 from typing import Any
 
 from newfan_llm_adapter import LLMAdapter, PromptBundle, default_bundle_dir
-from newfan_llm_adapter.anthropic_provider import AnthropicProvider
 from newfan_memory import MemoryService
 from newfan_paddle_client import PaddleServingClient
 
@@ -67,6 +66,18 @@ def _memory() -> MemoryService:
     return MemoryService(embedder, repo)
 
 
+def _make_provider() -> Any:
+    # LLM_PROVIDER=gemini か GEMINI_API_KEY 設定時は Gemini、既定は Anthropic。
+    provider = os.environ.get("LLM_PROVIDER", "").lower()
+    if provider == "gemini" or (not provider and os.environ.get("GEMINI_API_KEY")):
+        from newfan_llm_adapter.gemini_provider import GeminiProvider
+
+        return GeminiProvider(model=os.environ.get("LLM_MODEL", "gemini-2.5-flash"))
+    from newfan_llm_adapter.anthropic_provider import AnthropicProvider
+
+    return AnthropicProvider(model=os.environ.get("LLM_MODEL", "claude-opus-4-8"))
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
@@ -83,7 +94,7 @@ def main() -> None:
     vl = PaddleServingClient(os.environ["VL_URL"]) if os.environ.get("VL_URL") else None
     # DD-02 char_backfill 用の /ocr。未設定なら補完なし（主経路のみ）。
     ocr = PaddleServingClient(os.environ["OCR_URL"]) if os.environ.get("OCR_URL") else None
-    adapter = LLMAdapter(AnthropicProvider(model=os.environ.get("LLM_MODEL", "claude-opus-4-8")))
+    adapter = LLMAdapter(_make_provider())
     bundle = PromptBundle.load(default_bundle_dir())
 
     from langgraph.checkpoint.postgres import PostgresSaver

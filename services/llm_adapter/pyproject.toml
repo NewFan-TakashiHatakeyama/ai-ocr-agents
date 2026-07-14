@@ -14,6 +14,9 @@ dependencies = [
 anthropic = [
     "anthropic>=0.116",
 ]
+gemini = [
+    "google-genai>=0.3",
+]
 
 [build-system]
 requires = ["hatchling"]
