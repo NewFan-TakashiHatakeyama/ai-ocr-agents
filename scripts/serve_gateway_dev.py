@@ -9,6 +9,7 @@ web UI のブラウザ検証用。needs_review の帳票を1件 seed し、レ�
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 
 import jwt
 import uvicorn
@@ -31,19 +32,14 @@ from newfan_schemas import ExtractedField, ReviewStatus, TableCell, TableResult
 
 SECRET = "dev-qa-secret-0123456789-abcdefghijklmnop"  # >= 32 bytes (HS256)
 
-_SVG = """<svg xmlns='http://www.w3.org/2000/svg' width='1000' height='1400'>
-<rect width='1000' height='1400' fill='#ffffff' stroke='#cccccc'/>
-<text x='60' y='70' font-size='40' font-family='sans-serif'>請求書</text>
-<text x='100' y='105' font-size='24' font-family='sans-serif'>発行日 2026-05-01</text>
-<text x='100' y='205' font-size='28' font-family='sans-serif'>御請求金額</text>
-<text x='305' y='205' font-size='28' font-family='sans-serif'>¥128,OOO</text>
-<text x='60' y='300' font-size='24' font-family='sans-serif'>株式会社サンプル御中</text>
-</svg>"""
+# 実帳票 sample.png（御見積書, 793x1123）をそのままページ画像に使う。
+# bbox 座標系は sample.png のピクセル空間（実 PP-StructureV3 の rec_polys 由来）。
+_SAMPLE = Path(__file__).resolve().parents[1] / "sample.png"
 
 
 def _page_data_uri() -> str:
-    b64 = base64.b64encode(_SVG.encode("utf-8")).decode("ascii")
-    return f"data:image/svg+xml;base64,{b64}"
+    b64 = base64.b64encode(_SAMPLE.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{b64}"
 
 
 def _seed(repo: InMemoryRepository) -> None:
@@ -51,15 +47,15 @@ def _seed(repo: InMemoryRepository) -> None:
         DocumentRecord(
             id="doc_demo",
             tenant_id="ten_1",
-            storage_uri="s3://demo/original.png",
-            original_name="invoice_demo.png",
+            storage_uri="s3://demo/sample.png",
+            original_name="御見積書_sample.png",
             mime_type="image/png",
             page_count=1,
-            doc_type="invoice",
-            external_ref="ERP-1001",
+            doc_type="quotation",
+            external_ref="EST-00000101",
             status="needs_review",
         ),
-        [PageRecord(page_no=1, width=1000, height=1400, image_uri=_page_data_uri())],
+        [PageRecord(page_no=1, width=793, height=1123, image_uri=_page_data_uri())],
     )
     repo.create_run(
         RunRecord(
@@ -68,43 +64,56 @@ def _seed(repo: InMemoryRepository) -> None:
             document_id="doc_demo",
             status="needs_review",
             result_version=1,
-            engine_versions={"paddleocr": "3.7.0", "ocr": "PP-OCRv6_medium", "llm": "claude-opus-4-8"},
+            engine_versions={"paddleocr": "3.7.0", "ocr": "PP-OCRv5_server", "llm": "claude-opus-4-8"},
+            # 値/bbox は sample.png（御見積書, 793x1123）の実 PP-StructureV3 OCR 由来
             fields=[
                 ExtractedField(
                     name="total_amount",
-                    label="合計金額(税込)",
-                    value_raw="¥128,OOO",
-                    value_normalized="128000",
-                    confidence=0.72,
+                    label="御見積合計金額",
+                    value_raw="¥136,998",
+                    value_normalized="136998",
+                    confidence=0.72,  # デモ用に要確認（実測は 0.93）
                     grounding_score=1.0,
                     page=1,
-                    bbox=[300, 180, 432, 212],
-                    source_quote="¥128,OOO",
-                    span_ids=[42],
+                    bbox=[235, 306, 320, 330],
+                    source_quote="¥136,998",
+                    span_ids=[5],
                     review_status=ReviewStatus.PENDING,
-                ),
-                ExtractedField(
-                    name="invoice_date",
-                    label="請求日",
-                    value_raw="2026-05-01",
-                    value_normalized="2026-05-01",
-                    confidence=0.98,
-                    grounding_score=1.0,
-                    page=1,
-                    bbox=[210, 88, 360, 112],
-                    span_ids=[3],
-                    review_status=ReviewStatus.AUTO,
                 ),
                 ExtractedField(
                     name="issuer_name",
                     label="取引先名",
-                    value_raw="株式会社サンプル",
-                    value_normalized="株式会社サンプル",
-                    confidence=0.95,
+                    value_raw="ＡＡＡ食品株式会社",
+                    value_normalized="ＡＡＡ食品株式会社",
+                    confidence=0.99,
                     grounding_score=1.0,
                     page=1,
-                    bbox=[60, 280, 400, 308],
-                    span_ids=[7],
+                    bbox=[41, 158, 166, 172],
+                    span_ids=[2],
+                    review_status=ReviewStatus.AUTO,
+                ),
+                ExtractedField(
+                    name="quote_no",
+                    label="見積番号",
+                    value_raw="00000101",
+                    value_normalized="00000101",
+                    confidence=0.97,
+                    grounding_score=1.0,
+                    page=1,
+                    bbox=[694, 155, 751, 172],
+                    span_ids=[46],
+                    review_status=ReviewStatus.AUTO,
+                ),
+                ExtractedField(
+                    name="quote_date",
+                    label="見積日",
+                    value_raw="2014年04月01日",
+                    value_normalized="2014-04-01",
+                    confidence=1.0,
+                    grounding_score=1.0,
+                    page=1,
+                    bbox=[653, 169, 749, 186],
+                    span_ids=[49],
                     review_status=ReviewStatus.AUTO,
                 ),
             ],
@@ -121,7 +130,7 @@ def _seed(repo: InMemoryRepository) -> None:
                     ],
                 )
             ],
-            review_summary={"pending": 1, "auto": 2},
+            review_summary={"pending": 1, "auto": 3},
         )
     )
 
