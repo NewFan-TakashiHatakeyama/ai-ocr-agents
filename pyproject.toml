@@ -30,6 +30,7 @@ dev = [
     "pyyaml>=6.0",
     "types-pyyaml>=6.0",
     "alembic>=1.13",
+    "langgraph>=0.2",
 ]
 
 [tool.ruff]
@@ -51,4 +52,4 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-q"
-testpaths = ["packages", "services", "inference"]
+testpaths = ["packages", "services", "inference", "tests"]

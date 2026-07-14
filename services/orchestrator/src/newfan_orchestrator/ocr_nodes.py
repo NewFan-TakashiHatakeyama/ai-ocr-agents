@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from newfan_paddle_client import (
     LayoutParsingResponse,
@@ -28,11 +29,15 @@ class StructureClient(Protocol):
 
 
 def file_uri_loader(uri: str) -> bytes:
-    """file:// またはローカルパスの画像を読む（dev）。S3 は別ローダを注入する。"""
+    """file:// またはローカルパスの画像を読む（dev）。S3 は別ローダを注入する。
+
+    file:// はプラットフォーム非依存に変換する（Windows の `file:///C:/...` を正しく扱う）。
+    """
     parsed = urlparse(uri)
-    if parsed.scheme in ("file", ""):
-        path = Path(parsed.path if parsed.scheme == "file" else uri)
-        return path.read_bytes()
+    if parsed.scheme == "file":
+        return Path(url2pathname(parsed.path)).read_bytes()
+    if parsed.scheme == "":
+        return Path(uri).read_bytes()
     raise ValueError(f"未対応の image_uri スキーム: {uri}")
 
 
