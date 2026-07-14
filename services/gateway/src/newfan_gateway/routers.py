@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
+from fastapi.responses import StreamingResponse
 
 from newfan_gateway import dto
 from newfan_gateway.auth import Principal
+from newfan_gateway.chat import ChatAgent
 from newfan_gateway.config import Settings
 from newfan_gateway.admin import AdminRepository, is_activatable
 from newfan_gateway.deps import (
     get_admin,
+    get_chat_agent,
     get_ingestor,
     get_orchestrator,
     get_queue,
@@ -432,3 +436,45 @@ def metrics_summary(
 ) -> dto.MetricsResponse:
     m = admin.metrics_summary(principal.tenant_id)
     return dto.MetricsResponse(**m.model_dump())
+
+
+# ============ チャットホーム（SCR-01, §3.3/§4.5） ============
+
+
+@router.post("/chat")
+def chat(
+    body: dto.ChatRequest,
+    principal: Principal = Depends(require_role("viewer")),
+    agent: ChatAgent = Depends(get_chat_agent),
+) -> StreamingResponse:
+    """SSE ストリーム: token / tool_call / confirm_request / done（§3.1/§3.3）。"""
+
+    def _gen() -> Any:
+        for ev in agent.stream(principal.tenant_id, body.message):
+            yield f"event: {ev.type}\ndata: {json.dumps(ev.data, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
+
+@router.post("/chat/confirm", response_model=dto.ChatConfirmResult)
+def chat_confirm(
+    body: dto.ChatConfirmRequest,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.ChatConfirmResult:
+    """confirm_request の承認実行。書込み系ツールは本 API で承認後に実行（§4.5）。"""
+    if body.action == "update_schema":
+        doc_type = str(body.params.get("doc_type", "invoice"))
+        fld = body.params.get("field") or {}
+        cur = admin.get_schema(principal.tenant_id, doc_type)
+        fields = list(cur.fields) if cur else []
+        if any(f.name == fld.get("name") for f in fields):
+            return dto.ChatConfirmResult(ok=False, message="同名の項目が既に存在します。")
+        fields.append(SchemaFieldDef(**fld))
+        rec = admin.put_schema(principal.tenant_id, doc_type, fields)
+        return dto.ChatConfirmResult(
+            ok=True,
+            message=f"スキーマ「{doc_type}」に「{fld.get('label', fld.get('name'))}」を追加し、v{rec.version} として保存しました。",
+            detail={"doc_type": rec.doc_type, "version": rec.version},
+        )
+    raise ApiError("E1003", f"未対応のアクションです: {body.action}")

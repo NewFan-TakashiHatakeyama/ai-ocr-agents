@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from newfan_gateway.admin import AdminRepository, InMemoryAdminRepository
 from newfan_gateway.auth import ApiKeyStore, InMemoryApiKeyStore
+from newfan_gateway.chat import ChatAgent, RuleBasedChatAgent
 from newfan_gateway.config import Settings
 from newfan_gateway.context import request_id_var
 from newfan_gateway.errors import ApiError, api_error_handler, error_body
@@ -33,6 +34,7 @@ def create_app(
     ingestor: Optional[Ingestor] = None,
     api_keys: Optional[ApiKeyStore] = None,
     admin: Optional[AdminRepository] = None,
+    chat_agent: Optional[ChatAgent] = None,
 ) -> FastAPI:
     app = FastAPI(title="NewFan AI-OCR Gateway", version="0.1.0")
 
@@ -51,6 +53,7 @@ def create_app(
     app.state.queue = queue or InMemoryQueue()
     app.state.orchestrator = orchestrator or FakeOrchestratorClient()
     app.state.admin = admin or InMemoryAdminRepository()
+    app.state.chat_agent = chat_agent or RuleBasedChatAgent()
     app.state.api_keys = api_keys or InMemoryApiKeyStore({})
     app.state.idempotency = {}
     if ingestor is not None:

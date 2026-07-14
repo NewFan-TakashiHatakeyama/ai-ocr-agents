@@ -153,6 +153,21 @@ class PatchRuleRequest(BaseModel):
     status: str  # "active"（有効化）/ "retired"（退役）
 
 
+class ChatRequest(BaseModel):
+    message: str
+
+
+class ChatConfirmRequest(BaseModel):
+    action: str  # "update_schema" 等
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatConfirmResult(BaseModel):
+    ok: bool
+    message: str
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
 class MetricsResponse(BaseModel):
     total_documents: int
     status_counts: dict[str, int]

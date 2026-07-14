@@ -1,7 +1,9 @@
 // gateway-api クライアント（§6）。認証トークンは dev では env、本番はログインフローで差し替える。
 
 import type {
+  ChatConfirmResult,
   CorrectionItem,
+  DocumentCreated,
   DocumentList,
   MetricsResponse,
   ResultResponse,
@@ -94,4 +96,59 @@ export const api = {
       body: JSON.stringify({ status }),
     }),
   metrics: () => request<MetricsResponse>(`/metrics/summary`),
+
+  // チャットホーム（SCR-01）。SSE を fetch ストリームで購読する。
+  chatStream: async (message: string, onEvent: (type: string, data: Record<string, unknown>) => void) => {
+    const headers = new Headers({ "Content-Type": "application/json" });
+    const t = token();
+    if (t) headers.set("Authorization", `Bearer ${t}`);
+    const res = await fetch(`${API_BASE}/chat`, { method: "POST", headers, body: JSON.stringify({ message }) });
+    if (!res.ok || !res.body) throw new ApiError(res.status, String(res.status));
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const blocks = buf.split("\n\n");
+      buf = blocks.pop() ?? "";
+      for (const block of blocks) {
+        let ev = "message";
+        let data = "{}";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event: ")) ev = line.slice(7);
+          else if (line.startsWith("data: ")) data = line.slice(6);
+        }
+        onEvent(ev, JSON.parse(data));
+      }
+    }
+  },
+
+  chatConfirm: (action: string, params: Record<string, unknown>) =>
+    request<ChatConfirmResult>(`/chat/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ action, params }),
+    }),
+
+  uploadDocument: (file: File, docType?: string) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (docType) fd.append("doc_type", docType);
+    const headers = new Headers();
+    const t = token();
+    if (t) headers.set("Authorization", `Bearer ${t}`);
+    return fetch(`${API_BASE}/documents`, { method: "POST", headers, body: fd }).then(async (res) => {
+      if (!res.ok) {
+        let code = String(res.status);
+        try {
+          code = (await res.json())?.error?.code ?? code;
+        } catch {
+          /* ignore */
+        }
+        throw new ApiError(res.status, code);
+      }
+      return (await res.json()) as DocumentCreated;
+    });
+  },
 };

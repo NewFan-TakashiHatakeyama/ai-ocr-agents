@@ -8,6 +8,7 @@ from fastapi import Depends, Header, Request
 
 from newfan_gateway.admin import AdminRepository
 from newfan_gateway.auth import Principal, check_min_role, decode_principal
+from newfan_gateway.chat import ChatAgent
 from newfan_gateway.config import Settings
 from newfan_gateway.ports import Ingestor, OrchestratorClient
 from newfan_gateway.queue import Queue
@@ -36,6 +37,10 @@ def get_orchestrator(request: Request) -> OrchestratorClient:
 
 def get_admin(request: Request) -> AdminRepository:
     return request.app.state.admin  # type: ignore[no-any-return]
+
+
+def get_chat_agent(request: Request) -> ChatAgent:
+    return request.app.state.chat_agent  # type: ignore[no-any-return]
 
 
 def get_principal(

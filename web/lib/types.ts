@@ -112,6 +112,18 @@ export interface RuleDto {
   activatable: boolean;
 }
 
+export interface ChatConfirmResult {
+  ok: boolean;
+  message: string;
+  detail: Record<string, unknown>;
+}
+
+export interface DocumentCreated {
+  document_id: string;
+  page_count?: number | null;
+  status: string;
+}
+
 export interface MetricsResponse {
   total_documents: number;
   status_counts: Record<string, number>;

@@ -54,12 +54,14 @@ export function AppShell({ active, children }: { active: string; children: React
           <span className="logo-mark" />
           NewFan OCR
         </div>
-        <div className="nav-new" role="button">＋ 新規</div>
+        <Link href="/chat" className="nav-new">
+          ＋ 新規
+        </Link>
 
-        <div className="nav-item disabled" title="SCR-01 チャットホーム（準備中）">
+        <Link href="/chat" className={`nav-item${active === "chat" ? " on" : ""}`}>
           <NavIcon d={ICON.chat} />
-          チャット<span className="sub" style={{ marginLeft: "auto" }}>準備中</span>
-        </div>
+          チャット
+        </Link>
         <Link href="/documents" className={`nav-item${active === "documents" ? " on" : ""}`}>
           <NavIcon d={ICON.doc} />
           ドキュメント
