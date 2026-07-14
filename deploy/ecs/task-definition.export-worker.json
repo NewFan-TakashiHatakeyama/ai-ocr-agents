@@ -1,0 +1,37 @@
+{
+  "family": "newfan-export-worker",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${TASK_ROLE_ARN}",
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "containerDefinitions": [
+    {
+      "name": "export-worker",
+      "image": "${ECR_REPO_EXPORT}:${IMAGE_TAG}",
+      "essential": true,
+      "command": ["python", "-m", "newfan_export.worker_main"],
+      "environment": [
+        { "name": "APP_ENV", "value": "production" },
+        { "name": "AWS_REGION", "value": "${AWS_REGION}" },
+        { "name": "EXPORT_S3_BUCKET", "value": "${EXPORT_S3_BUCKET}" },
+        { "name": "EXPORT_S3_KMS_KEY_ID", "value": "${EXPORT_S3_KMS_KEY_ID}" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "${DB_SECRET_ARN}" },
+        { "name": "REDIS_URL", "valueFrom": "${REDIS_SECRET_ARN}" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/newfan-export-worker",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ],
+  "//": "q.export 消費ワーカー。canonical JSON を EXPORT_S3_BUCKET(SSE-KMS) へ、webhook は connections(type=webhook) 先へ配信。port/HTTP healthCheck なし。オートスケールは q.export のキュー深度。"
+}

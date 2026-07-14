@@ -32,6 +32,8 @@
   — gateway-api（HTTP 8000 + `/healthz`、ALB 配下）。secrets: DATABASE_URL/REDIS_URL/JWT_SECRET。
 - [`task-definition.orchestrator-worker.json`](task-definition.orchestrator-worker.json)
   — 抽出ワーカー（キュー消費のため port/HTTP healthCheck なし）。secrets に ANTHROPIC_API_KEY。
+- [`task-definition.export-worker.json`](task-definition.export-worker.json)
+  — export ワーカー（q.export 消費 → canonical JSON/webhook 配信）。torch 非依存で軽量。
 - [`task-definition.migrate.json`](task-definition.migrate.json)
   — Alembic マイグレーションの one-off タスク（`aws ecs run-task`）。
 - GPU 推論（Option B）は `requiresCompatibilities: ["EC2"]` ＋
@@ -44,7 +46,7 @@ Dockerfile は [`deploy/docker/`](../docker/)（ビルドコンテキスト = �
 ```bash
 REG=<acct>.dkr.ecr.<region>.amazonaws.com
 aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin $REG
-for svc in gateway orchestrator-worker migrate; do
+for svc in gateway orchestrator-worker export-worker migrate; do
   docker build -f deploy/docker/$svc.Dockerfile -t $REG/newfan-$svc:$IMAGE_TAG .
   docker push $REG/newfan-$svc:$IMAGE_TAG
 done
