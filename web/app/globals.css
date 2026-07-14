@@ -1411,3 +1411,38 @@ a {
     animation: none;
   }
 }
+
+/* ============ 明細グリッド（§8.3 TableGridEditor） ============ */
+.gridedit {
+  margin: 4px 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  overflow: auto;
+}
+
+.gridedit table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10.5px;
+}
+
+.gridedit th {
+  background: #f6f8fa;
+  padding: 5px 8px;
+  font-weight: 700;
+  color: var(--ink2);
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.gridedit td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.gridedit tr:last-child td {
+  border-bottom: none;
+}

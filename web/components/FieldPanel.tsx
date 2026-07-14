@@ -4,9 +4,10 @@ import { useState } from "react";
 
 import { AuditBadge, VerifyBadges } from "@/components/AuditBadge";
 import { ConfidenceBar } from "@/components/ConfidenceBar";
+import { TableGrid } from "@/components/TableGrid";
 import { sortFields } from "@/lib/fields";
 import { useReviewStore } from "@/lib/store";
-import type { ExtractedField } from "@/lib/types";
+import type { ExtractedField, TableResult } from "@/lib/types";
 
 // §8.3 <FieldPanel>: 要確認→確定済みのセクション。由来バッジ・検証バッジ・conf帯。
 // 選択中は右パネル行とビューアbboxを双方向同期。編集はバッファ（確定時に保存）。
@@ -46,7 +47,13 @@ function Row({ f }: { f: ExtractedField }) {
   );
 }
 
-export function FieldPanel({ fields }: { fields: ExtractedField[] }) {
+export function FieldPanel({
+  fields,
+  tables = [],
+}: {
+  fields: ExtractedField[];
+  tables?: TableResult[];
+}) {
   const [onlyPending, setOnlyPending] = useState(false);
   const sorted = sortFields(fields);
   const pending = sorted.filter((f) => f.review_status === "pending");
@@ -74,6 +81,8 @@ export function FieldPanel({ fields }: { fields: ExtractedField[] }) {
 
       {!onlyPending && done.length > 0 && <div className="fp-sec">確定済み（{done.length}）</div>}
       {!onlyPending && done.map((f) => <Row key={f.name} f={f} />)}
+
+      {!onlyPending && <TableGrid tables={tables} />}
     </div>
   );
 }

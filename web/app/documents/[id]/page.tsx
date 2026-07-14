@@ -152,7 +152,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           </div>
           <DocViewer documentId={id} fields={data.fields} pageNo={page} />
         </div>
-        <FieldPanel fields={data.fields} />
+        <FieldPanel fields={data.fields} tables={data.tables} />
       </div>
 
       <div className="rv-foot">

@@ -27,7 +27,7 @@ from newfan_gateway.records import (
     SchemaRecord,
 )
 from newfan_gateway.repository import InMemoryRepository
-from newfan_schemas import ExtractedField, ReviewStatus
+from newfan_schemas import ExtractedField, ReviewStatus, TableCell, TableResult
 
 SECRET = "dev-qa-secret-0123456789-abcdefghijklmnop"  # >= 32 bytes (HS256)
 
@@ -107,6 +107,19 @@ def _seed(repo: InMemoryRepository) -> None:
                     span_ids=[7],
                     review_status=ReviewStatus.AUTO,
                 ),
+            ],
+            tables=[
+                TableResult(
+                    name="line_items",
+                    page=1,
+                    confidence=0.88,
+                    rows=[
+                        {"商品名": TableCell(value="冷凍コロッケ"), "数量": TableCell(value="250"), "単位": TableCell(value="袋"), "単価": TableCell(value="85"), "金額": TableCell(value="21,250")},
+                        {"商品名": TableCell(value="冷凍ピザ"), "数量": TableCell(value="180"), "単位": TableCell(value="袋"), "単価": TableCell(value="410"), "金額": TableCell(value="85,600")},
+                        {"商品名": TableCell(value="カップラーメン醤油味"), "数量": TableCell(value="200"), "単位": TableCell(value="個"), "単価": TableCell(value="100"), "金額": TableCell(value="20,000")},
+                        {"商品名": TableCell(value="カップラーメン味噌味"), "数量": TableCell(value="200"), "単位": TableCell(value="個"), "単価": TableCell(value="100"), "金額": TableCell(value="20,000")},
+                    ],
+                )
             ],
             review_summary={"pending": 1, "auto": 2},
         )
