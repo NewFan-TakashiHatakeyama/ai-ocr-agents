@@ -125,3 +125,46 @@ def test_llm_chat_agent_streams_via_client() -> None:
     agent = LlmChatAgent(client=_FakeClient(_navigate_events()))
     evs = list(agent.stream("ten_1", "先月のSTP率は？"))
     assert [e.type for e in evs] == ["token", "tool_call", "done"]
+
+
+# ---- 本番エージェント（Gemini）: streaming + function calling → SSE 写像 ----
+
+from newfan_gateway.chat import GeminiChatAgent, map_gemini_stream  # noqa: E402
+
+
+def _chunk(parts: list[SimpleNamespace]) -> SimpleNamespace:
+    return _ns(candidates=[_ns(content=_ns(parts=parts))])
+
+
+def _text_part(t: str) -> SimpleNamespace:
+    return _ns(text=t, function_call=None)
+
+
+def _fc_part(name: str, args: dict) -> SimpleNamespace:
+    return _ns(text=None, function_call=_ns(name=name, args=args))
+
+
+def test_map_gemini_navigate_and_text() -> None:
+    chunks = [
+        _chunk([_text_part("ダッシュボードを開きます。")]),
+        _chunk([_fc_part("navigate", {"target": "/dashboard", "label": "ダッシュボード"})]),
+    ]
+    evs = list(map_gemini_stream(iter(chunks)))
+    assert [e.type for e in evs] == ["token", "tool_call", "done"]
+    assert evs[1].data == {"name": "navigate", "target": "/dashboard", "label": "ダッシュボード"}
+
+
+def test_map_gemini_update_schema_is_confirm() -> None:
+    chunks = [_chunk([_fc_part("update_schema", {"doc_type": "invoice", "field": {"name": "note", "label": "備考"}, "prompt": "追加しますか？"})])]
+    evs = list(map_gemini_stream(iter(chunks)))
+    assert [e.type for e in evs] == ["confirm_request", "done"]
+    assert evs[0].data["action"] == "update_schema" and evs[0].data["field"]["label"] == "備考"
+
+
+def test_gemini_chat_agent_via_fake_client() -> None:
+    chunks = [_chunk([_fc_part("navigate", {"target": "/rules"})])]
+    client = _ns(models=_ns(generate_content_stream=lambda **kw: iter(chunks)))
+    agent = GeminiChatAgent(client=client)
+    evs = list(agent.stream("ten_1", "ルールを見せて"))
+    assert [e.type for e in evs] == ["tool_call", "done"]
+    assert evs[0].data["target"] == "/rules"

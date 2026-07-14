@@ -201,3 +201,117 @@ class LlmChatAgent:
             messages=[{"role": "user", "content": message}],
         ) as stream:
             yield from map_events(stream)
+
+
+# ---- 本番: Gemini（google-genai function calling + streaming） ----
+
+_GEMINI_SYSTEM = (
+    "あなたは NewFan AI-OCR のアシスタント。ユーザーの意図に応じて必ずツールを使う。"
+    "KPI・STP率・精度・コスト・ダッシュボードの質問→navigate(target=/dashboard)。"
+    "要確認・レビュー・帳票確認→navigate(target=/documents?tab=queue)。"
+    "ルール→navigate(/rules)。スキーマ閲覧→navigate(/schemas)。"
+    "スキーマへの項目追加依頼→update_schema を呼ぶ。doc_type 不明なら invoice。"
+    "field.name は英小文字スネークケース、label は日本語、type は string/money_jpy/date 等。"
+    "prompt には確認文（例: スキーマに『X』を追加して再抽出しますか？）を入れる。"
+)
+
+_GEMINI_TOOLS = [
+    {
+        "function_declarations": [
+            {
+                "name": "navigate",
+                "description": "指定画面へ案内する（読み取り操作）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"target": {"type": "string"}, "label": {"type": "string"}},
+                    "required": ["target"],
+                },
+            },
+            {
+                "name": "update_schema",
+                "description": "抽出スキーマに項目を追加する（書込み操作。承認が必要）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "doc_type": {"type": "string"},
+                        "field": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "label": {"type": "string"},
+                                "type": {"type": "string"},
+                            },
+                        },
+                        "prompt": {"type": "string"},
+                    },
+                    "required": ["doc_type", "field"],
+                },
+            },
+        ]
+    }
+]
+
+
+def _plain(obj: Any) -> dict[str, Any]:
+    """proto Struct / MapComposite を JSON-safe な dict に変換する。"""
+    result: dict[str, Any] = json.loads(json.dumps(dict(obj), default=lambda o: dict(o)))
+    return result
+
+
+def map_gemini_stream(chunks: Iterator[Any]) -> Iterator[ChatEvent]:
+    """google-genai の streaming chunk を ChatEvent へ写像。
+
+    part.text→token、function_call(navigate)→tool_call、function_call(update_schema)→
+    confirm_request。SDK 非依存でテストできるよう chunk 列を受ける純関数。
+    """
+    for chunk in chunks:
+        for cand in getattr(chunk, "candidates", None) or []:
+            content = getattr(cand, "content", None)
+            for part in getattr(content, "parts", None) or []:
+                text = getattr(part, "text", None)
+                if text:
+                    yield ChatEvent("token", {"text": text})
+                fc = getattr(part, "function_call", None)
+                if fc:
+                    name = getattr(fc, "name", None)
+                    args = _plain(getattr(fc, "args", None) or {})
+                    if name == "navigate":
+                        yield ChatEvent("tool_call", {"name": "navigate", **args})
+                    elif name == "update_schema":
+                        yield ChatEvent("confirm_request", {"action": "update_schema", **args})
+    yield ChatEvent("done", {})
+
+
+class GeminiChatAgent:
+    """本番エージェント（Gemini）: google-genai の streaming + function calling を SSE に写像。
+
+    client 未指定なら google.genai.Client を遅延生成（GEMINI_API_KEY / GOOGLE_API_KEY）。
+    """
+
+    def __init__(self, *, model: str = "gemini-2.5-flash", client: Any = None, max_tokens: int = 800) -> None:
+        self._model = model
+        self._client = client
+        self._max_tokens = max_tokens
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        import os
+
+        from google import genai  # 遅延 import（runtime extra）
+
+        key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        return genai.Client(api_key=key)
+
+    def stream(self, tenant_id: str, message: str) -> Iterator[ChatEvent]:
+        client = self._get_client()
+        chunks = client.models.generate_content_stream(
+            model=self._model,
+            contents=message,
+            config={
+                "system_instruction": _GEMINI_SYSTEM,
+                "tools": _GEMINI_TOOLS,
+                "max_output_tokens": self._max_tokens,
+            },
+        )
+        yield from map_gemini_stream(chunks)

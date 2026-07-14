@@ -16,6 +16,7 @@ from fastapi import FastAPI
 
 from newfan_gateway.app import create_app
 from newfan_gateway.auth import ApiKeyStore, EnvApiKeyStore
+from newfan_gateway.chat import ChatAgent
 from newfan_gateway.config import Settings
 from newfan_gateway.ports import OrchestratorClient
 from newfan_gateway.queue import Queue
@@ -45,9 +46,13 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     # API キーは Secrets Manager 由来の環境変数 API_KEYS(JSON) から（未設定は空 InMemory）。
     api_keys: ApiKeyStore | None = EnvApiKeyStore.from_env() if os.environ.get("API_KEYS") else None
 
-    # チャットエージェント: ANTHROPIC_API_KEY 設定時は LLM tool-use、無ければ決定論（RuleBased）。
-    chat_agent = None
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    # チャットエージェント: GEMINI/ANTHROPIC キー設定時は LLM tool-use、無ければ決定論（RuleBased）。
+    chat_agent: ChatAgent | None = None
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        from newfan_gateway.chat import GeminiChatAgent
+
+        chat_agent = GeminiChatAgent(model=os.environ.get("LLM_MODEL", "gemini-2.5-flash"))
+    elif os.environ.get("ANTHROPIC_API_KEY"):
         from newfan_gateway.chat import LlmChatAgent
 
         chat_agent = LlmChatAgent(model=os.environ.get("LLM_MODEL", "claude-opus-4-8"))
