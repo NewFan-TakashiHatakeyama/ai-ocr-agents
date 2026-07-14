@@ -19,6 +19,8 @@ class Settings:
     cors_origins: list[str] = field(default_factory=_default_cors)
     database_url: str | None = None  # 未設定なら InMemoryRepository（開発/テスト）
     redis_url: str | None = None  # 未設定なら InMemoryQueue（開発/テスト）
+    s3_bucket: str | None = None  # 設定時 ingest は S3ObjectStore（未設定は Local, §2.3）
+    s3_kms_key_id: str | None = None  # S3 SSE-KMS のキー ID（任意）
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -33,4 +35,6 @@ class Settings:
             ),
             database_url=os.environ.get("DATABASE_URL"),
             redis_url=os.environ.get("REDIS_URL"),
+            s3_bucket=os.environ.get("S3_BUCKET"),
+            s3_kms_key_id=os.environ.get("S3_KMS_KEY_ID"),
         )

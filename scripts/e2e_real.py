@@ -142,6 +142,33 @@ def main() -> int:
     saved = {r[0]: r[1] for r in rows2}
     ok &= st2 == "confirmed" and saved.get("total_amount") == "178000"
 
+    # --- Phase C: export worker が q.export を消費し canonical JSON を書く ---
+    print("== Phase C: export worker q.export -> canonical JSON ==")
+    import tempfile
+    from pathlib import Path
+
+    from newfan_export.pg_source import PgExportSource
+    from newfan_export.redis_io import RedisStreamConsumer as ExportConsumer
+    from newfan_export.service import ExportService
+    from newfan_export.storage import LocalObjectStore
+    from newfan_export.webhook import WebhookSender
+    from newfan_export.worker import ExportWorker
+
+    outdir = Path(tempfile.mkdtemp())
+    ex_worker = ExportWorker(
+        PgExportSource(DSN),
+        ExportService(LocalObjectStore(outdir), WebhookSender()),
+        ExportConsumer(REDIS, "q.export", "export", "export-1"),
+    )
+    n_exported = ex_worker.run_once()
+    canon = list(outdir.rglob("*.json"))
+    print(f"  processed={n_exported} canonical={[str(p.relative_to(outdir)) for p in canon]}")
+    run_a_json = next((p for p in canon if p.name == "run_a.json"), None)
+    ok &= n_exported >= 1 and run_a_json is not None
+    if run_a_json is not None:
+        doc = json.loads(run_a_json.read_text(encoding="utf-8"))
+        print(f"  run_a canonical keys={list(doc)}")
+
     print("=" * 50)
     print("E2E RESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1

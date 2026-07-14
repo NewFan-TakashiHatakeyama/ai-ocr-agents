@@ -10,9 +10,12 @@ ingestor/api_keys は create_app の既定（本番 IngestService / 空の API�
 
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI
 
 from newfan_gateway.app import create_app
+from newfan_gateway.auth import ApiKeyStore, EnvApiKeyStore
 from newfan_gateway.config import Settings
 from newfan_gateway.ports import OrchestratorClient
 from newfan_gateway.queue import Queue
@@ -37,7 +40,12 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         queue = redis_queue
         orchestrator = QueueOrchestratorClient(redis_queue)
 
-    return create_app(settings=settings, repo=repo, queue=queue, orchestrator=orchestrator)
+    # API キーは Secrets Manager 由来の環境変数 API_KEYS(JSON) から（未設定は空 InMemory）。
+    api_keys: ApiKeyStore | None = EnvApiKeyStore.from_env() if os.environ.get("API_KEYS") else None
+
+    return create_app(
+        settings=settings, repo=repo, queue=queue, orchestrator=orchestrator, api_keys=api_keys
+    )
 
 
 app = build_app()

@@ -82,9 +82,16 @@ def create_app(
 
 
 def _default_ingestor(settings: Settings) -> Ingestor:
-    # 本番: LocalObjectStore は将来 S3ObjectStore に差し替え。rasterizer は pypdfium2（runtime extra）。
+    # rasterizer は pypdfium2（runtime extra）。ObjectStore は S3_BUCKET 設定時 S3、無ければ Local。
     from newfan_ingest import IngestService
     from newfan_ingest.rasterize import PdfiumRasterizer
-    from newfan_ingest.storage import LocalObjectStore
 
-    return IngestService(LocalObjectStore(settings.storage_root), PdfiumRasterizer())
+    if settings.s3_bucket:
+        from newfan_ingest.storage import S3ObjectStore
+
+        store: Any = S3ObjectStore(settings.s3_bucket, kms_key_id=settings.s3_kms_key_id)
+    else:
+        from newfan_ingest.storage import LocalObjectStore
+
+        store = LocalObjectStore(settings.storage_root)
+    return IngestService(store, PdfiumRasterizer())
