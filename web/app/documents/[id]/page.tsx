@@ -113,6 +113,35 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     return () => window.removeEventListener("keydown", onKey);
   }, [pending, selectedField, select, setEdit, submit]);
 
+  // §8.3 No.4 autosave: 編集を 500ms デバウンスで POST /corrections（version 付き楽観ロック）
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  useEffect(() => {
+    if (!data || Object.keys(edits).length === 0) return;
+    const handle = setTimeout(async () => {
+      const items = Object.entries(edits).map(([field_name, corrected_value]) => ({
+        field_name,
+        original_value: data.fields.find((f) => f.name === field_name)?.value_normalized ?? null,
+        corrected_value,
+      }));
+      setSaveState("saving");
+      try {
+        await api.postCorrections(data.document_id, data.run_id, data.result_version, items);
+        setSaveState("saved");
+      } catch (e) {
+        setSaveState("idle");
+        if (e instanceof ApiError && e.status === 409) {
+          push({
+            kind: "warn",
+            message: "他のメンバーが先に更新しました。最新を読み込みます。",
+            action: { label: "最新を表示", onClick: () => refetch() },
+          });
+        }
+        // その他のエラーは静かに（確定時に再送される）
+      }
+    }, 500);
+    return () => clearTimeout(handle);
+  }, [edits, data, push, refetch]);
+
   if (isLoading) return <div className="page">読み込み中…</div>;
   if (error || !data) return <div className="page">結果の取得に失敗しました。</div>;
 
@@ -131,6 +160,11 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           <span className="sub"> · run {data.run_id.slice(0, 12)}</span>
         </div>
         <StatusChip status={data.status} />
+        {saveState !== "idle" && (
+          <span className="sub" aria-live="polite">
+            {saveState === "saving" ? "保存中…" : "✓ 保存済み"}
+          </span>
+        )}
         <span className="spacer" />
         <div className="rv-prog">
           <span className="seg" aria-hidden>
