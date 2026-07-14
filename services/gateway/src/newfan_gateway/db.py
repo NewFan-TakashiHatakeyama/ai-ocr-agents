@@ -253,3 +253,191 @@ def _run_record(row: ExtractionRun) -> RunRecord:
         tables=[TableResult.model_validate(t) for t in (row.tables_json or [])],
         review_summary=row.review_summary or {},
     )
+
+
+# ============ 管理画面（SCR-04/05/06）Pg 実装 ============
+
+
+class PgAdminRepository:
+    """AdminRepository の PostgreSQL 実装（field_schemas / tenant_rules / 集計）。"""
+
+    def __init__(self, dsn: str) -> None:
+        self._engine = create_engine(dsn, future=True)
+
+    def _rls(self, c, tenant_id: str) -> None:
+        c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
+
+    # --- schemas ---
+    def list_schemas(self, tenant_id: str):
+        from newfan_gateway.records import SchemaFieldDef, SchemaRecord
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT DISTINCT ON (doc_type) id, doc_type, version, fields "
+                    "FROM field_schemas WHERE tenant_id=:t ORDER BY doc_type, version DESC"
+                ),
+                {"t": tenant_id},
+            ).all()
+        return [
+            SchemaRecord(
+                id=r.id,
+                tenant_id=tenant_id,
+                doc_type=r.doc_type,
+                version=r.version,
+                fields=[SchemaFieldDef.model_validate(f) for f in (r.fields or [])],
+            )
+            for r in rows
+        ]
+
+    def get_schema(self, tenant_id: str, doc_type: str):
+        from newfan_gateway.records import SchemaFieldDef, SchemaRecord
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "SELECT id, version, fields FROM field_schemas "
+                    "WHERE tenant_id=:t AND doc_type=:d ORDER BY version DESC LIMIT 1"
+                ),
+                {"t": tenant_id, "d": doc_type},
+            ).first()
+        if r is None:
+            return None
+        return SchemaRecord(
+            id=r.id,
+            tenant_id=tenant_id,
+            doc_type=doc_type,
+            version=r.version,
+            fields=[SchemaFieldDef.model_validate(f) for f in (r.fields or [])],
+        )
+
+    def put_schema(self, tenant_id: str, doc_type: str, fields):
+        import json as _json
+        import uuid as _uuid
+
+        from newfan_gateway.records import SchemaRecord
+
+        payload = _json.dumps([f.model_dump() for f in fields], ensure_ascii=False)
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            nxt = c.execute(
+                text(
+                    "SELECT coalesce(max(version),0)+1 FROM field_schemas "
+                    "WHERE tenant_id=:t AND doc_type=:d"
+                ),
+                {"t": tenant_id, "d": doc_type},
+            ).scalar_one()
+            sid = f"sch_{_uuid.uuid4().hex[:20]}"
+            c.execute(
+                text(
+                    "INSERT INTO field_schemas (id, tenant_id, doc_type, version, fields) "
+                    "VALUES (:i,:t,:d,:v, CAST(:f AS jsonb))"
+                ),
+                {"i": sid, "t": tenant_id, "d": doc_type, "v": nxt, "f": payload},
+            )
+        return SchemaRecord(id=sid, tenant_id=tenant_id, doc_type=doc_type, version=nxt, fields=list(fields))
+
+    # --- rules ---
+    def _rule(self, tenant_id: str, r):
+        from newfan_gateway.records import RuleRecord
+
+        return RuleRecord(
+            id=r.id,
+            tenant_id=tenant_id,
+            doc_type=r.doc_type,
+            supplier_key=r.supplier_key,
+            field_name=r.field_name,
+            rule_type=r.rule_type,
+            rule_json=r.rule_json or {},
+            status=r.status,
+            validation_report=r.validation_report,
+            source_correction_ids=r.source_correction_ids or [],
+            created_by=r.created_by,
+        )
+
+    def list_rules(self, tenant_id: str, *, status=None, doc_type=None):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT * FROM tenant_rules WHERE tenant_id=:t "
+                    "AND (CAST(:s AS text) IS NULL OR status=CAST(:s AS text)) "
+                    "AND (CAST(:d AS text) IS NULL OR doc_type IS NULL OR doc_type=CAST(:d AS text)) "
+                    "ORDER BY created_at DESC"
+                ),
+                {"t": tenant_id, "s": status, "d": doc_type},
+            ).all()
+        return [self._rule(tenant_id, r) for r in rows]
+
+    def get_rule(self, tenant_id: str, rule_id: str):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text("SELECT * FROM tenant_rules WHERE tenant_id=:t AND id=:i"),
+                {"t": tenant_id, "i": rule_id},
+            ).first()
+        return self._rule(tenant_id, r) if r else None
+
+    def set_rule_status(self, tenant_id: str, rule_id: str, status: str):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            c.execute(
+                text("UPDATE tenant_rules SET status=:s, updated_at=now() WHERE tenant_id=:t AND id=:i"),
+                {"s": status, "t": tenant_id, "i": rule_id},
+            )
+        return self.get_rule(tenant_id, rule_id)
+
+    # --- metrics ---
+    def metrics_summary(self, tenant_id: str):
+        from newfan_gateway.records import MetricsSummary
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            total_docs = c.execute(
+                text("SELECT count(*) FROM documents WHERE tenant_id=:t"), {"t": tenant_id}
+            ).scalar_one()
+            status_rows = c.execute(
+                text("SELECT status, count(*) FROM extraction_runs WHERE tenant_id=:t GROUP BY status"),
+                {"t": tenant_id},
+            ).all()
+            confirmed = c.execute(
+                text("SELECT count(*) FROM extraction_runs WHERE tenant_id=:t AND status='confirmed'"),
+                {"t": tenant_id},
+            ).scalar_one()
+            review = c.execute(
+                text("SELECT count(*) FROM extraction_runs WHERE tenant_id=:t AND status='needs_review'"),
+                {"t": tenant_id},
+            ).scalar_one()
+            stp_conf = c.execute(
+                text(
+                    "SELECT count(*) FROM extraction_runs r WHERE r.tenant_id=:t AND r.status='confirmed' "
+                    "AND NOT EXISTS (SELECT 1 FROM correction_logs cl WHERE cl.run_id=r.id)"
+                ),
+                {"t": tenant_id},
+            ).scalar_one()
+            corrections = c.execute(
+                text("SELECT count(*) FROM correction_logs WHERE tenant_id=:t"), {"t": tenant_id}
+            ).scalar_one()
+            active = c.execute(
+                text("SELECT count(*) FROM tenant_rules WHERE tenant_id=:t AND status='active'"),
+                {"t": tenant_id},
+            ).scalar_one()
+            pending = c.execute(
+                text("SELECT count(*) FROM tenant_rules WHERE tenant_id=:t AND status IN ('draft','validating')"),
+                {"t": tenant_id},
+            ).scalar_one()
+            memories = c.execute(
+                text("SELECT count(*) FROM tenant_memories WHERE tenant_id=:t"), {"t": tenant_id}
+            ).scalar_one()
+        denom = (confirmed + review) or 1
+        return MetricsSummary(
+            total_documents=total_docs,
+            status_counts={s: n for s, n in status_rows},
+            stp_rate=round(stp_conf / denom, 4),
+            corrections_total=corrections,
+            active_rules=active,
+            pending_rules=pending,
+            memories_total=memories,
+        )

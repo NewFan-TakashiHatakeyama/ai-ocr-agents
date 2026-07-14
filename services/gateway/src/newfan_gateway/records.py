@@ -69,3 +69,57 @@ class CorrectionRecord(BaseModel):
     corrected_value: str
     note: Optional[str] = None
     created_at: datetime = Field(default_factory=_now)
+
+
+# ---- 管理画面（SCR-04/05/06） ----
+
+
+class SchemaFieldDef(BaseModel):
+    name: str
+    label: Optional[str] = None
+    type: str = "string"
+    required: bool = False
+    critical: bool = False
+    columns: Optional[list[dict[str, Any]]] = None  # table 型の列定義（§5.5）
+
+
+class SchemaRecord(BaseModel):
+    """field_schemas 行（§7.2）。有効版＝doc_type ごとの最新 version。"""
+
+    id: str
+    tenant_id: str
+    doc_type: str
+    version: int
+    fields: list[SchemaFieldDef] = Field(default_factory=list)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class RuleRecord(BaseModel):
+    """tenant_rules 行（§5.8.4）。"""
+
+    id: str
+    tenant_id: str
+    doc_type: Optional[str] = None
+    supplier_key: Optional[str] = None
+    field_name: Optional[str] = None
+    rule_type: str
+    rule_json: dict[str, Any] = Field(default_factory=dict)
+    status: str = "draft"
+    validation_report: Optional[dict[str, Any]] = None
+    source_correction_ids: list[str] = Field(default_factory=list)
+    created_by: str = "agent"
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class MetricsSummary(BaseModel):
+    """ダッシュボード KPI（§12.1 と対応。未計測項目は None）。"""
+
+    total_documents: int = 0
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    stp_rate: float = 0.0
+    corrections_total: int = 0
+    active_rules: int = 0
+    pending_rules: int = 0
+    memories_total: int = 0
+    field_accuracy_sampled: Optional[float] = None  # 週次サンプル監査（データ源未整備）
+    llm_cost_jpy_total: Optional[float] = None  # トークン計測未整備

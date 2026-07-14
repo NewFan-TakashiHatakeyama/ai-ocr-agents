@@ -6,6 +6,7 @@ from typing import Callable, Optional
 
 from fastapi import Depends, Header, Request
 
+from newfan_gateway.admin import AdminRepository
 from newfan_gateway.auth import Principal, check_min_role, decode_principal
 from newfan_gateway.config import Settings
 from newfan_gateway.ports import Ingestor, OrchestratorClient
@@ -31,6 +32,10 @@ def get_ingestor(request: Request) -> Ingestor:
 
 def get_orchestrator(request: Request) -> OrchestratorClient:
     return request.app.state.orchestrator  # type: ignore[no-any-return]
+
+
+def get_admin(request: Request) -> AdminRepository:
+    return request.app.state.admin  # type: ignore[no-any-return]
 
 
 def get_principal(

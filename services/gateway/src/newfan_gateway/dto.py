@@ -102,3 +102,64 @@ class ReviewQueue(BaseModel):
 class SignedUrl(BaseModel):
     url: str
     expires_in: int
+
+
+# ---- 管理画面 DTO（SCR-04/05/06） ----
+
+
+class SchemaFieldDto(BaseModel):
+    name: str
+    label: Optional[str] = None
+    type: str = "string"
+    required: bool = False
+    critical: bool = False
+    columns: Optional[list[dict[str, Any]]] = None
+
+
+class SchemaDto(BaseModel):
+    doc_type: str
+    version: int
+    fields: list[SchemaFieldDto]
+
+
+class SchemaList(BaseModel):
+    items: list[SchemaDto]
+
+
+class PutSchemaRequest(BaseModel):
+    doc_type: str
+    fields: list[SchemaFieldDto]
+
+
+class RuleDto(BaseModel):
+    id: str
+    doc_type: Optional[str] = None
+    supplier_key: Optional[str] = None
+    field_name: Optional[str] = None
+    rule_type: str
+    rule_json: dict[str, Any]
+    status: str
+    validation_report: Optional[dict[str, Any]] = None
+    source_correction_ids: list[str] = Field(default_factory=list)
+    created_by: str = "agent"
+    activatable: bool = False
+
+
+class RuleList(BaseModel):
+    items: list[RuleDto]
+
+
+class PatchRuleRequest(BaseModel):
+    status: str  # "active"（有効化）/ "retired"（退役）
+
+
+class MetricsResponse(BaseModel):
+    total_documents: int
+    status_counts: dict[str, int]
+    stp_rate: float
+    corrections_total: int
+    active_rules: int
+    pending_rules: int
+    memories_total: int
+    field_accuracy_sampled: Optional[float] = None
+    llm_cost_jpy_total: Optional[float] = None

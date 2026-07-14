@@ -9,7 +9,9 @@ from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from newfan_gateway import dto
 from newfan_gateway.auth import Principal
 from newfan_gateway.config import Settings
+from newfan_gateway.admin import AdminRepository, is_activatable
 from newfan_gateway.deps import (
+    get_admin,
     get_ingestor,
     get_orchestrator,
     get_queue,
@@ -27,6 +29,7 @@ from newfan_gateway.records import (
     JobRecord,
     PageRecord,
     RunRecord,
+    SchemaFieldDef,
 )
 from newfan_gateway.repository import Repository
 from newfan_ingest import IngestError, UploadInput
@@ -331,3 +334,101 @@ def review_queue(
         )
     items.sort(key=lambda i: i.priority, reverse=True)
     return dto.ReviewQueue(items=items)
+
+
+# ============ 管理画面（SCR-04/05/06, admin） ============
+
+
+def _schema_dto(rec: Any) -> dto.SchemaDto:
+    return dto.SchemaDto(
+        doc_type=rec.doc_type,
+        version=rec.version,
+        fields=[dto.SchemaFieldDto(**f.model_dump()) for f in rec.fields],
+    )
+
+
+def _rule_dto(rec: Any) -> dto.RuleDto:
+    return dto.RuleDto(
+        id=rec.id,
+        doc_type=rec.doc_type,
+        supplier_key=rec.supplier_key,
+        field_name=rec.field_name,
+        rule_type=rec.rule_type,
+        rule_json=rec.rule_json,
+        status=rec.status,
+        validation_report=rec.validation_report,
+        source_correction_ids=rec.source_correction_ids,
+        created_by=rec.created_by,
+        activatable=is_activatable(rec.validation_report),
+    )
+
+
+@router.get("/schemas", response_model=dto.SchemaList)
+def list_schemas(
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.SchemaList:
+    return dto.SchemaList(items=[_schema_dto(s) for s in admin.list_schemas(principal.tenant_id)])
+
+
+@router.get("/schemas/{doc_type}", response_model=dto.SchemaDto)
+def get_schema(
+    doc_type: str,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.SchemaDto:
+    rec = admin.get_schema(principal.tenant_id, doc_type)
+    if rec is None:
+        raise ApiError("E1001", "スキーマが見つかりません", details={"doc_type": doc_type})
+    return _schema_dto(rec)
+
+
+@router.put("/schemas", response_model=dto.SchemaDto)
+def put_schema(
+    body: dto.PutSchemaRequest,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.SchemaDto:
+    fields = [SchemaFieldDef(**f.model_dump()) for f in body.fields]
+    rec = admin.put_schema(principal.tenant_id, body.doc_type, fields)  # 常に新版
+    return _schema_dto(rec)
+
+
+@router.get("/rules", response_model=dto.RuleList)
+def list_rules(
+    status: Optional[str] = None,
+    doc_type: Optional[str] = None,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.RuleList:
+    rules = admin.list_rules(principal.tenant_id, status=status, doc_type=doc_type)
+    return dto.RuleList(items=[_rule_dto(r) for r in rules])
+
+
+@router.patch("/rules/{rule_id}", response_model=dto.RuleDto)
+def patch_rule(
+    rule_id: str,
+    body: dto.PatchRuleRequest,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.RuleDto:
+    if body.status not in ("active", "retired"):
+        raise ApiError("E1003", "status は active / retired のみ")
+    rec = admin.get_rule(principal.tenant_id, rule_id)
+    if rec is None:
+        raise ApiError("E1001", "ルールが見つかりません", details={"rule_id": rule_id})
+    # 有効化は検証合格（再現率≥90%・回帰0件）が条件（§5.8.4）
+    if body.status == "active" and not is_activatable(rec.validation_report):
+        raise ApiError("E1006", "検証未達のため有効化できません（再現率≥90%・回帰0件が必要）")
+    updated = admin.set_rule_status(principal.tenant_id, rule_id, body.status)
+    assert updated is not None
+    return _rule_dto(updated)
+
+
+@router.get("/metrics/summary", response_model=dto.MetricsResponse)
+def metrics_summary(
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.MetricsResponse:
+    m = admin.metrics_summary(principal.tenant_id)
+    return dto.MetricsResponse(**m.model_dump())

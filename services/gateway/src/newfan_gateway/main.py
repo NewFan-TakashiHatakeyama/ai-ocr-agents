@@ -26,10 +26,12 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
 
     repo: Repository | None = None
+    admin = None
     if settings.database_url:
-        from newfan_gateway.db import PgRepository
+        from newfan_gateway.db import PgAdminRepository, PgRepository
 
         repo = PgRepository(settings.database_url)
+        admin = PgAdminRepository(settings.database_url)
 
     queue: Queue | None = None
     orchestrator: OrchestratorClient | None = None
@@ -44,7 +46,12 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     api_keys: ApiKeyStore | None = EnvApiKeyStore.from_env() if os.environ.get("API_KEYS") else None
 
     return create_app(
-        settings=settings, repo=repo, queue=queue, orchestrator=orchestrator, api_keys=api_keys
+        settings=settings,
+        repo=repo,
+        queue=queue,
+        orchestrator=orchestrator,
+        api_keys=api_keys,
+        admin=admin,
     )
 
 
