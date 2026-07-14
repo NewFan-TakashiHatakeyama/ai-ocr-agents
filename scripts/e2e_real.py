@@ -25,6 +25,7 @@ from newfan_memory import HashingEmbedder, InMemoryMemoryRepository, MemoryServi
 from newfan_orchestrator.graph import build_graph
 from newfan_orchestrator.pg_persistence import PgContextStore
 from newfan_orchestrator.redis_io import RedisQueue, RedisStreamConsumer
+from newfan_orchestrator.serde import newfan_serde
 from newfan_orchestrator.worker import ExtractionWorker
 from newfan_paddle_client import LayoutParsingResponse
 
@@ -83,7 +84,7 @@ def _fields(engine, run: str):  # type: ignore[no-untyped-def]
 
 def _worker(conf: float, store: PgContextStore, exports: RedisQueue) -> ExtractionWorker:
     graph = build_graph(
-        checkpointer=MemorySaver(),
+        checkpointer=MemorySaver(serde=newfan_serde()),
         adapter=LLMAdapter(FakeProvider(handler=_llm)),
         bundle=PromptBundle.load(default_bundle_dir()),
         memory=MemoryService(HashingEmbedder(), InMemoryMemoryRepository()),

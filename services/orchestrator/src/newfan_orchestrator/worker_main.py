@@ -8,7 +8,8 @@ gateway の `newfan_gateway.main` に対応する。SIGTERM で graceful shutdow
 任意 env: VL_URL（既定無効, ADR-0003 Option A）, LLM_MODEL, CONSUMER_NAME, POLL_BLOCK_MS
 
 チェックポイントは PostgresSaver（プロセス跨ぎ resume, §4.4）。structure/LLM は実クライアント。
-memory は共有ストア接続が未整備のため e5+InMemory で degrade（本番は memory-svc ストアへ）。
+memory は PgMemoryRepository（正本=PostgreSQL, §5.8.3）＋e5 埋め込み。FAISS index は
+list_memories からプロセス毎に再構築（MemoryService._rehydrate）。画像は s3:///file:// 両対応。
 """
 
 from __future__ import annotations
@@ -24,8 +25,10 @@ from newfan_memory import MemoryService
 from newfan_paddle_client import PaddleServingClient
 
 from newfan_orchestrator.graph import build_graph
+from newfan_orchestrator.image_loaders import make_dispatching_image_loader
 from newfan_orchestrator.pg_persistence import PgContextStore
 from newfan_orchestrator.redis_io import RedisQueue, RedisStreamConsumer
+from newfan_orchestrator.serde import newfan_serde
 from newfan_orchestrator.worker import ExtractionWorker
 
 _STOP = False
@@ -42,7 +45,16 @@ def _pg_dsn() -> str:
 
 
 def _memory() -> MemoryService:
-    from newfan_memory import InMemoryMemoryRepository
+    # 正本は PostgreSQL（§5.8.3）。DATABASE_URL 未設定時のみ InMemory へ degrade。
+    dsn = os.environ.get("DATABASE_URL")
+    if dsn:
+        from newfan_memory.pg_memory import PgMemoryRepository
+
+        repo: Any = PgMemoryRepository(dsn)
+    else:
+        from newfan_memory import InMemoryMemoryRepository
+
+        repo = InMemoryMemoryRepository()
 
     try:
         from newfan_memory.e5_embedder import E5Embedder
@@ -52,7 +64,7 @@ def _memory() -> MemoryService:
         from newfan_memory import HashingEmbedder
 
         embedder = HashingEmbedder()
-    return MemoryService(embedder, InMemoryMemoryRepository())
+    return MemoryService(embedder, repo)
 
 
 def main() -> None:
@@ -76,6 +88,7 @@ def main() -> None:
 
     with PostgresSaver.from_conn_string(_pg_dsn()) as checkpointer:
         checkpointer.setup()
+        checkpointer.serde = newfan_serde()  # schema 型を許可（未登録型ブロック回避, §4.4）
         graph = build_graph(
             checkpointer=checkpointer,
             adapter=adapter,
@@ -83,6 +96,7 @@ def main() -> None:
             memory=_memory(),
             structure_client=structure,
             vl_client=vl,
+            image_loader=make_dispatching_image_loader(),  # s3:// / file:// を振り分け
             context_store=store,
             export_enqueue=export_queue.enqueue,
         )

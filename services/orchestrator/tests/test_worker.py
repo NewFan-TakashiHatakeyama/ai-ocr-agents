@@ -21,6 +21,7 @@ from newfan_paddle_client import LayoutParsingResponse
 from newfan_orchestrator.consumer import InMemoryQueueConsumer
 from newfan_orchestrator.graph import build_graph
 from newfan_orchestrator.persistence import InMemoryContextStore
+from newfan_orchestrator.serde import newfan_serde
 from newfan_orchestrator.worker import ExtractionWorker
 
 _BUNDLE = PromptBundle.load(default_bundle_dir())
@@ -76,7 +77,7 @@ def _build(conf: float) -> tuple[ExtractionWorker, InMemoryContextStore, list, l
     exports: list = []
     webhooks: list = []
     graph = build_graph(
-        checkpointer=MemorySaver(),
+        checkpointer=MemorySaver(serde=newfan_serde()),
         adapter=LLMAdapter(FakeProvider(handler=_llm_handler)),
         bundle=_BUNDLE,
         memory=MemoryService(HashingEmbedder(), InMemoryMemoryRepository()),
