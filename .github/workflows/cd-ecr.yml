@@ -1,0 +1,47 @@
+name: CD (build & push to ECR)
+
+# タグ push（v*）または手動実行で 4 イメージを ECR へ push。
+# 事前準備: OIDC 用 IAM ロール（secrets.AWS_ROLE_ARN）、vars.AWS_REGION、ECR リポジトリ
+# （deploy/terraform で作成）。ECS デプロイ（run-task migrate → service update）は別途。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "イメージタグ（未指定時は git ref 名）"
+        required: false
+
+permissions:
+  id-token: write # OIDC
+  contents: read
+
+jobs:
+  push:
+    name: build & push ${{ matrix.repo }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { image: gateway, repo: newfan-gateway }
+          - { image: orchestrator-worker, repo: newfan-orchestrator-worker }
+          - { image: export-worker, repo: newfan-export-worker }
+          - { image: migrate, repo: newfan-migrate }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build & push
+        env:
+          REG: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.event.inputs.image_tag || github.ref_name }}
+        run: |
+          docker build -f deploy/docker/${{ matrix.image }}.Dockerfile \
+            -t "$REG/${{ matrix.repo }}:$TAG" .
+          docker push "$REG/${{ matrix.repo }}:$TAG"

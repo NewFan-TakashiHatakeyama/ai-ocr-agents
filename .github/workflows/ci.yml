@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: lint / type / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.8"
+          enable-cache: true
+      - name: Sync workspace (dev group)
+        run: uv sync --frozen
+      - name: ruff
+        run: uv run ruff check .
+      - name: mypy (strict, src のみ)
+        run: uv run mypy $(ls -d packages/*/src services/*/src)
+      - name: pytest
+        run: uv run pytest
+
+  images:
+    name: docker build (軽量イメージ)
+    runs-on: ubuntu-latest
+    # torch を含む orchestrator-worker は重いため CD(タグ)側で build。ここは workspace/extras の検証。
+    strategy:
+      matrix:
+        image: [gateway, export-worker, migrate]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.image }} image
+        run: docker build -f deploy/docker/${{ matrix.image }}.Dockerfile -t newfan-${{ matrix.image }}:ci .
