@@ -6,9 +6,12 @@
 # 推論層（structure / ocr / vl）をまず起動し、paddle_client の契約テスト fixture 録画や
 # ingest→orchestrator の E2E に使う。data 層（Postgres/Redis）は段階的に追加する。
 #
-# コスト最小トポロジ（ADR-0003 Option A）では structure/ocr は Fargate CPU 相当で動かすため、
-# OpenVINO CPU イメージ／`--device cpu` で確認する。GPU が要るのは vl-svc（既定無効）のみ。
-# 推論イメージタグ・GPU 構成は環境依存（付録C-1/C-4）。
+# コスト最小トポロジ（ADR-0003 Option A）では structure/ocr は Fargate CPU 相当で動かす。
+# GPU が要るのは vl-svc（既定無効）のみ。推論イメージタグは環境依存（付録C-1/C-4）。
+#
+# CPU バックエンド: `--engine onnxruntime` を付ける（Linux 実測 20.1s→7.9s = 2.5×、精度同一）。
+#   イメージに onnxruntime / paddle2onnx が必要（無い場合は起動時に DependencyError）。
+#   OpenVINO は PP-OCRv6_medium_rec を ultra-infer 1.2.0 が読めず不可（inference/README.md 参照）。
 
 services:
   structure-svc:
@@ -17,6 +20,7 @@ services:
       paddlex --serve
       --pipeline /configs/pipeline_config.yaml
       --host 0.0.0.0 --port 8080
+      --engine onnxruntime
     volumes:
       - ./../inference/structure/pipeline_config.yaml:/configs/pipeline_config.yaml:ro
     ports:

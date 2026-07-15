@@ -8,7 +8,7 @@
 | クラスタ | 起動タイプ | 載せるサービス |
 |---|---|---|
 | `newfan-app` | Fargate | gateway, web, orchestrator, ingest, memory, export, llm-adapter |
-| `newfan-inference` | Fargate（OpenVINO CPU） | structure-svc, ocr-svc（Option A 既定） |
+| `newfan-inference` | Fargate（CPU, `--engine onnxruntime`） | structure-svc, ocr-svc（Option A 既定） |
 | `newfan-gpu`（Option B のみ） | EC2 GPU（g5, 容量プロバイダ） | vl-svc（＋必要なら structure/ocr GPU 版） |
 
 - 外部公開: gateway / web のみ **ALB + WAF**。

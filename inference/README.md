@@ -60,14 +60,31 @@ ultra-infer 1.2.0 の OpenVINO が最新 PP-OCRv6_medium_rec に追随できて�
 つまり「5.2×」は PP-OCRv6 単体の数字で、PP-StructureV3 全体には直接適用できない。
 なお paddle 3.3.1 は HPI 対応表に無く「Paddle 3.1.1 の事前知識を使用」へフォールバックする（動作する）。
 
-#### ⚠️ 未解決: この設定はそのままでは serve できない
+#### サービング起動検証（解決済, 2026-07）
 
-`paddlex --serve --pipeline inference/structure/pipeline_config.yaml` を実コンテナで起動すると
-**`ValueError: config error for doc_preprocessor_pipeline!`** で失敗する。本ファイルは
-「確定手順」（下記）を前提とした**部分的な pin** であり、完全な base config とのマージが未実施のため。
-`deploy/compose.yaml` はこの設定をそのまま `paddlex --serve` に渡しているので、**推論層の
-サービングは一度も起動検証できていない**。本番投入前に確定手順の実行と起動確認が必須。
-あわせて `--engine onnxruntime` の付与（上表の 2.5×）もここで入れる。
+以前は `inference/structure/pipeline_config.yaml` が部分 pin だったため
+`paddlex --serve` が **`ValueError: config error for doc_preprocessor_pipeline!`** で起動できず、
+推論層のサービングは一度も検証されていなかった。`export_base_config.py` で完全 base を生成して
+設計の固定値をマージし、**authoritative config 化して実コンテナで疎通確認済み**:
+
+```
+paddlex --serve --pipeline /configs/pipeline_config.yaml --host 0.0.0.0 --port 8080 \
+        --engine onnxruntime
+  → Uvicorn running on http://0.0.0.0:8080
+POST /layout-parsing (sample2.png)
+  → HTTP 200 / errorCode=0 "Success" / 8.0s
+  → LayoutParsingResponse で契約パース OK（spans=94）
+  → build_tables: 13行 / conf 0.9678 / 合計7,003・内消費税599・伝票合計3,300/3,703 を取得
+     ＝記録 fixture（Python API 経由）と完全一致
+```
+
+**印章認識は無効化した（設計変更）**: 有効だと印章"検出" `PP-OCRv4_server_seal_det` が必要だが
+公式に onnx パッケージが無く、`--engine onnxruntime` 起動時に
+`ValueError: Official model source does not provide a 'onnx' package` で落ちる
+（v6 版の印章検出は paddlex 3.7.2 に存在しない）。帳票の項目抽出では印章の文字（社名）は
+ヘッダ本文と重複し KIE 上の価値が低い一方、有効にすると 2.5× 高速化を丸ごと失うため
+速度を優先した。印章の文字が必要になったら `--engine onnxruntime` を外して
+`use_seal_recognition: true` に戻す（推論は約2.5倍遅くなる）。
 
 ### PP-OCRv6 ティアと日本語対応（paddlex 3.7.2 実測）
 
