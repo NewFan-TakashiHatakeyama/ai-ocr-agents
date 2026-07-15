@@ -10,6 +10,37 @@ PaddleOCR 自己ホストサービング（structure / ocr / vl）のパイプ�
 | ocr-svc（照合） | `ocr/ocr_small_pipeline_config.yaml` | PP-OCRv6_small | two-model agreement 用（任意） |
 | vl-svc | `vl/pipeline_config.yaml` | PaddleOCR-VL-1.6-0.9B ＋ layout: PP-DocLayout_plus-L | genai(vLLM) 別コンテナ、GPU専用プール（DD-09） |
 
+### CPU 推論バックエンド実測（sample2.png / PP-OCRv6_medium + PP-DocLayout_plus-L）
+
+本番は Fargate CPU（ADR-0003 Option A, GPU回避）のため推論バックエンドが効く。同一条件で実測:
+
+| エンジン | init | 推論(warm) | 抽出 | 精度 |
+|---|---|---|---|---|
+| `paddle`（現行既定） | 5.5s | 79.7s（44〜83s と変動） | texts=94 / tables=1 | conf 0.9689 |
+| **`onnxruntime`** | 4.9s | **8.8s**（8.2〜10.4s と安定） | texts=94 / tables=1 | **conf 0.9689（完全一致）** |
+
+**約 4.6〜9× 高速化し、抽出結果・信頼度は完全一致（非劣化）**。paddle 側は測定値の変動が大きく
+倍率に幅があるが方向は明確。初回のみ paddle2onnx 変換で +60s 程度かかるがキャッシュされ、
+2回目以降の init は約5s（コールドスタート影響は限定的）。依存は `onnxruntime` + `paddle2onnx`
+（pip 導入・クロスプラットフォーム）。
+
+**OpenVINO について（リリースの「CPU 5.2×高速化」）**: 有効化には HPI（`--use_hpip`）＋
+`ultra-infer` が必要だが、**ホイールは linux_x86_64 のみで Windows 版が無い**（本番 Linux では導入可）。
+さらに paddlex の HPI 対応表（`hpi_model_info_collection.json`, cpu_x64/paddle311）では
+OpenVINO が使えるのは **OCR det/rec だけ**で、レイアウト・表構造は onnxruntime/mkldnn に落ちる:
+
+| モデル | CPU バックエンド優先順 |
+|---|---|
+| PP-OCRv6_medium_det / _rec | **openvino** → paddle_mkldnn → onnxruntime → paddle |
+| PP-DocLayout_plus-L | onnxruntime → paddle_mkldnn → paddle（openvino 非対応） |
+| SLANet_plus / SLANeXt_wired | onnxruntime → paddle（同上） |
+| RT-DETR-L_wired_table_cell_det | onnxruntime → paddle_mkldnn → paddle（同上） |
+
+つまり「5.2×」は PP-OCRv6 単体の数字で、PP-StructureV3 全体には直接適用できない。
+HPI はモデル毎に最速を選ぶため OpenVINO+onnxruntime の混成となり、純 onnxruntime より
+速い可能性があるが、**Linux 環境での実測が未実施**（本 Windows 機では検証不能）。
+なお paddle 3.3.1 は HPI 対応表に無く「Paddle 3.1.1 の事前知識を使用」へフォールバックする（動作する）。
+
 ### PP-OCRv6 ティアと日本語対応（paddlex 3.7.2 実測）
 
 PaddleOCR 3.7.0 のリリースノートは PP-OCRv6 を「50言語統一サポート（中国語・英語・**日本語**・
