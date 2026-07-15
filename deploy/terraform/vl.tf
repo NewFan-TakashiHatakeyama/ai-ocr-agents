@@ -155,7 +155,7 @@ resource "aws_ecs_task_definition" "vlm_server" {
 
   container_definitions = jsonencode([{
     name                 = "vlm-server"
-    image                = "${aws_ecr_repository.this["vlm-server"].repository_url}:${var.image_tag}"
+    image                = "${data.aws_ecr_repository.this["vlm-server"].repository_url}:${var.image_tag}"
     essential            = true
     cpu                  = 3072
     memory               = 12288
@@ -229,7 +229,7 @@ resource "aws_ecs_task_definition" "vl_svc" {
 
   container_definitions = jsonencode([{
     name         = "vl-svc"
-    image        = "${aws_ecr_repository.this["vl-pipeline"].repository_url}:${var.image_tag}"
+    image        = "${data.aws_ecr_repository.this["vl-pipeline"].repository_url}:${var.image_tag}"
     essential    = true
     portMappings = [{ name = "vl", containerPort = 8080, protocol = "tcp", appProtocol = "http" }]
     environment = [

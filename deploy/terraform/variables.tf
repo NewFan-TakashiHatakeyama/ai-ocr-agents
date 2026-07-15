@@ -83,6 +83,12 @@ variable "db_multi_az" {
   description = "RDS Multi-AZ（MVP は単一 AZ。本番昇格時に true）"
 }
 
+variable "db_deletion_protection" {
+  type        = bool
+  default     = false
+  description = "RDS の削除保護。既定 false（down=destroy の運用のため）。常設する場合のみ true"
+}
+
 variable "redis_node_type" {
   type        = string
   default     = "cache.t4g.small"
@@ -216,6 +222,12 @@ variable "s3_bucket_name" {
   type        = string
   default     = ""
   description = "S3 バケット名。空なら ai-ocr-<env>-<accountid> を自動採番する"
+}
+
+variable "s3_force_destroy" {
+  type        = bool
+  default     = true
+  description = "down（destroy）でバケットを中身ごと消す。既定 true（月数回の利用を前提とした運用）"
 }
 
 variable "s3_kms_key_id" {

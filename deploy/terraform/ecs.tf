@@ -17,7 +17,7 @@ resource "aws_ecs_task_definition" "gateway" {
 
   container_definitions = jsonencode([{
     name         = "gateway"
-    image        = "${aws_ecr_repository.this["gateway"].repository_url}:${var.image_tag}"
+    image        = "${data.aws_ecr_repository.this["gateway"].repository_url}:${var.image_tag}"
     essential    = true
     portMappings = [{ name = "gateway", containerPort = 8000, protocol = "tcp", appProtocol = "http" }]
     environment = [
@@ -88,7 +88,7 @@ resource "aws_ecs_task_definition" "orchestrator_worker" {
 
   container_definitions = jsonencode([{
     name      = "orchestrator-worker"
-    image     = "${aws_ecr_repository.this["orchestrator-worker"].repository_url}:${var.image_tag}"
+    image     = "${data.aws_ecr_repository.this["orchestrator-worker"].repository_url}:${var.image_tag}"
     essential = true
     command   = ["python", "-m", "newfan_orchestrator.worker_main"]
     # VL_URL は vl_enabled のときだけ渡す。worker_main は未設定なら VL を配線せず、
@@ -154,7 +154,7 @@ resource "aws_ecs_task_definition" "export_worker" {
 
   container_definitions = jsonencode([{
     name      = "export-worker"
-    image     = "${aws_ecr_repository.this["export-worker"].repository_url}:${var.image_tag}"
+    image     = "${data.aws_ecr_repository.this["export-worker"].repository_url}:${var.image_tag}"
     essential = true
     command   = ["python", "-m", "newfan_export.worker_main"]
     environment = [
@@ -198,7 +198,7 @@ resource "aws_ecs_task_definition" "migrate" {
 
   container_definitions = jsonencode([{
     name      = "migrate"
-    image     = "${aws_ecr_repository.this["migrate"].repository_url}:${var.image_tag}"
+    image     = "${data.aws_ecr_repository.this["migrate"].repository_url}:${var.image_tag}"
     essential = true
     command   = ["alembic", "-c", "db/alembic.ini", "upgrade", "head"]
     secrets   = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }]
@@ -221,7 +221,7 @@ resource "aws_ecs_task_definition" "web" {
 
   container_definitions = jsonencode([{
     name         = "web"
-    image        = "${aws_ecr_repository.this["web"].repository_url}:${var.image_tag}"
+    image        = "${data.aws_ecr_repository.this["web"].repository_url}:${var.image_tag}"
     essential    = true
     portMappings = [{ name = "web", containerPort = 3000, protocol = "tcp", appProtocol = "http" }]
     # NEXT_PUBLIC_* はビルド時にバンドルへ焼き込まれるため実行時 env では変えられない

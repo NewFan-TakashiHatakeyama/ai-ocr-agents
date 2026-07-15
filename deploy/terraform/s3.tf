@@ -14,9 +14,14 @@ locals {
 
 resource "aws_s3_bucket" "this" {
   bucket = local.s3_bucket
-  # 開発環境は down（destroy）で作り直す運用のため、中身ごと消せるようにする。
-  force_destroy = var.env != "production"
-  tags          = { Name = local.s3_bucket }
+
+  # env で自動的に決めない。この環境は「使う時だけ up、終わったら down（destroy）」の運用で、
+  # env 名が production でも実体は開発/デモ環境。env=="production" で force_destroy を
+  # 外していたため、down が BucketNotEmpty で完遂できなかった（実際に踏んだ）。
+  # 帳票を残したい場合のみ false にする（その場合 down 前に手で空にする必要がある）。
+  force_destroy = var.s3_force_destroy
+
+  tags = { Name = local.s3_bucket }
 }
 
 resource "aws_s3_bucket_public_access_block" "this" {

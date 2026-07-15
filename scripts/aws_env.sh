@@ -201,11 +201,18 @@ print(jwt.encode({'sub':'sato','tenant_id':'${DEV_TENANT}','role':'admin'}, sys.
 
 cmd_up() {
   echo "[up] AI-OCR 環境を起動します。次を順に実行します:"
+  echo "     0) ECR スタック（長命。既にあれば差分なし）"
   echo "     1) terraform apply（15-20分。RDS 作成が支配的）"
-  echo "     2) ECR に不足イメージがあれば push"
+  echo "     2) ECR に不足イメージがあれば ビルドして push"
   echo "     3) DB マイグレーション＋dev テナント投入"
   echo "     起動後は \$${HOURLY_TOTAL}/h（約114円/時）が掛かります。"
   echo
+
+  # ECR は本体と別スタック（down で消さないため）。本体は data 参照するので先に要る。
+  echo "[up] ECR スタックを確認します"
+  (cd "$TF_DIR/ecr" && terraform init -input=false >/dev/null && \
+     terraform apply -input=false -auto-approve >/dev/null) \
+    || { echo "[up] ECR スタックの apply に失敗しました" >&2; return 1; }
 
   tf apply -var-file="$TFVARS" -var 'services_enabled=true' -auto-approve
 
@@ -263,8 +270,10 @@ cmd_down() {
     echo "[down] RDS が見つかりません。スナップショットをスキップします。"
   fi
 
+  # スナップショットを取った直後で、意図は確定している。ここで対話を挟むと
+  # 非対話実行（CI・バックグラウンド）で「approval: EOF」になり止まる。
   echo "[down] terraform destroy を実行します"
-  tf destroy -var-file="$TFVARS"
+  tf destroy -var-file="$TFVARS" -auto-approve
   echo
   echo "[down] 完了。残る課金は ECR（約 \$3/月）とスナップショット（約 \$1/月）だけです。"
   echo "       復元が必要な場合はこのスナップショットから手動で RDS を作成してください: $snap"

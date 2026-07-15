@@ -4,7 +4,7 @@ output "alb_dns_name" {
 }
 
 output "ecr_repository_urls" {
-  value       = { for k, r in aws_ecr_repository.this : k => r.repository_url }
+  value       = { for k, r in data.aws_ecr_repository.this : k => r.repository_url }
   description = "各サービスの ECR リポジトリ URL"
 }
 

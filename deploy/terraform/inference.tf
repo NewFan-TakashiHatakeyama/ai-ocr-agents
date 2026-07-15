@@ -32,7 +32,7 @@ resource "aws_ecs_task_definition" "structure_svc" {
 
   container_definitions = jsonencode([{
     name         = "structure-svc"
-    image        = "${aws_ecr_repository.this["inference"].repository_url}:${var.image_tag}"
+    image        = "${data.aws_ecr_repository.this["inference"].repository_url}:${var.image_tag}"
     essential    = true
     portMappings = [{ name = "structure", containerPort = 8080, protocol = "tcp", appProtocol = "http" }]
     environment = [
@@ -103,7 +103,7 @@ resource "aws_ecs_task_definition" "ocr_svc" {
 
   container_definitions = jsonencode([{
     name         = "ocr-svc"
-    image        = "${aws_ecr_repository.this["inference"].repository_url}:${var.image_tag}"
+    image        = "${data.aws_ecr_repository.this["inference"].repository_url}:${var.image_tag}"
     essential    = true
     portMappings = [{ name = "ocr", containerPort = 8080, protocol = "tcp", appProtocol = "http" }]
     environment = [

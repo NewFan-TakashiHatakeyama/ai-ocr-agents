@@ -54,10 +54,17 @@ resource "aws_db_instance" "this" {
   multi_az               = var.db_multi_az
 
   backup_retention_period = 7
-  deletion_protection     = var.env == "production"
-  # MVP の作り直しを容易にする。production は deletion_protection で守る。
-  skip_final_snapshot       = var.env != "production"
-  final_snapshot_identifier = var.env == "production" ? "${local.prefix}-${var.env}-final" : null
+
+  # env で自動的に有効にしない。この環境の運用は「使う時だけ up、終わったら down（destroy）」で、
+  # env 名が production でも実体は開発/デモ環境。env=="production" で有効にしていたため
+  # down が deletion_protection に阻まれて完遂できなかった（実際に踏んだ）。
+  # 本物の本番として常設する場合のみ true にする（その場合 down は使えない）。
+  deletion_protection = var.db_deletion_protection
+
+  # 最終スナップショットは terraform に任せない。名前が固定だと 2 回目の destroy で
+  # 「既に存在する」と衝突する。scripts/aws_env.sh down が destroy 前にタイムスタンプ付きの
+  # スナップショットを明示的に取る。
+  skip_final_snapshot = true
 
   performance_insights_enabled = true
   auto_minor_version_upgrade   = true

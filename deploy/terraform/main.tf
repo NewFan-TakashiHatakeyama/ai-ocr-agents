@@ -34,28 +34,14 @@ locals {
 }
 
 # --- ECR ---
-resource "aws_ecr_repository" "this" {
-  for_each             = toset(local.images)
-  name                 = "${local.prefix}-${each.key}"
-  image_tag_mutability = "IMMUTABLE"
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-  tags = { Name = "${local.prefix}-${each.key}" }
-}
-
-# 推論イメージは 4.8GB（モデル焼き込み済み）。世代を残すとコストが効くため保持数を絞る。
-resource "aws_ecr_lifecycle_policy" "this" {
-  for_each   = aws_ecr_repository.this
-  repository = each.value.name
-  policy = jsonencode({
-    rules = [{
-      rulePriority = 1
-      description  = "keep only the 10 most recent images"
-      selection    = { tagStatus = "any", countType = "imageCountMoreThan", countNumber = 10 }
-      action       = { type = "expire" }
-    }]
-  })
+# ECR は本スタックでは作らない。deploy/terraform/ecr（長命な別スタック）が持つ。
+# down（destroy）でイメージ 30GB を消すと次回の up が再ビルド＋再 push で 30 分以上に
+# なるため。同一 state に置くと destroy が RepositoryNotEmptyException で失敗し、
+# down 全体が完遂しなかった（実際に踏んだ）。
+# scripts/aws_env.sh up が ecr スタックを先に apply する（冪等）。
+data "aws_ecr_repository" "this" {
+  for_each = toset(local.images)
+  name     = "${local.prefix}-${each.key}"
 }
 
 # --- CloudWatch Logs ---
