@@ -83,7 +83,7 @@ class PaddleServingClient:
         file_type: int = 1,
         use_doc_orientation_classify: bool = False,
         use_doc_unwarping: bool = False,
-        use_seal_recognition: bool = True,
+        use_seal_recognition: Optional[bool] = None,
         use_table_recognition: bool = True,
         use_formula_recognition: bool = False,
         use_chart_recognition: bool = False,
@@ -91,7 +91,14 @@ class PaddleServingClient:
         text_rec_score_thresh: Optional[float] = None,
         extra: Optional[dict[str, Any]] = None,
     ) -> LayoutParsingResponse:
-        """PP-StructureV3 の POST /layout-parsing を呼ぶ。file_type: 0=PDF, 1=画像。"""
+        """PP-StructureV3 の POST /layout-parsing を呼ぶ。file_type: 0=PDF, 1=画像。
+
+        use_seal_recognition は既定 None（＝送らない）。印章認識はデプロイ単位のオプションで、
+        structure-svc は use_seal_recognition: false、structure-svc-seal は true の config を
+        持つ。クライアントが True を固定すると印章モデル未初期化の既定デプロイで
+        「Set use_seal_recognition, but the models for seal recognition are not initialized」
+        となり 500 になる（実コンテナの E2E で検出）。フラグは config を正とする（DD-03）。
+        """
         payload = _drop_none(
             {
                 "file": file_b64,
