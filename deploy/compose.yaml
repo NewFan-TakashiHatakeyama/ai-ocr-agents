@@ -9,9 +9,9 @@
 # コスト最小トポロジ（ADR-0003 Option A）では structure/ocr は Fargate CPU 相当で動かす。
 # GPU が要るのは vl-svc（既定無効）のみ。推論イメージタグは環境依存（付録C-1/C-4）。
 #
-# CPU バックエンド: `--engine onnxruntime` を付ける（Linux 実測 20.1s→7.9s = 2.5×、精度同一）。
-#   イメージに onnxruntime / paddle2onnx が必要（無い場合は起動時に DependencyError）。
-#   OpenVINO は PP-OCRv6_medium_rec を ultra-infer 1.2.0 が読めず不可（inference/README.md 参照）。
+# CPU バックエンド: paddle（+oneDNN）。paddlepaddle は 3.2.2 固定が必須（3.3.1 は oneDNN/PIR バグで500）。
+#   実測 4vCPU: 16.4s/page（onnxruntime の 51.2s より約3倍速く、コスト効率も約2.8倍）。
+#   OpenVINO は ultra-infer 1.2.0 が PP-OCRv6_medium_rec を読めず不可（inference/README.md 参照）。
 
 # structure-svc / ocr-svc は同一イメージ（deploy/docker/inference.Dockerfile）を
 # PIPELINE_CONFIG で使い分ける。entrypoint が起動前に validate_config.py を実行し、
@@ -24,7 +24,7 @@ services:
     image: ${INFERENCE_IMAGE:-newfan-inference:local}
     environment:
       PIPELINE_CONFIG: /opt/inference/structure/pipeline_config.yaml
-      INFERENCE_ENGINE: ${INFERENCE_ENGINE:-onnxruntime}
+      INFERENCE_ENGINE: ${INFERENCE_ENGINE:-paddle}
       TENANT_LANG: ${TENANT_LANG:-ja}
     volumes:
       # モデルキャッシュ（初回 DL を再利用。本番は EFS 等に置く, 付録C-4）
@@ -47,7 +47,7 @@ services:
     image: ${INFERENCE_IMAGE:-newfan-inference:local}
     environment:
       PIPELINE_CONFIG: /opt/inference/ocr/pipeline_config.yaml
-      INFERENCE_ENGINE: ${INFERENCE_ENGINE:-onnxruntime}
+      INFERENCE_ENGINE: ${INFERENCE_ENGINE:-paddle}
       TENANT_LANG: ${TENANT_LANG:-ja}
     volumes:
       - paddlex-models:/root/.paddlex

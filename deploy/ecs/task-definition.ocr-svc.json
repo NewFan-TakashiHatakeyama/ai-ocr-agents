@@ -32,7 +32,7 @@
         },
         {
           "name": "INFERENCE_ENGINE",
-          "value": "onnxruntime"
+          "value": "paddle"
         },
         {
           "name": "TENANT_LANG",

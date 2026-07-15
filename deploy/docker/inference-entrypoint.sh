@@ -8,14 +8,13 @@ set -e
 
 : "${PIPELINE_CONFIG:?PIPELINE_CONFIG is required (e.g. /opt/inference/structure/pipeline_config.yaml)}"
 LANG_CODE="${TENANT_LANG:-ja}"
-# 既定 onnxruntime。**これは性能の選択ではなく必須**: paddle 3.3.1 では `--engine paddle`
-# （= paddle_static）が oneDNN/PIR の未実装に当たり /layout-parsing が必ず 500 になる
-#   NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support ...
-#     (new_executor/instruction/onednn/onednn_instruction.cc:116)
-# Python API は enable_mkldnn=False で回避できるが、paddlex --serve に無効化手段が無い
-# （CLI に該当フラグ無し。FLAGS_use_mkldnn=0 も効かないことを実測で確認）。
-# paddle_dynamic は一部モデルが非対応。→ サービングで動くのは onnxruntime のみ。
-ENGINE="${INFERENCE_ENGINE:-onnxruntime}"
+# 既定 paddle（＝paddle_static + oneDNN）。paddle 3.2.2 では oneDNN が正常に効き、
+# onnxruntime より約2倍速い（8vCPU 実測: 11.6s vs 23.7s）。精度は同一。
+# 印章ありオプションは onnx パッケージが無く paddle でしか動かないため、既定を揃えておく。
+# ※ paddle 3.3.1 では oneDNN/PIR バグで 500 になるため、この既定は使えない
+#   （Dockerfile で 3.2.2 に固定している理由。バージョンを上げる際は必ず再検証すること）。
+# onnxruntime に切り替えたい場合は INFERENCE_ENGINE=onnxruntime（印章ありでは使用不可）。
+ENGINE="${INFERENCE_ENGINE:-paddle}"
 PORT="${SERVE_PORT:-8080}"
 
 echo "[entrypoint] validating ${PIPELINE_CONFIG} (lang=${LANG_CODE})"

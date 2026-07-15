@@ -1,5 +1,5 @@
 {
-  "family": "newfan-structure-svc",
+  "family": "newfan-structure-svc-seal",
   "networkMode": "awsvpc",
   "requiresCompatibilities": [
     "FARGATE"
@@ -14,12 +14,12 @@
   },
   "containerDefinitions": [
     {
-      "name": "structure-svc",
+      "name": "structure-svc-seal",
       "image": "${ECR_REPO_INFERENCE}:${IMAGE_TAG}",
       "essential": true,
       "portMappings": [
         {
-          "name": "structure-svc",
+          "name": "structure-svc-seal",
           "containerPort": 8080,
           "protocol": "tcp",
           "appProtocol": "http"
@@ -28,7 +28,7 @@
       "environment": [
         {
           "name": "PIPELINE_CONFIG",
-          "value": "/opt/inference/structure/pipeline_config.yaml"
+          "value": "/opt/inference/structure/pipeline_config.seal.yaml"
         },
         {
           "name": "INFERENCE_ENGINE",
@@ -42,7 +42,7 @@
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/newfan-structure-svc",
+          "awslogs-group": "/ecs/newfan-structure-svc-seal",
           "awslogs-region": "${AWS_REGION}",
           "awslogs-stream-prefix": "ecs"
         }

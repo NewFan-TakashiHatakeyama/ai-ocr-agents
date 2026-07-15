@@ -38,40 +38,41 @@
   — Alembic マイグレーションの one-off タスク（`aws ecs run-task`）。
 - [`task-definition.structure-svc.json`](task-definition.structure-svc.json)
   — PP-StructureV3（HTTP 8080 `/layout-parsing` + `/health`）。4 vCPU / 8GB。非公開（Service Connect）。
+- [`task-definition.structure-svc-seal.json`](task-definition.structure-svc-seal.json)
+  — **印章ありオプション**。同一イメージで `PIPELINE_CONFIG` を seal 版に差し替えるだけ。
+  印章の文字（角印の社名等）が要件にある場合に使う。速度・コストは既定とほぼ同じ。
 - [`task-definition.ocr-svc.json`](task-definition.ocr-svc.json)
   — PP-OCRv6 単体（HTTP 8080 `/ocr` + `/health`）。2 vCPU / 4GB。DD-02 の crop 再認識用。
 - GPU 推論（Option B）は `requiresCompatibilities: ["EC2"]` ＋
   `resourceRequirements: [{"type":"GPU","value":"1"}]` を付け、GPU 容量プロバイダのクラスタへ配置する。
 
-### エンジンは onnxruntime 一択（性能選択ではなく制約）
+### エンジンは paddle（＋oneDNN）。paddlepaddle は **3.2.2 固定**が必須
 
-`--engine paddle`(=paddle_static) は **paddle 3.3.1 の oneDNN/PIR 未実装**により
-`/layout-parsing` が必ず 500 になる（`ConvertPirAttribute2RuntimeAttribute`,
-`onednn_instruction.cc:116`）。Python API は `enable_mkldnn=False` で回避できるが、
-`paddlex --serve` に無効化手段が無い（CLI にフラグ無し・`FLAGS_use_mkldnn=0` も無効と実測）。
-`paddle_dynamic` は一部モデルが非対応。→ **サービングで動くのは onnxruntime のみ**。
+**最新の paddle 3.3.1 を使ってはいけない**。3.3.1 は oneDNN/PIR の未実装パスに当たり
+`paddlex --serve` の `/layout-parsing` が必ず 500 になる（`ConvertPirAttribute2RuntimeAttribute`,
+`onednn_instruction.cc:116`）。回避手段が無く（CLI にフラグ無し・`FLAGS_use_mkldnn=0` も無効と実測）、
+3.3.1 では onnxruntime しか使えず印章オプションも起動できない。
+**3.2.2 では oneDNN が正常動作**し、同一精度のまま onnxruntime より約2〜3倍速い。
+paddlex 3.7.2 の HPI 対応表も paddle30/31/311 までで 3.3 系は「未対応」扱い。
 
-### 推論タスクのサイジング根拠（実測, linux/amd64 コンテナ, onnxruntime）
+### 推論タスクのサイジング根拠（実測, linux/amd64 コンテナ, sample2.png A4請求書1ページ warm）
 
-sample2.png（A4 請求書 1 ページ, 740x1046）warm 実測:
+| 構成 | 4 vCPU | 8 vCPU | vCPU秒/page（コスト目安） |
+|---|---|---|---|
+| paddle **3.3.1** | ✗ 500 | ✗ 500 | — |
+| onnxruntime | 51.2s | 23.7s | 190〜205 |
+| **paddle 3.2.2 + oneDNN** | **16.4s** | **11.6s** | **65.6** / 92.8 |
+| paddle 3.2.2 + 印章ON | — | 11.5s | — |
 
-| vCPU | 1ページ | vCPU秒/page（コスト目安） |
-|---|---|---|
-| 2 | 111s | 222 |
-| 4 | 51s | 205 |
-| **8** | **24s** | **190** |
-| 16 | **11.3s** | 181 |
-| 32 | 7.9s | 253 |
+ピークメモリ実測 **2.7GB**。精度は全構成で同一（spans=94 / 13行 / conf 0.9678）。
 
-onnxruntime は **16 vCPU まで良くスケール**（8→16 で 2.1×＝ほぼ線形）。ピークメモリ実測 **2.7GB**。
-1ページ単価は 4〜16 vCPU でほぼ横ばい（181〜205 vCPU秒）＝**大きいタスクにしても割高にならない**。
-
-- **structure-svc = 8 vCPU / 16GB**（24s/page）: 単価が最良付近で latency も実用的。Fargate は
-  8 vCPU で最小 16GB（実使用 2.7GB のため余裕）。**さらに latency を詰めるなら 16 vCPU/32GB
-  （11.3s/page、単価はむしろ最安）**。逆に細かく刻みたいなら 4 vCPU/8GB（51s/page）。
+- **structure-svc = 4 vCPU / 8GB**（16.4s/page）: **vCPU秒/page が 65.6 と最良**＝最もコスト効率が良い。
+  Fargate は 4 vCPU で最小 8GB（実使用 2.7GB のため余裕）。latency を詰めるなら 8 vCPU/16GB
+  （11.6s/page、コスト 1.4 倍）。
+- **structure-svc-seal = 4 vCPU / 8GB**: 印章ありオプション。**印章のコストはほぼゼロ**
+  （8vCPU 実測: 印章ON 11.5s vs OFF 11.6s）。engine=paddle 必須（onnx パッケージが無いため）。
 - **ocr-svc = 2 vCPU / 4GB**: crop した小画像の再認識が主でページ全体を処理しないため小さめ。
-- スループットは**タスク数で増やす**（キュー深度 → Application Auto Scaling）。単価がほぼ一定なので
-  水平・垂直どちらでもコストは同等 → 運用しやすい水平スケールを基本にする。
+- スループットは**タスク数で増やす**（キュー深度 → Application Auto Scaling）。
 
 **コールドスタート**: モデルはイメージへ焼き込み済み（`prefetch_models.py`）。起動時に
 外部（百度 CDN `bcebos.com`）へ数百MB取りに行かないため、起動が決定論的で外部依存も無い。

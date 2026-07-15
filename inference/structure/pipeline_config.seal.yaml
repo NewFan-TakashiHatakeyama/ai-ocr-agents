@@ -3,23 +3,17 @@
 # ★ これは**オプション構成**。既定は印章 OFF の pipeline_config.yaml を使う。
 #   印章の文字（角印の社名等）が要件にある場合のみ本ファイルを使う。
 #
-# ★★ 現状このオプションは **サービングでは使用できない**（paddle 3.3.1 のバグ待ち）★★
+# 用途（engine=paddle 必須。既定エンジンなので指定不要）:
+#   PIPELINE_CONFIG=/opt/inference/structure/pipeline_config.seal.yaml
 #
-# 実測で判明した行き詰まり（inference/README.md に詳細）:
-#   - engine=onnxruntime → 印章検出 PP-OCRv4_server_seal_det に公式 onnx パッケージが無く
-#       `Official model source does not provide a 'onnx' package` で起動不可。
-#       ローカルで paddle2onnx 変換しても、paddlex は公式ソース登録を見るため採用されない。
-#   - engine=paddle(=paddle_static) → paddle 3.3.1 の oneDNN/PIR 未実装で /layout-parsing が 500
-#       (ConvertPirAttribute2RuntimeAttribute / onednn_instruction.cc:116)。
-#       paddlex --serve に oneDNN 無効化手段が無い（FLAGS_use_mkldnn=0 も無効と実測）。
-#   - engine=paddle_dynamic → 印章検出モデルが非対応
-#       (Supported engines: paddle_static / hpi / onnxruntime)。
-#   - engine=hpi → ultra-infer の OpenVINO が PP-OCRv6_medium_rec を読めず落ちる。
+# **印章ありのコストはほぼゼロ**（実コンテナ実測 8vCPU: 印章ON 11.5s vs 既定 11.6s）。
+# 以前「2.5倍遅い」としていたのは paddle 3.3.1 の oneDNN バグ回避で mkldnn を切っていた
+# 測定に基づく誤りで、paddle 3.2.2 では解消している。
 #
-# → 解決には **paddlepaddle のバージョン変更（oneDNN/PIR バグの無い版）** が必要。
-#   それが済めば INFERENCE_ENGINE=paddle で本ファイルを使える。
-#   Python API 直実行（enable_mkldnn=False）では動作し、印章ONのコストは +2% 程度
-#   （4vCPU: 46.9s vs 印章OFF 45.8s）＝「印章は遅い」わけではない。
+# engine=onnxruntime は使用不可: 印章検出 PP-OCRv4_server_seal_det に公式 onnx パッケージが
+# 無く `Official model source does not provide a 'onnx' package` で起動できない
+# （ローカルで paddle2onnx 変換しても paddlex は公式ソース登録を見るため採用されない）。
+# → 本構成は必ず paddle エンジンで使う（Dockerfile が paddle 3.2.2 に固定しているため動く）。
 #
 # 固定値は既定構成と同じ（DD-01 前処理無効 / DD-03 v6 固定 / formula・chart 無効）。
 # 印章"検出"のみ v6 版が存在せず PP-OCRv4_server_seal_det（DD-03 の既知例外）。

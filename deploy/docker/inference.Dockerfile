@@ -23,7 +23,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 実測・検証した組成に固定する（付録C-1/C-2, DD-03）
-ARG PADDLE_VERSION=3.3.1
+#
+# ★ paddlepaddle は **3.2.2 に固定**（最新の 3.3.1 を使わない）。実測で確認した理由:
+#   3.3.1 は oneDNN/PIR が未実装のパスに当たり、`paddlex --serve` の /layout-parsing が必ず 500
+#     NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support
+#       (new_executor/instruction/onednn/onednn_instruction.cc:116)
+#   回避策が無い（CLI に oneDNN 無効化フラグ無し・FLAGS_use_mkldnn=0 も効かない）ため
+#   3.3.1 では onnxruntime しか使えず、印章オプションも起動できなかった。
+#   3.2.2 では oneDNN が正常動作し、**同一精度のまま約2倍速**（8vCPU: 11.6s vs onnx 23.7s）で、
+#   印章ありオプションも動く（11.5s）。精度は spans=94/13行/conf 0.9678 と 3.3.1 と完全一致。
+#   なお paddlex 3.7.2 の HPI 対応表も paddle30/31/311 までで 3.3 系は「未対応」扱い。
+#   3.3 系で oneDNN が直ったら再評価すること。
+ARG PADDLE_VERSION=3.2.2
 ARG PADDLEOCR_VERSION=3.7.0
 ARG PADDLEX_VERSION=3.7.2
 RUN pip install --no-cache-dir \
