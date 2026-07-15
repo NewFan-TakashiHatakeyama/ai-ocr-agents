@@ -17,6 +17,17 @@ LANG_CODE="${TENANT_LANG:-ja}"
 ENGINE="${INFERENCE_ENGINE:-paddle}"
 PORT="${SERVE_PORT:-8080}"
 
+# VL は genai サーバの URL がデプロイ先で決まる（compose は paddleocr-vlm-server、
+# ECS は Service Connect の alias）。config に固定で書くと片方で解決できないため、
+# VLM_SERVER_URL が来たら server_url を差し替える。read-only マウントでも書けるよう
+# 実体を /tmp にコピーしてから使う。
+if [ -n "${VLM_SERVER_URL:-}" ]; then
+  RESOLVED="/tmp/pipeline_config.resolved.yaml"
+  sed "s#^\( *server_url: \).*#\1${VLM_SERVER_URL}#" "${PIPELINE_CONFIG}" > "${RESOLVED}"
+  echo "[entrypoint] server_url を ${VLM_SERVER_URL} に差し替えました"
+  PIPELINE_CONFIG="${RESOLVED}"
+fi
+
 echo "[entrypoint] validating ${PIPELINE_CONFIG} (lang=${LANG_CODE})"
 python /opt/inference/scripts/validate_config.py "${PIPELINE_CONFIG}" --lang "${LANG_CODE}"
 

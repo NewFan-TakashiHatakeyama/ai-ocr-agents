@@ -16,10 +16,10 @@ locals {
   # ECR リポジトリ（CD の matrix.repo と一致させること）
   # inference は structure-svc / ocr-svc / structure-svc-seal が共有する単一イメージ
   # （中身は同じで pipeline_config だけ違う。compose も同じ構成）。
-  images = ["gateway", "orchestrator-worker", "export-worker", "migrate", "inference", "web"]
+  images = ["gateway", "orchestrator-worker", "export-worker", "migrate", "inference", "web", "vl-pipeline", "vlm-server"]
 
   # ロググループを作る task family
-  log_families = ["gateway", "orchestrator-worker", "export-worker", "migrate", "structure-svc", "ocr-svc", "web"]
+  log_families = ["gateway", "orchestrator-worker", "export-worker", "migrate", "structure-svc", "ocr-svc", "web", "vl-svc", "vlm-server"]
 
   # 既存 ARN が渡されなければ本スタックが作った JWT 鍵を使う
   jwt_secret_arn = var.jwt_secret_arn != "" ? var.jwt_secret_arn : aws_secretsmanager_secret.jwt[0].arn

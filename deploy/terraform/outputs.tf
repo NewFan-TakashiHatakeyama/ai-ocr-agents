@@ -42,3 +42,13 @@ output "inference_urls" {
   value       = { structure = local.structure_url, ocr = local.ocr_url }
   description = "Service Connect で解決される推論サービング URL"
 }
+
+output "s3_bucket" {
+  value       = aws_s3_bucket.this.id
+  description = "原本/ページ画像/確定JSON のバケット"
+}
+
+output "vl_enabled" {
+  value       = var.vl_enabled
+  description = "VL フォールバックが有効か（true なら GPU インスタンスが課金される）"
+}

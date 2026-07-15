@@ -11,7 +11,11 @@
 #   status  今どの状態か・何が課金されているか
 #   cost    起動中の時間単価と、この環境の概算
 #
-# 使い方: scripts/aws_env.sh up|down|pause|resume|status|cost
+#   vl-up   VL フォールバックを起動（GPU g4dn.xlarge。+$0.710/h）
+#   vl-down VL を停止（GPU インスタンス 0 台。課金が止まる）
+#   vl-test VL が実際に動くか確認（/health と実推論）
+#
+# 使い方: scripts/aws_env.sh up|down|pause|resume|status|cost|vl-up|vl-down|vl-test
 set -euo pipefail
 
 TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../deploy/terraform" && pwd)"
@@ -116,12 +120,55 @@ cmd_down() {
   echo "       復元が必要な場合はこのスナップショットから手動で RDS を作成してください: $snap"
 }
 
+# ---------- VL フォールバック（GPU） ----------
+# GPU が要るのは vlm-server だけ（vl-svc は CPU Fargate。実測で確認）。
+# 課金は ASG の desired_capacity で切る。vl_enabled=false で 0 台になる。
+
+cmd_vl_up() {
+  echo "[vl-up] VL を起動します（GPU g4dn.xlarge が立ち上がり +\$0.710/h 課金されます）"
+  echo "        vLLM のモデルロードに数分かかります。"
+  tf apply -var-file="$TFVARS" -var 'vl_enabled=true' -auto-approve
+  echo "[vl-up] GPU インスタンスと vlm-server の起動を待機中..."
+  aws ecs wait services-stable --region "$REGION" --cluster "$(_prefix)" \
+    --services ai-ocr-vlm-server ai-ocr-vl-svc 2>/dev/null || true
+  cmd_vl_test
+}
+
+cmd_vl_down() {
+  echo "[vl-down] VL を停止します（GPU インスタンスを 0 台にし課金を止めます）"
+  tf apply -var-file="$TFVARS" -var 'vl_enabled=false' -auto-approve
+  echo "[vl-down] 完了。GPU の課金は止まりました（VL 以外は起動したままです）。"
+}
+
+cmd_vl_test() {
+  local cluster; cluster="$(_prefix)"
+  echo "== VL の稼働状況 =="
+  for s in ai-ocr-vlm-server ai-ocr-vl-svc; do
+    aws ecs describe-services --region "$REGION" --cluster "$cluster" --services "$s" \
+      --query "services[0].[serviceName,desiredCount,runningCount]" --output text 2>/dev/null \
+      || echo "  $s: 未作成（vl_enabled=false）"
+  done
+  echo
+  echo "== GPU インスタンス =="
+  aws autoscaling describe-auto-scaling-groups --region "$REGION" \
+    --auto-scaling-group-names ai-ocr-vlm \
+    --query "AutoScalingGroups[0].[DesiredCapacity,length(Instances)]" --output text 2>/dev/null \
+    || echo "  ASG なし"
+  echo
+  echo "== 実推論の確認 =="
+  echo "  orchestrator-worker から VL へ実際に投げるには:"
+  echo "    scripts/vl_smoke.sh <画像パス>"
+}
+
 case "${1:-}" in
-  up)     cmd_up ;;
-  down)   cmd_down ;;
-  pause)  cmd_pause ;;
-  resume) cmd_resume ;;
-  status) cmd_status ;;
-  cost)   cmd_cost ;;
-  *) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 1 ;;
+  up)      cmd_up ;;
+  down)    cmd_down ;;
+  pause)   cmd_pause ;;
+  resume)  cmd_resume ;;
+  status)  cmd_status ;;
+  cost)    cmd_cost ;;
+  vl-up)   cmd_vl_up ;;
+  vl-down) cmd_vl_down ;;
+  vl-test) cmd_vl_test ;;
+  *) sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 1 ;;
 esac

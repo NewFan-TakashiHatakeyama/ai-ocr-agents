@@ -91,14 +91,18 @@ resource "aws_ecs_task_definition" "orchestrator_worker" {
     image     = "${aws_ecr_repository.this["orchestrator-worker"].repository_url}:${var.image_tag}"
     essential = true
     command   = ["python", "-m", "newfan_orchestrator.worker_main"]
-    environment = [
+    # VL_URL は vl_enabled のときだけ渡す。worker_main は未設定なら VL を配線せず、
+    # 難読ページは HITL 直行に縮退する（§2.6 / ADR-0003）。
+    environment = concat([
       { name = "APP_ENV", value = var.env },
       { name = "AWS_REGION", value = var.aws_region },
       { name = "LLM_MODEL", value = var.llm_model },
       { name = "STRUCTURE_URL", value = local.structure_url },
       { name = "OCR_URL", value = local.ocr_url },
       { name = "LLM_PROVIDER", value = var.llm_provider },
-    ]
+      ], var.vl_enabled ? [
+      { name = "VL_URL", value = local.vl_url },
+    ] : [])
     # LLM_PROVIDER=gemini のときは GEMINI_API_KEY が要る（未設定だと provider 生成で落ちる）
     secrets = concat([
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },

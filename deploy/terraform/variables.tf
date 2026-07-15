@@ -143,6 +143,39 @@ variable "ocr_memory" {
   description = "ocr-svc のメモリ(MiB)"
 }
 
+# --- VL フォールバック（§5.4 / DD-09。GPU が要るのは vlm-server だけ） ---
+# 既定 false = GPU インスタンス 0 台で課金なし。使う時だけ scripts/aws_env.sh vl-up。
+# 実価格 g4dn.xlarge OnDemand $0.710/h。常時起動は $528/月でコストオーバーのため既定オフ。
+variable "vl_enabled" {
+  type        = bool
+  default     = false
+  description = "VL フォールバックを有効にする（GPU インスタンスが起動し課金される）"
+}
+
+variable "vl_instance_type" {
+  type        = string
+  default     = "g4dn.xlarge"
+  description = "vlm-server の GPU インスタンス（T4 16GB。実価格 $0.710/h）"
+}
+
+variable "vl_disk_gb" {
+  type        = number
+  default     = 120
+  description = "GPU インスタンスの EBS(GB)。vlm-server イメージが 18.3GB あるため既定 30GB では不足"
+}
+
+variable "vl_cpu" {
+  type        = number
+  default     = 2048
+  description = "vl-svc（パイプライン, CPU Fargate）の vCPU"
+}
+
+variable "vl_memory" {
+  type        = number
+  default     = 4096
+  description = "vl-svc のメモリ(MiB)"
+}
+
 variable "gemini_secret_arn" {
   type        = string
   default     = ""
