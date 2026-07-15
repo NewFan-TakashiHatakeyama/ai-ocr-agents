@@ -6,7 +6,21 @@ variable "aws_region" {
 variable "env" {
   type        = string
   default     = "production"
-  description = "環境名（タグ用）"
+  description = "環境名（タグ・リソース名に入る）"
+}
+
+# 同一アカウントに GraphSuite 等の別サービスが同居するため、AWS コンソール上で
+# 一目で AI-OCR のリソースと分かる名前にする（既存の graphsuite-api / graphsuite-dev と
+# 同じ <サービス>-<コンポーネント> 規則に合わせる）。
+variable "name_prefix" {
+  type        = string
+  default     = "ai-ocr"
+  description = "全リソース名の接頭辞。何のサービスか判別できるよう ai-ocr を含める"
+
+  validation {
+    condition     = can(regex("ai-ocr", lower(var.name_prefix)))
+    error_message = "name_prefix には ai-ocr を含めてください（別サービスのリソースと区別するため）。"
+  }
 }
 
 variable "image_tag" {
@@ -14,31 +28,38 @@ variable "image_tag" {
   description = "ECR イメージタグ（CD で push したもの）"
 }
 
-# --- 既存ネットワーク（本モジュールでは作成しない） ---
-variable "vpc_id" {
+# --- ネットワーク（本スタックが専用 VPC を作成する。vpc.tf 参照） ---
+# 既定 VPC には NAT が無く、他プロジェクト(GraphSuite/AIReadyConnect)と混在するため
+# AI-OCR 専用 VPC を持つ。
+variable "vpc_cidr" {
   type        = string
-  description = "既存 VPC ID"
+  default     = "10.1.0.0/16"
+  description = "AI-OCR VPC の CIDR（既存の 172.31.0.0/16 と 10.0.0.0/16 に重ねないこと）"
 }
 
-variable "public_subnet_ids" {
-  type        = list(string)
-  description = "ALB を置く public subnet"
-}
-
-variable "private_subnet_ids" {
-  type        = list(string)
-  description = "ECS タスクを置く private subnet（NAT 経由で egress）"
-}
-
-# --- データストア（RDS/ElastiCache は別管理。接続文字列は Secrets Manager 参照） ---
-variable "db_secret_arn" {
+# --- データストア（本スタックが作成し、接続文字列を Secrets Manager に格納する） ---
+variable "db_instance_class" {
   type        = string
-  description = "DATABASE_URL を格納した Secrets Manager ARN（postgresql+psycopg://...）"
+  default     = "db.t4g.medium"
+  description = "RDS PostgreSQL のインスタンスクラス"
 }
 
-variable "redis_secret_arn" {
+variable "db_allocated_storage" {
+  type        = number
+  default     = 50
+  description = "RDS の割当ストレージ(GB)。gp3 で自動拡張する"
+}
+
+variable "db_multi_az" {
+  type        = bool
+  default     = false
+  description = "RDS Multi-AZ（MVP は単一 AZ。本番昇格時に true）"
+}
+
+variable "redis_node_type" {
   type        = string
-  description = "REDIS_URL を格納した Secrets Manager ARN"
+  default     = "cache.t4g.small"
+  description = "ElastiCache(Redis) のノードタイプ"
 }
 
 variable "jwt_secret_arn" {
@@ -58,10 +79,54 @@ variable "cors_origins" {
   description = "gateway CORS 許可オリジン（カンマ区切り）"
 }
 
-variable "structure_url" {
+# 推論サービングは Service Connect の client_alias で名前解決する（service_connect.tf）。
+# URL を変数で受けると alias と食い違って解決不能になるため、locals で固定する。
+
+variable "structure_cpu" {
+  type        = number
+  default     = 4096
+  description = "structure-svc の vCPU(1024=1vCPU)。実測: 4vCPU=16.4s/枚, 8vCPU=11.6s/枚"
+}
+
+variable "structure_memory" {
+  type        = number
+  default     = 8192
+  description = "structure-svc のメモリ(MiB)"
+}
+
+variable "structure_seal_enabled" {
+  type        = bool
+  default     = false
+  description = "印章認識オプション。true で印章版 config のイメージを使う（DD-03）"
+}
+
+variable "ocr_cpu" {
+  type        = number
+  default     = 2048
+  description = "ocr-svc の vCPU（DD-02 char_backfill 用の /ocr 単体）"
+}
+
+variable "ocr_memory" {
+  type        = number
+  default     = 4096
+  description = "ocr-svc のメモリ(MiB)"
+}
+
+variable "gemini_secret_arn" {
   type        = string
-  default     = "http://structure-svc:8080"
-  description = "PP-StructureV3 サービング URL（Service Connect 名）"
+  default     = ""
+  description = "GEMINI_API_KEY の Secrets Manager ARN（LLM_PROVIDER=gemini 時。空なら未設定）"
+}
+
+variable "llm_provider" {
+  type        = string
+  default     = "anthropic"
+  description = "LLM プロバイダ（anthropic | gemini）"
+
+  validation {
+    condition     = contains(["anthropic", "gemini"], var.llm_provider)
+    error_message = "llm_provider は anthropic か gemini。"
+  }
 }
 
 variable "llm_model" {

@@ -1,9 +1,10 @@
 # gateway 用 ALB（外部公開は gateway のみ）。WAF アタッチは別途推奨。
 
 resource "aws_security_group" "alb" {
-  name        = "newfan-alb"
-  description = "ALB ingress"
-  vpc_id      = var.vpc_id
+  name        = "${local.prefix}-alb"
+  description = "AI-OCR gateway ALB ingress"
+  vpc_id      = aws_vpc.this.id
+  tags        = { Name = "${local.prefix}-alb" }
 
   ingress {
     description = "HTTP"
@@ -28,9 +29,10 @@ resource "aws_security_group" "alb" {
 }
 
 resource "aws_security_group" "service" {
-  name        = "newfan-service"
-  description = "ECS service ingress from ALB"
-  vpc_id      = var.vpc_id
+  name        = "${local.prefix}-service"
+  description = "AI-OCR ECS tasks"
+  vpc_id      = aws_vpc.this.id
+  tags        = { Name = "${local.prefix}-service" }
 
   ingress {
     description     = "gateway from ALB"
@@ -39,6 +41,18 @@ resource "aws_security_group" "service" {
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
+
+  # 推論サービング（structure-svc / ocr-svc）は同じ SG のタスクとして起動する。
+  # SG 内の通信は既定で不許可のため、自己参照を入れないと orchestrator-worker から
+  # http://structure-svc:8080 に到達できない（Service Connect でも宛先ポートは要開放）。
+  ingress {
+    description = "推論サービングへの内部通信（Service Connect）"
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    self        = true
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -48,17 +62,18 @@ resource "aws_security_group" "service" {
 }
 
 resource "aws_lb" "gateway" {
-  name               = "newfan-gateway"
+  name               = "${local.prefix}-gateway"
   load_balancer_type = "application"
-  subnets            = var.public_subnet_ids
+  subnets            = local.public_subnet_ids
   security_groups    = [aws_security_group.alb.id]
+  tags               = { Name = "${local.prefix}-gateway" }
 }
 
 resource "aws_lb_target_group" "gateway" {
-  name        = "newfan-gateway"
+  name        = "${local.prefix}-gateway"
   port        = 8000
   protocol    = "HTTP"
-  vpc_id      = var.vpc_id
+  vpc_id      = aws_vpc.this.id
   target_type = "ip"
 
   health_check {

@@ -29,3 +29,15 @@ Thumbs.db
 
 # ベンダ参照（独自 .git を持つ公式クローン。submodule 化するまでは追跡しない。README/ADR-0001 参照）
 /PaddleOCR/
+
+# Terraform
+# tfstate は RDS のマスタパスワード等を平文で持つ。絶対にコミットしない
+# （リモート state を使う場合も同様）。
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+# 環境固有の ARN 等。example のみコミットする
+*.tfvars
+!*.tfvars.example
