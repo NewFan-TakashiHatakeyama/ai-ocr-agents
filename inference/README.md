@@ -24,10 +24,31 @@ PaddleOCR 自己ホストサービング（structure / ocr / vl）のパイプ�
 2回目以降の init は約5s（コールドスタート影響は限定的）。依存は `onnxruntime` + `paddle2onnx`
 （pip 導入・クロスプラットフォーム）。
 
-**OpenVINO について（リリースの「CPU 5.2×高速化」）**: 有効化には HPI（`--use_hpip`）＋
-`ultra-infer` が必要だが、**ホイールは linux_x86_64 のみで Windows 版が無い**（本番 Linux では導入可）。
-さらに paddlex の HPI 対応表（`hpi_model_info_collection.json`, cpu_x64/paddle311）では
-OpenVINO が使えるのは **OCR det/rec だけ**で、レイアウト・表構造は onnxruntime/mkldnn に落ちる:
+#### OpenVINO は不可（Linux コンテナ実測で否決, 2026-07）
+
+リリースの「CPU 5.2×高速化（OpenVINO）」を本番同等の **linux/amd64 コンテナ**
+（python:3.12-slim ＋ `paddlex --install hpi-cpu` → `ultra_infer 1.2.0`, `openvino=True`）で検証した結果、
+**PP-OCRv6_medium_rec が OpenVINO で読み込めず落ちる**:
+
+```
+Creating model: PP-DocLayout_plus-L → Inference backend: onnxruntime   （対応表どおり）
+Creating model: PP-OCRv6_medium_det → Inference backend: openvino  ✅ 成功
+Creating model: PP-OCRv6_medium_rec → Inference backend: openvino  ❌ 失敗
+  RuntimeError: Exception from src/inference/src/cpp/core.cpp:95:
+  Check 'false' failed at src/frontends/onnx/frontend/src/frontend.cpp:164:
+  FrontEnd API failed with GeneralFailure
+```
+
+det は OpenVINO で動くが **rec（認識）が ONNX フロントエンドで GeneralFailure**。
+ultra-infer 1.2.0 の OpenVINO が最新 PP-OCRv6_medium_rec に追随できていない。
+→ **現時点で OpenVINO は採用不可**。`onnxruntime` を使う（上表のとおり十分速く、精度も同一）。
+将来 ultra-infer が更新されたら再評価する。
+
+前提情報（調査時の事実）:
+- `ultra-infer` のホイールは **linux_x86_64 のみ**（Windows 版なし。PyPI にも無く、paddlex 同梱の
+  `hpip_links.html` 経由で `paddlex --install hpi-cpu`）。
+- HPI 対応表（`hpi_model_info_collection.json`, cpu_x64/paddle311）では OpenVINO が使えるのは
+  **OCR det/rec だけ**で、レイアウト・表構造は onnxruntime/mkldnn に落ちる:
 
 | モデル | CPU バックエンド優先順 |
 |---|---|
@@ -37,9 +58,16 @@ OpenVINO が使えるのは **OCR det/rec だけ**で、レイアウト・表構
 | RT-DETR-L_wired_table_cell_det | onnxruntime → paddle_mkldnn → paddle（同上） |
 
 つまり「5.2×」は PP-OCRv6 単体の数字で、PP-StructureV3 全体には直接適用できない。
-HPI はモデル毎に最速を選ぶため OpenVINO+onnxruntime の混成となり、純 onnxruntime より
-速い可能性があるが、**Linux 環境での実測が未実施**（本 Windows 機では検証不能）。
 なお paddle 3.3.1 は HPI 対応表に無く「Paddle 3.1.1 の事前知識を使用」へフォールバックする（動作する）。
+
+#### ⚠️ 未解決: この設定はそのままでは serve できない
+
+`paddlex --serve --pipeline inference/structure/pipeline_config.yaml` を実コンテナで起動すると
+**`ValueError: config error for doc_preprocessor_pipeline!`** で失敗する。本ファイルは
+「確定手順」（下記）を前提とした**部分的な pin** であり、完全な base config とのマージが未実施のため。
+`deploy/compose.yaml` はこの設定をそのまま `paddlex --serve` に渡しているので、**推論層の
+サービングは一度も起動検証できていない**。本番投入前に確定手順の実行と起動確認が必須。
+あわせて `--engine onnxruntime` の付与（上表の 2.5×）もここで入れる。
 
 ### PP-OCRv6 ティアと日本語対応（paddlex 3.7.2 実測）
 
