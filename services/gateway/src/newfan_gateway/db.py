@@ -172,6 +172,16 @@ class PgRepository:
             )
             return s.scalars(stmt).first() is not None
 
+    def has_processing_run(self, tenant_id, document_id):
+        # has_active_run は needs_review も含むが、こちらは「今まさに処理中」だけ。
+        # チャット再抽出（§4.5）は needs_review を取り直す用途が主のため区別する。
+        with self._rls(tenant_id) as s:
+            stmt = select(ExtractionRun).where(
+                ExtractionRun.document_id == document_id,
+                ExtractionRun.status == "processing",
+            )
+            return s.scalars(stmt).first() is not None
+
     def create_run(self, run: RunRecord) -> None:
         # gateway は抽出前に run 行のみ作成する。fields/tables は worker が
         # extraction_fields/_tables へ書く（§4.3 finalize）。

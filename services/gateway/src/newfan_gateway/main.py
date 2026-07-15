@@ -23,6 +23,19 @@ from newfan_gateway.queue import Queue
 from newfan_gateway.repository import Repository
 
 
+def _llm_provider() -> object | None:
+    """チャット supervisor 用の LLM プロバイダ（worker_main._make_provider と同じ選択規則）。"""
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        from newfan_llm_adapter.gemini_provider import GeminiProvider
+
+        return GeminiProvider(model=os.environ.get("LLM_MODEL", "gemini-2.5-flash"))
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        from newfan_llm_adapter.anthropic_provider import AnthropicProvider
+
+        return AnthropicProvider(model=os.environ.get("LLM_MODEL", "claude-opus-4-8"))
+    return None
+
+
 def build_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
 
@@ -46,9 +59,22 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     # API キーは Secrets Manager 由来の環境変数 API_KEYS(JSON) から（未設定は空 InMemory）。
     api_keys: ApiKeyStore | None = EnvApiKeyStore.from_env() if os.environ.get("API_KEYS") else None
 
-    # チャットエージェント: GEMINI/ANTHROPIC キー設定時は LLM tool-use、無ければ決定論（RuleBased）。
+    # チャットエージェント（§4.5）:
+    #   DB/キュー + LLM キーが揃う → SupervisorChatAgent（LangGraph。ツールが実データを読む）
+    #   LLM キーのみ            → 旧 tool-use エージェント（navigate/update_schema のみ）
+    #   どちらも無し            → RuleBasedChatAgent（決定論。dev/テスト）
+    # supervisor のツールは repo/admin/queue を要するため、揃わない環境では従来動作に落とす。
     chat_agent: ChatAgent | None = None
-    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+    provider = _llm_provider()
+    if provider is not None and repo is not None and admin is not None and queue is not None:
+        from newfan_gateway.chat_graph_agent import SupervisorChatAgent
+        from newfan_gateway.chat_tools import ChatTools
+
+        chat_agent = SupervisorChatAgent(
+            provider=provider,
+            tools=ChatTools(repo=repo, admin=admin, queue=queue),
+        )
+    elif os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
         from newfan_gateway.chat import GeminiChatAgent
 
         chat_agent = GeminiChatAgent(model=os.environ.get("LLM_MODEL", "gemini-2.5-flash"))

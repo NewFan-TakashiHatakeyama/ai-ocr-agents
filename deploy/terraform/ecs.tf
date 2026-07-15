@@ -29,12 +29,20 @@ resource "aws_ecs_task_definition" "gateway" {
       # orchestrator-worker からも読めず抽出が失敗する。
       { name = "S3_BUCKET", value = aws_s3_bucket.this.id },
       { name = "S3_KMS_KEY_ID", value = var.s3_kms_key_id },
+      # チャットグラフ（§4.5）の supervisor が LLM を呼ぶ。未設定だと
+      # RuleBasedChatAgent に落ち、ツールが一切使われない（実 AWS で検出）。
+      { name = "LLM_PROVIDER", value = var.llm_provider },
+      { name = "LLM_MODEL", value = var.llm_model },
     ]
-    secrets = [
+    secrets = concat([
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
       { name = "REDIS_URL", valueFrom = aws_secretsmanager_secret.redis_url.arn },
       { name = "JWT_SECRET", valueFrom = local.jwt_secret_arn },
-    ]
+      ], var.anthropic_secret_arn == "" ? [] : [
+      { name = "ANTHROPIC_API_KEY", valueFrom = var.anthropic_secret_arn },
+      ], var.gemini_secret_arn == "" ? [] : [
+      { name = "GEMINI_API_KEY", valueFrom = var.gemini_secret_arn },
+    ])
     logConfiguration = {
       logDriver = "awslogs"
       options   = merge(local.awslogs, { "awslogs-group" = aws_cloudwatch_log_group.this["gateway"].name })

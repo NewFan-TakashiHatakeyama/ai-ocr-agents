@@ -26,6 +26,7 @@ class Repository(Protocol):
     def get_pages(self, tenant_id: str, document_id: str) -> list[PageRecord]: ...
 
     def has_active_run(self, tenant_id: str, document_id: str) -> bool: ...
+    def has_processing_run(self, tenant_id: str, document_id: str) -> bool: ...
     def create_run(self, run: RunRecord) -> None: ...
     def get_run(self, tenant_id: str, run_id: str) -> Optional[RunRecord]: ...
     def get_latest_run(self, tenant_id: str, document_id: str) -> Optional[RunRecord]: ...
@@ -86,6 +87,20 @@ class InMemoryRepository:
             r.document_id == document_id
             and r.tenant_id == tenant_id
             and r.status in ("processing", "needs_review")
+            for r in self._runs.values()
+        )
+
+    def has_processing_run(self, tenant_id: str, document_id: str) -> bool:
+        """実行中（processing）の Run があるか。
+
+        has_active_run は needs_review も含むが、こちらは「今まさに処理中」だけを見る。
+        チャットからの再抽出（§4.5）は needs_review の帳票を取り直す用途が主で、
+        needs_review を弾くと成立しないため区別が要る。
+        """
+        return any(
+            r.document_id == document_id
+            and self._owned(r.tenant_id, tenant_id)
+            and r.status == "processing"
             for r in self._runs.values()
         )
 

@@ -22,6 +22,8 @@ runtime = [
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.1",
     "redis>=5.0",
+    # チャットグラフ（Supervisor, §4.5）。抽出グラフとは別グラフだが gateway 内で動く。
+    "langgraph>=0.2",
     # gateway は in-process で ingest を実行するため取込 runtime（pypdfium2/pillow/boto3）が必要。
     "newfan-ingest[runtime]",
     # SCR-01 チャット: chat.py が anthropic / google.genai を遅延 import する
