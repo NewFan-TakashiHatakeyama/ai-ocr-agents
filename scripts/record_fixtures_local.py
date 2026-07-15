@@ -5,6 +5,10 @@ deploy の HTTP サービング（paddlex --serve）は paddle 3.3.x + oneDNN(PI
 paddleocr の PPStructureV3 を enable_mkldnn=False で直実行し、/layout-parsing 相当の
 エンベロープ（prunedResult = predict の res）を fixtures に保存する。
 
+DD-03: 汎用 OCR サブモジュールは PP-OCRv6_medium に**明示固定**する
+（inference/structure/pipeline_config.yaml と同じ組成。paddleocr 3.7 の既定は
+PP-OCRv5_server_det/rec なので、指定しないとサービング設定と別物を録画してしまう）。
+
 依存は本体に入れない（重量のため）。実行時のみ:
     uv run --no-project --with paddlepaddle --with paddleocr --with "paddlex[ocr]" \
         python scripts/record_fixtures_local.py --image sample.png
@@ -22,12 +26,17 @@ _FIXTURE = (
     Path(__file__).resolve().parents[1]
     / "packages/paddle_client/tests/fixtures/real_layout_parsing_sample.json"
 )
+# DD-03 の本番組成（inference/structure/pipeline_config.yaml と一致させる）
+_DET_MODEL = "PP-OCRv6_medium_det"
+_REC_MODEL = "PP-OCRv6_medium_rec"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", type=Path, default=Path("sample.png"))
     parser.add_argument("--out", type=Path, default=_FIXTURE)
+    parser.add_argument("--det-model", default=_DET_MODEL, help="text_detection モデル（DD-03）")
+    parser.add_argument("--rec-model", default=_REC_MODEL, help="text_recognition モデル（DD-03）")
     args = parser.parse_args()
 
     from paddleocr import PPStructureV3  # 実行時のみ（runtime extra）
@@ -38,6 +47,9 @@ def main() -> int:
         use_doc_unwarping=False,
         use_formula_recognition=False,
         use_chart_recognition=False,
+        # DD-03: 3.7 既定(PP-OCRv5_server)に依存せずサービング設定と同じ v6 を使う
+        text_detection_model_name=args.det_model,
+        text_recognition_model_name=args.rec_model,
     )
     results = list(pipe.predict(str(args.image)))
     inner = results[0].json.get("res", results[0].json)
@@ -45,7 +57,10 @@ def main() -> int:
     envelope = {"layoutParsingResults": [{"prunedResult": inner, "markdown": {"text": ""}}]}
     args.out.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
     ocr = inner.get("overall_ocr_res", {})
-    print(f"[OK] {args.out} に保存（rec_texts={len(ocr.get('rec_texts', []))} 件）")
+    print(
+        f"[OK] {args.out} に保存"
+        f"（rec_texts={len(ocr.get('rec_texts', []))} 件, det={args.det_model}, rec={args.rec_model}）"
+    )
     return 0
 
 

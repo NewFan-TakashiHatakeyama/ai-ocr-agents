@@ -96,11 +96,25 @@ def _line_items_table() -> TableResult:
         return TableResult(name="line_items", page=1, confidence=0.78, rows=rows)
 
 
-def _seed_invoice(repo: InMemoryRepository) -> None:
-    """2件目: sample2.png（Pyxis 請求書, 740x1046）。明細もフィールドも実 OCR 由来。
+def _kie_field(
+    name: str, label: str, raw: str | None, norm: str | None, conf: float,
+    bbox: list[int], sids: list[int], *, pending: bool = False, note: str | None = None,
+) -> ExtractedField:
+    """実 Gemini KIE（PP-OCRv6 span 入力）の抽出結果をそのまま ExtractedField 化する。"""
+    return ExtractedField(
+        name=name, label=label, value_raw=raw, value_normalized=norm,
+        confidence=conf, grounding_score=1.0 if sids else 0.0, page=1,
+        bbox=bbox or None, source_quote=raw, span_ids=sids,
+        review_status=ReviewStatus.PENDING if pending else ReviewStatus.AUTO,
+        correction=({"applied": False, "needs_review": True, "rationale": note} if note else None),
+    )
 
-    フィールドの value_raw / span_ids / bbox は実 span をそのまま使う（座標の捏造なし）。
-    取引先名は実 OCR が「株式会社化一工」と誤読しているため要確認に倒す。
+
+def _seed_invoice(repo: InMemoryRepository) -> None:
+    """2件目: sample2.png（Pyxis 請求書, 740x1046）。明細もフィールドも実 OCR/KIE 由来。
+
+    フィールドは拡張スキーマ(sch_inv v5)で実 Gemini KIE を回した結果を写したもの。
+    value_raw / span_ids / bbox は実 PP-OCRv6 span をそのまま使う（座標の捏造なし）。
     """
     repo.create_document(
         DocumentRecord(
@@ -127,54 +141,42 @@ def _seed_invoice(repo: InMemoryRepository) -> None:
             document_id="doc_demo2",
             status="needs_review",
             result_version=1,
-            engine_versions={"paddleocr": "3.7.0", "ocr": "PP-OCRv5_server", "llm": "gemini-2.5-flash"},
+            engine_versions={"paddleocr": "3.7.0", "ocr": "PP-OCRv6_medium", "llm": "gemini-2.5-flash"},
             fields=[
-                ExtractedField(
-                    name="issuer_name",
-                    label="取引先名",
-                    value_raw="株式会社化一工",  # 実 OCR 誤読（正: 株式会社エイビーエム）
-                    value_normalized="株式会社化一工",
-                    confidence=0.88,
-                    grounding_score=1.0,
-                    page=1,
-                    bbox=[65, 181, 184, 195],
-                    source_quote="株式会社化一工",
-                    span_ids=[6],
-                    review_status=ReviewStatus.PENDING,
-                    correction={"applied": False, "needs_review": True,
-                                "rationale": "OCR 字形誤認の疑い（社名が辞書に無い）。原本確認が必要。"},
-                ),
-                ExtractedField(
-                    name="total_amount", label="御請求金額",
-                    value_raw="￥7,003-", value_normalized="7003",
-                    confidence=0.94, grounding_score=1.0, page=1,
-                    bbox=[219, 356, 289, 377], source_quote="￥7,003-",
-                    span_ids=[27], review_status=ReviewStatus.AUTO,
-                ),
-                ExtractedField(
-                    name="tax_amount", label="内消費税",
-                    value_raw="Y 599", value_normalized="599",
-                    confidence=0.91, grounding_score=1.0, page=1,
-                    bbox=[324, 365, 354, 380], source_quote="Y 599",
-                    span_ids=[29], review_status=ReviewStatus.AUTO,
-                ),
-                ExtractedField(
-                    name="invoice_no", label="請求番号",
-                    value_raw="请求番号GS0001", value_normalized="GS0001",
-                    confidence=0.91, grounding_score=1.0, page=1,
-                    bbox=[510, 87, 604, 101], source_quote="请求番号GS0001",
-                    span_ids=[17], review_status=ReviewStatus.AUTO,
-                ),
-                ExtractedField(
-                    name="invoice_date", label="請求日付",
-                    value_raw="请求日付令和02年01月31日", value_normalized="2020-01-31",
-                    confidence=0.97, grounding_score=1.0, page=1,
-                    bbox=[511, 70, 663, 84], source_quote="请求日付令和02年01月31日",
-                    span_ids=[16], review_status=ReviewStatus.AUTO,
-                ),
+                _kie_field("issuer_name", "取引先名", "わくわく物産株式会社", "わくわく物産株式会社",
+                           0.99, [395, 140, 512, 154], [19]),
+                _kie_field("total_amount", "合計金額（税込）", "7,003", "7003",
+                           1.0, [585, 742, 619, 761], [81]),
+                _kie_field("tax_amount", "内消費税", "599", "599", 1.0, [594, 775, 618, 791], [83]),
+                # 帳票に登録番号（適格請求書番号）が見当たらない。critical 項目のため要確認。
+                _kie_field("registration_no", "登録番号", None, None, 0.0, [], [],
+                           pending=True, note="登録番号（適格請求書番号）が帳票上に見当たらない。原本確認が必要。"),
+                _kie_field("invoice_no", "請求番号", "請求番号 GS0001", "GS0001",
+                           0.99, [510, 87, 604, 101], [17]),
+                _kie_field("invoice_date", "請求日", "請求日付令和02年01月31日", "2020-01-31",
+                           0.97, [510, 71, 663, 84], [16]),
+                _kie_field("closing_date", "締切日", "締切日：令02/01/31", "2020-01-31",
+                           1.0, [395, 277, 534, 291], [24]),
+                _kie_field("payment_due", "お支払期限", "お支払期限：令02/02/29", "2020-02-29",
+                           1.0, [395, 292, 535, 305], [25]),
+                _kie_field("customer_dept", "担当部署", "総務部", "総務部", 1.0, [63, 192, 108, 211], [7]),
+                _kie_field("customer_person", "担当者", "青田晴美様", "青田晴美", 1.0,
+                           [64, 207, 144, 224], [8]),
+                _kie_field("customer_tel", "取引先電話番号", "TEL:044-999-9999 FAX:044-999-9999",
+                           "044-999-9999", 1.0, [65, 152, 278, 164], [5]),
+                _kie_field("customer_fax", "取引先FAX", "TEL:044-999-9999 FAX:044-999-9999",
+                           "044-999-9999", 1.0, [65, 152, 278, 164], [5]),
+                _kie_field("customer_postal", "取引先郵便番号", "T222-0001", "222-0001",
+                           0.97, [66, 110, 134, 124], [2]),
+                _kie_field("customer_address", "取引先住所", "神奈川県横浜市港北区樽町 エイピービル",
+                           "神奈川県横浜市港北区樽町エイピービル", 0.95, [63, 121, 216, 151], [3, 4]),
+                _kie_field("bank_accounts", "振込先銀行",
+                           "大東京銀行 四谷支店 普通 1234567 / 大阪日日銀行 麹町支店 普通 1234567"
+                           " / ルナ銀行 ス夕一支店 普通 1234567",
+                           "大東京銀行 四谷支店 普通 1234567", 0.94, [65, 251, 285, 291], [10, 11, 12]),
             ],
             tables=tables,
-            review_summary={"pending": 1, "auto": 4},
+            review_summary={"pending": 1, "auto": 14},
         )
     )
 
@@ -278,12 +280,25 @@ def _seed_admin() -> InMemoryAdminRepository:
     admin = InMemoryAdminRepository()
     admin.seed_schema(
         SchemaRecord(
-            id="sch_inv", tenant_id="ten_1", doc_type="invoice", version=4,
+            id="sch_inv", tenant_id="ten_1", doc_type="invoice", version=5,
+            # KIE はスキーマ駆動（§4.6.1）。ここに無い項目は OCR が読めていても抽出されない。
+            # 取引先の連絡先・振込先・締切等を取るには項目定義が要る（SCR-06 で管理）。
             fields=[
                 SchemaFieldDef(name="issuer_name", label="取引先名", type="string", required=True, critical=True),
                 SchemaFieldDef(name="total_amount", label="合計金額（税込）", type="money_jpy", required=True, critical=True),
+                SchemaFieldDef(name="tax_amount", label="内消費税", type="money_jpy"),
                 SchemaFieldDef(name="registration_no", label="登録番号", type="jp_invoice_reg_no", critical=True),
+                SchemaFieldDef(name="invoice_no", label="請求番号", type="string"),
                 SchemaFieldDef(name="invoice_date", label="請求日", type="date", required=True),
+                SchemaFieldDef(name="closing_date", label="締切日", type="date"),
+                SchemaFieldDef(name="payment_due", label="お支払期限", type="date"),
+                SchemaFieldDef(name="customer_dept", label="担当部署", type="string"),
+                SchemaFieldDef(name="customer_person", label="担当者", type="string"),
+                SchemaFieldDef(name="customer_tel", label="取引先電話番号", type="string"),
+                SchemaFieldDef(name="customer_fax", label="取引先FAX", type="string"),
+                SchemaFieldDef(name="customer_postal", label="取引先郵便番号", type="string"),
+                SchemaFieldDef(name="customer_address", label="取引先住所", type="string"),
+                SchemaFieldDef(name="bank_accounts", label="振込先銀行", type="string"),
             ],
         )
     )
