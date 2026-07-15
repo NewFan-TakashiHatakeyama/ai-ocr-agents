@@ -16,7 +16,7 @@ resource "aws_vpc_security_group_ingress_rule" "redis_from_service" {
   from_port                    = 6379
   to_port                      = 6379
   ip_protocol                  = "tcp"
-  description                  = "ECS タスクからの Redis 接続"
+  description                  = "Redis access from ECS tasks"
 }
 
 resource "aws_elasticache_subnet_group" "this" {
@@ -27,7 +27,7 @@ resource "aws_elasticache_subnet_group" "this" {
 
 resource "aws_elasticache_replication_group" "this" {
   replication_group_id = "${local.prefix}-${var.env}"
-  description          = "AI-OCR のジョブキュー(Redis Streams)"
+  description          = "AI-OCR job queue (Redis Streams)"
 
   engine         = "redis"
   engine_version = "7.1"
@@ -55,7 +55,7 @@ resource "aws_elasticache_replication_group" "this" {
 resource "aws_elasticache_parameter_group" "this" {
   name        = "${local.prefix}-${var.env}"
   family      = "redis7"
-  description = "AI-OCR: キューを揮発させない設定"
+  description = "AI-OCR: keep queue entries (noeviction)"
 
   parameter {
     name  = "maxmemory-policy"
@@ -67,7 +67,7 @@ resource "aws_elasticache_parameter_group" "this" {
 
 resource "aws_secretsmanager_secret" "redis_url" {
   name        = "${local.prefix}/${var.env}/redis-url"
-  description = "AI-OCR の REDIS_URL"
+  description = "AI-OCR REDIS_URL"
   tags        = { Name = "${local.prefix}-redis-url" }
 }
 

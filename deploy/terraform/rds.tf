@@ -16,7 +16,7 @@ resource "aws_vpc_security_group_ingress_rule" "db_from_service" {
   from_port                    = 5432
   to_port                      = 5432
   ip_protocol                  = "tcp"
-  description                  = "ECS タスクからの PostgreSQL 接続"
+  description                  = "PostgreSQL access from ECS tasks"
 }
 
 resource "aws_db_subnet_group" "this" {
@@ -68,7 +68,7 @@ resource "aws_db_instance" "this" {
 # アプリは DATABASE_URL 1 本だけを見る（§7 / worker_main は +psycopg を除去して psycopg で繋ぐ）
 resource "aws_secretsmanager_secret" "database_url" {
   name        = "${local.prefix}/${var.env}/database-url"
-  description = "AI-OCR の DATABASE_URL（SQLAlchemy+psycopg 形式）"
+  description = "AI-OCR DATABASE_URL (SQLAlchemy+psycopg form)"
   tags        = { Name = "${local.prefix}-database-url" }
 }
 

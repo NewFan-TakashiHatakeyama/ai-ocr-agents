@@ -50,7 +50,7 @@ resource "aws_ecr_lifecycle_policy" "this" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "直近 10 世代のみ保持"
+      description  = "keep only the 10 most recent images"
       selection    = { tagStatus = "any", countType = "imageCountMoreThan", countNumber = 10 }
       action       = { type = "expire" }
     }]
@@ -156,7 +156,7 @@ resource "aws_ecs_cluster" "app" {
 # Service Connect 用の名前空間（AI-OCR 専用。別サービスと混ざらないよう prefix を付ける）
 resource "aws_service_discovery_http_namespace" "this" {
   name        = "${local.prefix}-${var.env}"
-  description = "AI-OCR の内部サービス名前解決（Service Connect）"
+  description = "AI-OCR internal service discovery (Service Connect)"
   tags        = { Name = "${local.prefix}-${var.env}" }
 }
 

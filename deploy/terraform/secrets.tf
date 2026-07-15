@@ -14,7 +14,7 @@ resource "random_password" "jwt" {
 resource "aws_secretsmanager_secret" "jwt" {
   count       = var.jwt_secret_arn == "" ? 1 : 0
   name        = "${local.prefix}/${var.env}/jwt-secret"
-  description = "AI-OCR の JWT 署名鍵"
+  description = "AI-OCR JWT signing key"
   tags        = { Name = "${local.prefix}-jwt-secret" }
   # 作り直し（down→up）を繰り返すため、削除後すぐ同名で作れるようにする
   recovery_window_in_days = 0

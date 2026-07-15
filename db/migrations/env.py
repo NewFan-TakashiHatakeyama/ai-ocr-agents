@@ -15,7 +15,11 @@ config = context.config
 
 _db_url = os.environ.get("DATABASE_URL")
 if _db_url:
-    config.set_main_option("sqlalchemy.url", _db_url)
+    # set_main_option は configparser 経由で、% を補間構文として解釈する。
+    # RDS の生成パスワードは記号を含み URL エンコードされる（例: %2A）ため、
+    # そのまま渡すと ValueError: invalid interpolation syntax で migrate が落ちる
+    # （実 AWS で検出）。configparser に渡す値としてエスケープする。
+    config.set_main_option("sqlalchemy.url", _db_url.replace("%", "%%"))
 
 target_metadata = None
 

@@ -8,6 +8,7 @@ DD-02 の単文字座標補完（低確信 span を crop して /ocr 再問合�
 from __future__ import annotations
 
 import base64
+import logging
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 from urllib.parse import urlparse
@@ -22,6 +23,8 @@ from newfan_paddle_client import (
     encode_image,
 )
 from newfan_schemas import ExtractionState, ReviewItem, Span, SpanSource
+
+logger = logging.getLogger(__name__)
 
 NodeFn = Callable[[ExtractionState], dict[str, Any]]
 ImageLoader = Callable[[str], bytes]
@@ -112,10 +115,19 @@ def make_structure_ocr(
                 data = image_loader(str(page["image_uri"]))
                 resp = client.layout_parsing(encode_image(data), file_type=1)
             except Exception as exc:  # noqa: BLE001 - ページ単位で errors に積み継続（§10）
+                # errors に積むだけだと state の中に埋もれ、運用側からは「spans が 0 件で
+                # LLM が幻覚を返す」という結果しか見えない（実 AWS で構造抽出が丸ごと
+                # 飛んでいるのに気付けなかった）。継続方針は維持しつつ必ず記録する。
+                logger.exception(
+                    "[structure_ocr] ページ処理に失敗（継続）: page=%s image_uri=%s",
+                    page_no,
+                    page.get("image_uri"),
+                )
                 errors.append({"page": page_no, "stage": "structure_ocr", "error": str(exc)})
                 continue
 
             if not resp.layout_parsing_results:
+                logger.warning("[structure_ocr] 空の結果: page=%s", page_no)
                 errors.append({"page": page_no, "stage": "structure_ocr", "error": "empty result"})
                 continue
 

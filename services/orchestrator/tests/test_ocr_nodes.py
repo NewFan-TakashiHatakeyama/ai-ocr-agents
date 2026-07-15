@@ -1,5 +1,8 @@
 """structure_ocr ノードの実体化（paddle_client の応答→spans/layout/markdown）。"""
 
+import logging
+
+import pytest
 from newfan_paddle_client import LayoutParsingResponse
 
 from newfan_orchestrator import ocr_nodes
@@ -53,15 +56,21 @@ def test_structure_ocr_builds_spans_across_pages() -> None:
     assert "# 請求書" in out["layout_markdown"]
 
 
-def test_structure_ocr_page_error_is_collected() -> None:
+def test_structure_ocr_page_error_is_collected(caplog: pytest.LogCaptureFixture) -> None:
     def bad_loader(uri: str) -> bytes:
         raise OSError("cannot read")
 
     node = ocr_nodes.make_structure_ocr(_FakeStructureClient(), bad_loader)
-    out = node({"pages": [{"page_no": 3, "image_uri": "file:///x.png"}]})
+    with caplog.at_level(logging.ERROR):
+        out = node({"pages": [{"page_no": 3, "image_uri": "file:///x.png"}]})
     # ページ失敗は errors に積んで継続（§10）
     assert out["spans"] == []
     assert out["errors"][0]["page"] == 3
+    # errors に積むだけだと state に埋もれ、運用側からは「spans 0 件で LLM が幻覚を返す」
+    # という結果しか見えない。必ずスタックトレースを残すこと（実 AWS で踏んだ）。
+    assert "structure_ocr" in caplog.text
+    assert "file:///x.png" in caplog.text
+    assert "cannot read" in caplog.text
 
 
 def test_vl_fallback_merges_vl_spans() -> None:

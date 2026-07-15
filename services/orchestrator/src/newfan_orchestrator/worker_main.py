@@ -97,10 +97,18 @@ def main() -> None:
         "orchestrator",
         os.environ.get("CONSUMER_NAME", socket.gethostname()),
     )
-    structure = PaddleServingClient(os.environ["STRUCTURE_URL"])
-    vl = PaddleServingClient(os.environ["VL_URL"]) if os.environ.get("VL_URL") else None
+    # PP-StructureV3 は 1 枚 16.4 秒（4vCPU 実測・ウォーム時）かかり、コンテナ起動直後の
+    # 初回はモデルのウォームアップでさらに延びる。クライアント既定の 30 秒では初回が
+    # ReadTimeout で落ち、構造抽出が丸ごと失われて LLM が幻覚を返す（実 AWS で検出）。
+    timeout = float(os.environ.get("INFERENCE_TIMEOUT_SEC", "180"))
+    structure = PaddleServingClient(os.environ["STRUCTURE_URL"], timeout=timeout)
+    vl = PaddleServingClient(os.environ["VL_URL"], timeout=timeout) if os.environ.get("VL_URL") else None
     # DD-02 char_backfill 用の /ocr。未設定なら補完なし（主経路のみ）。
-    ocr = PaddleServingClient(os.environ["OCR_URL"]) if os.environ.get("OCR_URL") else None
+    ocr = (
+        PaddleServingClient(os.environ["OCR_URL"], timeout=timeout)
+        if os.environ.get("OCR_URL")
+        else None
+    )
     adapter = LLMAdapter(_make_provider())
     bundle = PromptBundle.load(default_bundle_dir())
 

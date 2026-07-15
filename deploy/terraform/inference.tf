@@ -78,6 +78,13 @@ resource "aws_ecs_service" "structure_svc" {
         dns_name = local.structure_dns
         port     = 8080
       }
+      # Service Connect の既定 perRequestTimeout は 15 秒だが、PP-StructureV3 の実推論は
+      # 1 枚 16.4 秒（4vCPU 実測）かかるため、既定のままだと Envoy が 504 を返して
+      # 構造抽出が丸ごと失われる（実 AWS で検出）。実測値に対して十分な余裕を持たせる。
+      timeout {
+        per_request_timeout_seconds = 180
+        idle_timeout_seconds        = 300
+      }
     }
   }
 
@@ -140,6 +147,13 @@ resource "aws_ecs_service" "ocr_svc" {
       client_alias {
         dns_name = local.ocr_dns
         port     = 8080
+      }
+      # Service Connect の既定 perRequestTimeout は 15 秒だが、PP-StructureV3 の実推論は
+      # 1 枚 16.4 秒（4vCPU 実測）かかるため、既定のままだと Envoy が 504 を返して
+      # 構造抽出が丸ごと失われる（実 AWS で検出）。実測値に対して十分な余裕を持たせる。
+      timeout {
+        per_request_timeout_seconds = 180
+        idle_timeout_seconds        = 300
       }
     }
   }

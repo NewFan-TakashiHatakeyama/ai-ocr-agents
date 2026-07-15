@@ -68,4 +68,4 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-q"
-testpaths = ["packages", "services", "inference", "tests"]
+testpaths = ["packages", "services", "inference", "db", "tests"]

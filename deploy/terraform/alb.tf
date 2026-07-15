@@ -46,7 +46,7 @@ resource "aws_security_group" "service" {
   # SG 内の通信は既定で不許可のため、自己参照を入れないと orchestrator-worker から
   # http://structure-svc:8080 に到達できない（Service Connect でも宛先ポートは要開放）。
   ingress {
-    description = "推論サービングへの内部通信（Service Connect）"
+    description = "internal traffic to inference serving (Service Connect)"
     from_port   = 8080
     to_port     = 8080
     protocol    = "tcp"
