@@ -31,6 +31,9 @@ dev = [
     "types-pyyaml>=6.0",
     "alembic>=1.13",
     "langgraph>=0.2",
+    # 画像/TIFF ラスタライズ（§5.1）と DD-02 char_backfill のテストを実際に走らせるため。
+    # 無いと importorskip で丸ごとスキップされ、回帰を検出できない。
+    "pillow>=10.0",
 ]
 
 [tool.ruff]

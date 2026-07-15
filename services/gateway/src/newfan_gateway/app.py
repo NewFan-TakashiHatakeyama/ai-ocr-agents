@@ -90,9 +90,12 @@ def create_app(
 
 
 def _default_ingestor(settings: Settings) -> Ingestor:
-    # rasterizer は pypdfium2（runtime extra）。ObjectStore は S3_BUCKET 設定時 S3、無ければ Local。
+    # rasterizer は AutoRasterizer（PDF=pypdfium2 / 画像・TIFF=Pillow, runtime extra）。
+    # PdfiumRasterizer 単体だと PNG/JPEG のアップロードが NotImplementedError → 500 になる
+    # （validate_upload は pdf/png/jpeg/tiff/office を通すため。実コンテナで検出）。
+    # ObjectStore は S3_BUCKET 設定時 S3、無ければ Local。
     from newfan_ingest import IngestService
-    from newfan_ingest.rasterize import PdfiumRasterizer
+    from newfan_ingest.rasterize import AutoRasterizer
 
     if settings.s3_bucket:
         from newfan_ingest.storage import S3ObjectStore
@@ -102,4 +105,4 @@ def _default_ingestor(settings: Settings) -> Ingestor:
         from newfan_ingest.storage import LocalObjectStore
 
         store = LocalObjectStore(settings.storage_root)
-    return IngestService(store, PdfiumRasterizer())
+    return IngestService(store, AutoRasterizer())
