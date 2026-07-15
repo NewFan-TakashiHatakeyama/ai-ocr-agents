@@ -1,24 +1,43 @@
 {
   "family": "newfan-ocr-svc",
   "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
   "cpu": "2048",
   "memory": "4096",
   "executionRoleArn": "${EXECUTION_ROLE_ARN}",
   "taskRoleArn": "${TASK_ROLE_ARN}",
-  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
   "containerDefinitions": [
     {
       "name": "ocr-svc",
       "image": "${ECR_REPO_INFERENCE}:${IMAGE_TAG}",
       "essential": true,
       "portMappings": [
-        { "name": "ocr-svc", "containerPort": 8080, "protocol": "tcp", "appProtocol": "http" }
+        {
+          "name": "ocr-svc",
+          "containerPort": 8080,
+          "protocol": "tcp",
+          "appProtocol": "http"
+        }
       ],
       "environment": [
-        { "name": "PIPELINE_CONFIG", "value": "/opt/inference/ocr/pipeline_config.yaml" },
-        { "name": "INFERENCE_ENGINE", "value": "onnxruntime" },
-        { "name": "TENANT_LANG", "value": "ja" }
+        {
+          "name": "PIPELINE_CONFIG",
+          "value": "/opt/inference/ocr/pipeline_config.yaml"
+        },
+        {
+          "name": "INFERENCE_ENGINE",
+          "value": "onnxruntime"
+        },
+        {
+          "name": "TENANT_LANG",
+          "value": "ja"
+        }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
@@ -29,11 +48,14 @@
         }
       },
       "healthCheck": {
-        "command": ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)\""],
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)\""
+        ],
         "interval": 30,
         "timeout": 5,
         "retries": 3,
-        "startPeriod": 300
+        "startPeriod": 120
       }
     }
   ]

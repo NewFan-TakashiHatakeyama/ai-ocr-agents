@@ -43,30 +43,39 @@
 - GPU 推論（Option B）は `requiresCompatibilities: ["EC2"]` ＋
   `resourceRequirements: [{"type":"GPU","value":"1"}]` を付け、GPU 容量プロバイダのクラスタへ配置する。
 
-### 推論タスクのサイジング根拠（実測, linux/amd64 コンテナ）
+### エンジンは onnxruntime 一択（性能選択ではなく制約）
 
-sample2.png（A4 請求書 1 ページ, 740x1046）を `--engine onnxruntime` で warm 実測:
+`--engine paddle`(=paddle_static) は **paddle 3.3.1 の oneDNN/PIR 未実装**により
+`/layout-parsing` が必ず 500 になる（`ConvertPirAttribute2RuntimeAttribute`,
+`onednn_instruction.cc:116`）。Python API は `enable_mkldnn=False` で回避できるが、
+`paddlex --serve` に無効化手段が無い（CLI にフラグ無し・`FLAGS_use_mkldnn=0` も無効と実測）。
+`paddle_dynamic` は一部モデルが非対応。→ **サービングで動くのは onnxruntime のみ**。
 
-| vCPU | 1ページ処理 | 対 2vCPU |
+### 推論タスクのサイジング根拠（実測, linux/amd64 コンテナ, onnxruntime）
+
+sample2.png（A4 請求書 1 ページ, 740x1046）warm 実測:
+
+| vCPU | 1ページ | vCPU秒/page（コスト目安） |
 |---|---|---|
-| 2 | 111s | 1.0× |
-| 4 | **51s** | 2.2× |
-| 8 | 24s | 4.7× |
-| 32 | 7.9s | 14× |
+| 2 | 111s | 222 |
+| 4 | 51s | 205 |
+| **8** | **24s** | **190** |
+| 16 | **11.3s** | 181 |
+| 32 | 7.9s | 253 |
 
-**vCPU にほぼ線形**（8→32 のみ 4倍CPUで3倍＝逓減）。ピークメモリは実測 **2.7GB**。
+onnxruntime は **16 vCPU まで良くスケール**（8→16 で 2.1×＝ほぼ線形）。ピークメモリ実測 **2.7GB**。
+1ページ単価は 4〜16 vCPU でほぼ横ばい（181〜205 vCPU秒）＝**大きいタスクにしても割高にならない**。
 
-- **structure-svc = 4 vCPU / 8GB**: Fargate は 4 vCPU で最小 8GB のためメモリは十分（実使用 2.7GB）。
-  線形スケールのため **1ページあたりのコストは 2/4/8 vCPU でほぼ同じ** → レイテンシ要件が無ければ
-  小さめのタスクを**数で並べる**方がビンパッキング・耐障害性・キュー深度スケールと相性が良い。
-  ページ latency を詰めたい場合は 8 vCPU / 16GB（24s/page、コストは 2 倍だがスループットも 2 倍）。
+- **structure-svc = 8 vCPU / 16GB**（24s/page）: 単価が最良付近で latency も実用的。Fargate は
+  8 vCPU で最小 16GB（実使用 2.7GB のため余裕）。**さらに latency を詰めるなら 16 vCPU/32GB
+  （11.3s/page、単価はむしろ最安）**。逆に細かく刻みたいなら 4 vCPU/8GB（51s/page）。
 - **ocr-svc = 2 vCPU / 4GB**: crop した小画像の再認識が主でページ全体を処理しないため小さめ。
-- スループットは**タスク数で線形に増やす**（キュー深度 → Application Auto Scaling、上表のとおり
-  vCPU あたり性能がほぼ一定なので水平スケールが素直に効く）。
+- スループットは**タスク数で増やす**（キュー深度 → Application Auto Scaling）。単価がほぼ一定なので
+  水平・垂直どちらでもコストは同等 → 運用しやすい水平スケールを基本にする。
 
-**コールドスタート注意**: モデル（数百MB〜）は初回起動時に `~/.paddlex` へ取得するため
-`startPeriod: 300` を設定している。恒常運用ではモデルをイメージへ焼くか EFS でキャッシュを
-共有して起動時間を短縮すること（付録C-4）。
+**コールドスタート**: モデルはイメージへ焼き込み済み（`prefetch_models.py`）。起動時に
+外部（百度 CDN `bcebos.com`）へ数百MB取りに行かないため、起動が決定論的で外部依存も無い。
+実測: 焼き込み **19秒** / 未焼き込み 26秒（ローカル回線）。`startPeriod: 120` で足りる。
 
 ## イメージ（ECR へ build/push）
 

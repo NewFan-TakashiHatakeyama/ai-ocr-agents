@@ -8,6 +8,13 @@ set -e
 
 : "${PIPELINE_CONFIG:?PIPELINE_CONFIG is required (e.g. /opt/inference/structure/pipeline_config.yaml)}"
 LANG_CODE="${TENANT_LANG:-ja}"
+# 既定 onnxruntime。**これは性能の選択ではなく必須**: paddle 3.3.1 では `--engine paddle`
+# （= paddle_static）が oneDNN/PIR の未実装に当たり /layout-parsing が必ず 500 になる
+#   NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support ...
+#     (new_executor/instruction/onednn/onednn_instruction.cc:116)
+# Python API は enable_mkldnn=False で回避できるが、paddlex --serve に無効化手段が無い
+# （CLI に該当フラグ無し。FLAGS_use_mkldnn=0 も効かないことを実測で確認）。
+# paddle_dynamic は一部モデルが非対応。→ サービングで動くのは onnxruntime のみ。
 ENGINE="${INFERENCE_ENGINE:-onnxruntime}"
 PORT="${SERVE_PORT:-8080}"
 

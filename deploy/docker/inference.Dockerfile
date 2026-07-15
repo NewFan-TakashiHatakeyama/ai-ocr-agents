@@ -39,8 +39,14 @@ COPY inference/ /opt/inference/
 COPY deploy/docker/inference-entrypoint.sh /usr/local/bin/inference-entrypoint.sh
 RUN chmod +x /usr/local/bin/inference-entrypoint.sh
 
-# モデルは初回起動時に ~/.paddlex へ取得される。Fargate ではタスク再作成のたびに再取得に
-# なるため、本番はイメージへ焼くか EFS 等でキャッシュを共有すること（付録C-4）。
+# モデルをイメージへ焼き込む（コールドスタート対策）。
+# Fargate はタスク再作成のたびに新規コンテナになるため、起動時 DL だと毎回数百MB を取りに行き
+# 起動が延びる（暫定で startPeriod=300 を置いていた）。ビルド時に取得して同梱する。
+# 対象は「設定が参照するモデルのみ」= 通常構成 + 印章ありオプション + ocr。
+RUN python /opt/inference/scripts/prefetch_models.py \
+      /opt/inference/structure/pipeline_config.yaml \
+      /opt/inference/structure/pipeline_config.seal.yaml \
+      /opt/inference/ocr/pipeline_config.yaml
 ENV PADDLE_PDX_CACHE_HOME=/root/.paddlex
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/inference-entrypoint.sh"]
