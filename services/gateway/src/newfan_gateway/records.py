@@ -62,6 +62,12 @@ class JobRecord(BaseModel):
 
 
 class CorrectionRecord(BaseModel):
+    """§7 correction_logs の 1 行。列は DDL と一致させる。
+
+    doc_type/supplier_key/context は learn ノードが memory へ渡す検索キーと
+    embedding 入力（DD-06/DD-07）。ここで埋めないと学習ループに何も伝わらない。
+    """
+
     id: str
     tenant_id: str
     document_id: str
@@ -69,7 +75,10 @@ class CorrectionRecord(BaseModel):
     field_name: str
     original_value: Optional[str] = None
     corrected_value: str
-    note: Optional[str] = None
+    doc_type: Optional[str] = None
+    supplier_key: Optional[str] = None
+    context: Optional[str] = None
+    reviewer_id: Optional[str] = None
     created_at: datetime = Field(default_factory=_now)
 
 

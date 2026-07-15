@@ -374,7 +374,7 @@ def post_corrections(
     principal: Principal = Depends(require_role("reviewer")),
     repo: Repository = Depends(get_repo),
 ) -> dto.CorrectionsAccepted:
-    _require_document(repo, principal.tenant_id, document_id)
+    doc = _require_document(repo, principal.tenant_id, document_id)
     run = repo.get_run(principal.tenant_id, body.run_id)
     if run is None or run.document_id != document_id:
         raise ApiError("E1001", "Run が見つかりません", details={"run_id": body.run_id})
@@ -385,6 +385,8 @@ def post_corrections(
             "楽観ロック競合。最新結果を再取得してください",
             details={"expected": run.result_version, "got": body.version},
         )
+    # doc_type/supplier_key/context は learn ノードが memory へ渡す検索キーと embedding 入力
+    # （DD-06/DD-07）。埋めないと修正が記録されても次回の抽出に効かない。
     records = [
         CorrectionRecord(
             id=new_id("correction"),
@@ -394,7 +396,10 @@ def post_corrections(
             field_name=item.field_name,
             original_value=item.original_value,
             corrected_value=item.corrected_value,
-            note=item.note,
+            doc_type=doc.doc_type,
+            supplier_key=item.supplier_key,
+            context=item.context or item.note,
+            reviewer_id=principal.sub,
         )
         for item in body.items
     ]
@@ -429,8 +434,28 @@ def confirm(
     if cached is not None:
         return dto.ConfirmAccepted()
 
+    # §3.2: confirm は「随時保存した修正」を feedback としてグラフへ渡す。
+    # apply_feedback が確定値をマージし、learn が memory へ登録する（DD-06/DD-07）。
+    # ここで渡さないと、修正が correction_logs に残るだけで学習ループに何も伝わらない
+    # （実 AWS で memory 0 件のまま confirmed になるのを確認）。
+    saved = repo.list_corrections(principal.tenant_id, run.id)
+    feedback: dict[str, Any] = {
+        "corrections": [
+            {
+                "field_name": c.field_name,
+                "original_value": c.original_value,
+                "corrected_value": c.corrected_value,
+                "supplier_key": c.supplier_key,
+                "context": c.context,
+            }
+            for c in saved
+        ]
+    }
+    if body.overrides:
+        feedback["overrides"] = body.overrides
+
     repo.set_document_status(principal.tenant_id, document_id, "in_review")
-    orchestrator.resume(run.id, principal.tenant_id, body.overrides)
+    orchestrator.resume(run.id, principal.tenant_id, feedback)
     locks.release(principal.tenant_id, document_id, principal.sub)  # 確定で待機者を解放
     _idempotency_store(request, idempotency_key, principal.tenant_id, {"ok": True})
     return dto.ConfirmAccepted()

@@ -35,6 +35,7 @@ class Repository(Protocol):
     def get_job(self, tenant_id: str, job_id: str) -> Optional[JobRecord]: ...
 
     def add_corrections(self, corrections: list[CorrectionRecord]) -> None: ...
+    def list_corrections(self, tenant_id: str, run_id: str) -> list[CorrectionRecord]: ...
     def list_review_runs(self, tenant_id: str) -> list[RunRecord]: ...
 
 
@@ -118,6 +119,12 @@ class InMemoryRepository:
 
     def add_corrections(self, corrections: list[CorrectionRecord]) -> None:
         self._corrections.extend(corrections)
+
+    def list_corrections(self, tenant_id: str, run_id: str) -> list[CorrectionRecord]:
+        return [
+            c for c in self._corrections
+            if c.run_id == run_id and self._owned(c.tenant_id, tenant_id)
+        ]
 
     def list_review_runs(self, tenant_id: str) -> list[RunRecord]:
         return [

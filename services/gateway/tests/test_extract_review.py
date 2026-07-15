@@ -128,7 +128,9 @@ def test_confirm_resumes_graph(ctx: SimpleNamespace) -> None:
         f"/v1/documents/{doc_id}/confirm", headers=auth("reviewer"), json={"run_id": run_id}
     )
     assert r.status_code == 202
-    assert ctx.orch.resumed == [(run_id, "ten_1", None)]
+    # confirm は保存済み修正を feedback として渡す（§3.2）。修正が無くても
+    # corrections=[] を渡し、apply_feedback に全項目 approved で確定させる。
+    assert ctx.orch.resumed == [(run_id, "ten_1", {"corrections": []})]
 
 
 def test_review_queue(ctx: SimpleNamespace) -> None:

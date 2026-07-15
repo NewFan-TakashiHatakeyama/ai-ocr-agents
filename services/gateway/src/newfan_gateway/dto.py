@@ -67,6 +67,10 @@ class CorrectionItem(BaseModel):
     field_name: str
     original_value: Optional[str] = None
     corrected_value: str
+    # 学習用（§5.8）。supplier_key は発行者名の正規化キー、context は周辺原文（embedding 入力）。
+    supplier_key: Optional[str] = None
+    context: Optional[str] = None
+    # レビュアのメモ。専用の列は無く、context 未指定時の embedding 入力として使う。
     note: Optional[str] = None
 
 

@@ -80,6 +80,14 @@ class Job(Base):
 
 
 class CorrectionLog(Base):
+    """§7 の correction_logs。列は DDL と一致させること。
+
+    以前は DDL に無い note を持ち、逆に学習ループが使う doc_type/supplier_key/context を
+    欠いていたため、修正の保存が UndefinedColumn で 500 になっていた（実 AWS で検出）。
+    doc_type/supplier_key は memory の検索キー、context は embedding の入力（DD-06/DD-07）で、
+    idx_corrections_pattern も (tenant_id, doc_type, field_name) 前提。
+    """
+
     __tablename__ = "correction_logs"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String, nullable=False)
@@ -88,7 +96,10 @@ class CorrectionLog(Base):
     field_name: Mapped[str] = mapped_column(String, nullable=False)
     original_value: Mapped[Optional[str]] = mapped_column(Text)
     corrected_value: Mapped[str] = mapped_column(Text, nullable=False)
-    note: Mapped[Optional[str]] = mapped_column(Text)
+    doc_type: Mapped[Optional[str]] = mapped_column(Text)
+    supplier_key: Mapped[Optional[str]] = mapped_column(Text)
+    context: Mapped[Optional[str]] = mapped_column(Text)
+    reviewer_id: Mapped[Optional[str]] = mapped_column(Text)
 
 
 class PgRepository:
@@ -294,9 +305,28 @@ class PgRepository:
                         id=c.id, tenant_id=c.tenant_id, document_id=c.document_id,
                         run_id=c.run_id, field_name=c.field_name,
                         original_value=c.original_value, corrected_value=c.corrected_value,
-                        note=c.note,
+                        # 学習ループ（DD-06/DD-07）の検索キーと embedding 入力
+                        doc_type=c.doc_type, supplier_key=c.supplier_key,
+                        context=c.context, reviewer_id=c.reviewer_id,
                     )
                 )
+
+    def list_corrections(self, tenant_id: str, run_id: str) -> list[CorrectionRecord]:
+        with self._rls(tenant_id) as s:
+            stmt = (
+                select(CorrectionLog)
+                .where(CorrectionLog.run_id == run_id)
+                .order_by(CorrectionLog.id)
+            )
+            return [
+                CorrectionRecord(
+                    id=r.id, tenant_id=r.tenant_id, document_id=r.document_id, run_id=r.run_id,
+                    field_name=r.field_name, original_value=r.original_value,
+                    corrected_value=r.corrected_value, doc_type=r.doc_type,
+                    supplier_key=r.supplier_key, context=r.context, reviewer_id=r.reviewer_id,
+                )
+                for r in s.scalars(stmt)
+            ]
 
     def list_review_runs(self, tenant_id):
         with self._rls(tenant_id) as s:

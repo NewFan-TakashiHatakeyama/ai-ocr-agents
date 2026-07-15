@@ -13,6 +13,22 @@ jobs:
   quality:
     name: lint / type / test
     runs-on: ubuntu-latest
+    # gateway のテストは InMemoryRepository しか通しておらず、ORM と §7 DDL の乖離を
+    # 検出できなかった（本番で correction_logs への INSERT が 500 になり学習ループが
+    # 壊れていた）。実 PostgreSQL に migration を当てて PgRepository を検証する。
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: newfan
+          POSTGRES_PASSWORD: newfan
+          POSTGRES_DB: newfan
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL_TEST: postgresql+psycopg://newfan:newfan@localhost:5432/newfan
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -22,6 +38,13 @@ jobs:
           enable-cache: true
       - name: Sync workspace (dev group)
         run: uv sync --frozen
+      # PgRepository の結合テスト用。extras が要る（sqlalchemy/psycopg）。
+      - name: Sync gateway runtime (PG 結合テスト用)
+        run: uv sync --frozen --package newfan-gateway --extra runtime
+      - name: Apply migrations
+        run: uv run alembic -c db/alembic.ini upgrade head
+        env:
+          DATABASE_URL: postgresql+psycopg://newfan:newfan@localhost:5432/newfan
       - name: ruff
         run: uv run ruff check .
       - name: mypy (strict, src のみ)
