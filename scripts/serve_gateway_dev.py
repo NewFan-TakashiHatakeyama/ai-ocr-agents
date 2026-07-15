@@ -33,24 +33,36 @@ from newfan_schemas import ExtractedField, ReviewStatus, TableCell, TableResult
 
 SECRET = "dev-qa-secret-0123456789-abcdefghijklmnop"  # >= 32 bytes (HS256)
 
-# 実帳票 sample.png（御見積書, 793x1123）をそのままページ画像に使う。
-# bbox 座標系は sample.png のピクセル空間（実 PP-StructureV3 の rec_polys 由来）。
-_SAMPLE = Path(__file__).resolve().parents[1] / "sample.png"
+# 実帳票をそのままページ画像に使う。bbox 座標系は各画像のピクセル空間
+# （実 PP-StructureV3 の rec_polys / cell_box_list 由来）。
+_ROOT = Path(__file__).resolve().parents[1]
+_SAMPLE = _ROOT / "sample.png"  # 御見積書 793x1123
+_SAMPLE2 = _ROOT / "sample2.png"  # 請求書(Pyxis) 740x1046
 
 
-def _page_data_uri() -> str:
-    b64 = base64.b64encode(_SAMPLE.read_bytes()).decode("ascii")
+def _page_data_uri(path: Path = _SAMPLE) -> str:
+    b64 = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:image/png;base64,{b64}"
 
 
-# 実 PP-StructureV3 の記録 fixture（sample.png を推論した /layout-parsing 実応答）。
+# 実 PP-StructureV3 の記録 fixture（各 sample を推論した /layout-parsing 実応答）。
 # デモ明細は「実パイプライン（build_tables ＝構造解析 + B:span値補完 + C:縦積み分割）」
-# の出力をそのまま使う。値の乱れ（例: 2r0/001/00000）はこの低解像スキャンの実 OCR 品質で、
+# の出力をそのまま使う。値の乱れ（例: 2r0/001/00000、纸/达/俩 等の字形誤認）は実 OCR 品質で、
 # 構造抽出ではなく認識側の課題。座標も実 cell_box_list 由来なので画像と厳密に一致する。
-_REAL_FIXTURE = (
-    Path(__file__).resolve().parents[1]
-    / "packages/paddle_client/tests/fixtures/real_layout_parsing_sample.json"
-)
+_REAL_FIXTURE = _ROOT / "packages/paddle_client/tests/fixtures/real_layout_parsing_sample.json"
+_REAL_FIXTURE2 = _ROOT / "packages/paddle_client/tests/fixtures/real_layout_parsing_sample2.json"
+
+
+def _real_table(fixture: Path, name: str) -> TableResult:
+    """記録済み実応答を build_tables に通して明細 TableResult を得る。"""
+    from newfan_paddle_client import LayoutParsingResponse, build_spans, build_tables
+
+    data = json.loads(fixture.read_text(encoding="utf-8"))
+    pr = LayoutParsingResponse.model_validate(data).layout_parsing_results[0].pruned_result
+    spans = build_spans(pr, page=1)
+    table = build_tables(pr, spans, page=1)[0]
+    table.name = name
+    return table
 
 
 def _line_items_table() -> TableResult:
@@ -60,14 +72,7 @@ def _line_items_table() -> TableResult:
     ハンドクラフト表へフォールバックする。
     """
     try:
-        from newfan_paddle_client import LayoutParsingResponse, build_spans, build_tables
-
-        data = json.loads(_REAL_FIXTURE.read_text(encoding="utf-8"))
-        pr = LayoutParsingResponse.model_validate(data).layout_parsing_results[0].pruned_result
-        spans = build_spans(pr, page=1)
-        table = build_tables(pr, spans, page=1)[0]
-        table.name = "line_items"
-        return table
+        return _real_table(_REAL_FIXTURE, "line_items")
     except Exception:  # noqa: BLE001 - fixture 不在等はフォールバック
         cols = {
             "商品名": (40, 327), "人数": (327, 420), "箱数": (327, 420),
@@ -89,6 +94,89 @@ def _line_items_table() -> TableResult:
                  for c, (x0, x1) in cols.items() if vals[c] is not None}
             )
         return TableResult(name="line_items", page=1, confidence=0.78, rows=rows)
+
+
+def _seed_invoice(repo: InMemoryRepository) -> None:
+    """2件目: sample2.png（Pyxis 請求書, 740x1046）。明細もフィールドも実 OCR 由来。
+
+    フィールドの value_raw / span_ids / bbox は実 span をそのまま使う（座標の捏造なし）。
+    取引先名は実 OCR が「株式会社化一工」と誤読しているため要確認に倒す。
+    """
+    repo.create_document(
+        DocumentRecord(
+            id="doc_demo2",
+            tenant_id="ten_1",
+            storage_uri="s3://demo/sample2.png",
+            original_name="請求書_sample2.png",
+            mime_type="image/png",
+            page_count=1,
+            doc_type="invoice",
+            external_ref="GS0001",
+            status="needs_review",
+        ),
+        [PageRecord(page_no=1, width=740, height=1046, image_uri=_page_data_uri(_SAMPLE2))],
+    )
+    try:
+        tables = [_real_table(_REAL_FIXTURE2, "line_items")]
+    except Exception:  # noqa: BLE001
+        tables = []
+    repo.create_run(
+        RunRecord(
+            id="run_demo2",
+            tenant_id="ten_1",
+            document_id="doc_demo2",
+            status="needs_review",
+            result_version=1,
+            engine_versions={"paddleocr": "3.7.0", "ocr": "PP-OCRv5_server", "llm": "gemini-2.5-flash"},
+            fields=[
+                ExtractedField(
+                    name="issuer_name",
+                    label="取引先名",
+                    value_raw="株式会社化一工",  # 実 OCR 誤読（正: 株式会社エイビーエム）
+                    value_normalized="株式会社化一工",
+                    confidence=0.88,
+                    grounding_score=1.0,
+                    page=1,
+                    bbox=[65, 181, 184, 195],
+                    source_quote="株式会社化一工",
+                    span_ids=[6],
+                    review_status=ReviewStatus.PENDING,
+                    correction={"applied": False, "needs_review": True,
+                                "rationale": "OCR 字形誤認の疑い（社名が辞書に無い）。原本確認が必要。"},
+                ),
+                ExtractedField(
+                    name="total_amount", label="御請求金額",
+                    value_raw="￥7,003-", value_normalized="7003",
+                    confidence=0.94, grounding_score=1.0, page=1,
+                    bbox=[219, 356, 289, 377], source_quote="￥7,003-",
+                    span_ids=[27], review_status=ReviewStatus.AUTO,
+                ),
+                ExtractedField(
+                    name="tax_amount", label="内消費税",
+                    value_raw="Y 599", value_normalized="599",
+                    confidence=0.91, grounding_score=1.0, page=1,
+                    bbox=[324, 365, 354, 380], source_quote="Y 599",
+                    span_ids=[29], review_status=ReviewStatus.AUTO,
+                ),
+                ExtractedField(
+                    name="invoice_no", label="請求番号",
+                    value_raw="请求番号GS0001", value_normalized="GS0001",
+                    confidence=0.91, grounding_score=1.0, page=1,
+                    bbox=[510, 87, 604, 101], source_quote="请求番号GS0001",
+                    span_ids=[17], review_status=ReviewStatus.AUTO,
+                ),
+                ExtractedField(
+                    name="invoice_date", label="請求日付",
+                    value_raw="请求日付令和02年01月31日", value_normalized="2020-01-31",
+                    confidence=0.97, grounding_score=1.0, page=1,
+                    bbox=[511, 70, 663, 84], source_quote="请求日付令和02年01月31日",
+                    span_ids=[16], review_status=ReviewStatus.AUTO,
+                ),
+            ],
+            tables=tables,
+            review_summary={"pending": 1, "auto": 4},
+        )
+    )
 
 
 def _seed(repo: InMemoryRepository) -> None:
@@ -224,6 +312,7 @@ def _seed_admin() -> InMemoryAdminRepository:
 def main() -> None:
     repo = InMemoryRepository()
     _seed(repo)
+    _seed_invoice(repo)
     admin = _seed_admin()
     reviewer = jwt.encode({"sub": "reviewer1", "tenant_id": "ten_1", "role": "reviewer"}, SECRET, algorithm="HS256")
     admin_tok = jwt.encode({"sub": "admin1", "tenant_id": "ten_1", "role": "admin"}, SECRET, algorithm="HS256")

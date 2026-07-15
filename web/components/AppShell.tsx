@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { StatusChip } from "@/components/StatusChip";
 import { api } from "@/lib/api";
@@ -10,17 +10,30 @@ import { api } from "@/lib/api";
 // §4 共通レイアウト: サイドナビ216px（フロストガラス）＋ main。
 // 一覧系画面で使用。検証画面(SCR-03)は集中のためフルスクリーン（本シェル非使用）。
 
-function principal(): { sub: string; role: string } {
+type Principal = { sub: string; role: string };
+
+function decodePrincipal(token: string | undefined | null): Principal {
   try {
-    const t =
-      (typeof window !== "undefined" && window.localStorage.getItem("nf_token")) ||
-      process.env.NEXT_PUBLIC_DEV_TOKEN;
-    if (!t) return { sub: "guest", role: "viewer" };
-    const p = JSON.parse(atob(t.split(".")[1]));
+    if (!token) return { sub: "guest", role: "viewer" };
+    const p = JSON.parse(atob(token.split(".")[1]));
     return { sub: p.sub ?? "user", role: p.role ?? "viewer" };
   } catch {
     return { sub: "user", role: "viewer" };
   }
+}
+
+// localStorage を render 中に読むと SSR と初回クライアントレンダで結果が変わり
+// hydration mismatch になる（サーバは env トークン、クライアントは localStorage を見るため）。
+// 初期値は env 由来の決定論的な値にし、localStorage はマウント後にのみ反映する。
+function usePrincipal(): Principal {
+  const [me, setMe] = useState<Principal>(() =>
+    decodePrincipal(process.env.NEXT_PUBLIC_DEV_TOKEN),
+  );
+  useEffect(() => {
+    const t = window.localStorage.getItem("nf_token") || process.env.NEXT_PUBLIC_DEV_TOKEN;
+    setMe(decodePrincipal(t));
+  }, []);
+  return me;
 }
 
 const ICON = {
@@ -42,7 +55,7 @@ function NavIcon({ d }: { d: string }) {
 }
 
 export function AppShell({ active, children }: { active: string; children: ReactNode }) {
-  const me = principal();
+  const me = usePrincipal();
   const isAdmin = me.role === "admin";
   const { data } = useQuery({ queryKey: ["documents"], queryFn: () => api.listDocuments() });
   const recent = (data?.items ?? []).slice(0, 20);
