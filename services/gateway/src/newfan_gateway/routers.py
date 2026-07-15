@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
+from newfan_ingest.storage import page_key
 
 from newfan_gateway import dto
 from newfan_gateway.auth import Principal
@@ -27,6 +28,12 @@ from newfan_gateway.deps import (
 from newfan_gateway.errors import ApiError
 from newfan_gateway.ids import new_id
 from newfan_gateway.locks import DEFAULT_TTL_SEC, LockStore
+from newfan_gateway.page_images import (
+    issue_page_token,
+    presign_s3,
+    read_local_image,
+    verify_page_token,
+)
 from newfan_gateway.ports import Ingestor, OrchestratorClient
 from newfan_gateway.queue import Queue
 from newfan_gateway.records import (
@@ -237,6 +244,7 @@ def get_result(
 
 @router.get("/documents/{document_id}/pages/{page_no}/image", response_model=dto.SignedUrl)
 def get_page_image(
+    request: Request,
     document_id: str,
     page_no: int,
     principal: Principal = Depends(require_role("viewer")),
@@ -248,8 +256,53 @@ def get_page_image(
     page = next((p for p in pages if p.page_no == page_no), None)
     if page is None:
         raise ApiError("E1001", "ページが見つかりません", details={"page_no": page_no})
-    # TODO: S3 の場合は事前署名 URL を発行（有効期限 signed_url_ttl_sec）
-    return dto.SignedUrl(url=page.image_uri, expires_in=settings.signed_url_ttl_sec)
+
+    # 保管先 URI（file:// / s3://）をそのまま返すとブラウザが読めず検証画面の帳票が
+    # 表示されない（実アップロード経路で検出。dev seed は data: URI だったため露見しなかった）。
+    ttl = settings.signed_url_ttl_sec
+    if settings.s3_bucket:
+        url = presign_s3(
+            settings.s3_bucket,
+            page_key(principal.tenant_id, document_id, page_no),
+            ttl_sec=ttl,
+        )
+    else:
+        token = issue_page_token(
+            tenant_id=principal.tenant_id,
+            document_id=document_id,
+            page_no=page_no,
+            jwt_secret=settings.jwt_secret,
+            jwt_alg=settings.jwt_alg,
+            ttl_sec=ttl,
+        )
+        base = str(request.base_url).rstrip("/")
+        url = f"{base}/v1/documents/{document_id}/pages/{page_no}/content?token={token}"
+    return dto.SignedUrl(url=url, expires_in=ttl)
+
+
+@router.get("/documents/{document_id}/pages/{page_no}/content")
+def get_page_image_content(
+    document_id: str,
+    page_no: int,
+    token: str,
+    repo: Repository = Depends(get_repo),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """署名URLの実体配信。<img src> は Authorization を付けられないため token で認可する。"""
+    tenant_id = verify_page_token(
+        token,
+        document_id=document_id,
+        page_no=page_no,
+        jwt_secret=settings.jwt_secret,
+        jwt_alg=settings.jwt_alg,
+    )
+    page = next(
+        (p for p in repo.get_pages(tenant_id, document_id) if p.page_no == page_no), None
+    )
+    if page is None:
+        raise ApiError("E1001", "ページが見つかりません", details={"page_no": page_no})
+    data = read_local_image(page.image_uri, storage_root=settings.storage_root)
+    return Response(content=data, media_type="image/png")
 
 
 # ============ 検証画面ソフトロック（§8.2） ============

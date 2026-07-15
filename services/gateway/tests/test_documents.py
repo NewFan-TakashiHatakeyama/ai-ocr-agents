@@ -44,11 +44,34 @@ def test_list_documents(ctx: SimpleNamespace) -> None:
 
 
 def test_page_image_signed_url(ctx: SimpleNamespace) -> None:
+    """署名URLは実際にブラウザが取得できること（url が空でないだけでは不足）。
+
+    保管先 URI（file://）を素通ししていた頃はこのアサートが無く、検証画面の帳票画像が
+    壊れたまま素通りしていた。
+    """
     doc_id = _upload(ctx)
     r = ctx.client.get(f"/v1/documents/{doc_id}/pages/1/image", headers=auth("viewer"))
     assert r.status_code == 200
-    assert r.json()["url"]
+    url = r.json()["url"]
     assert r.json()["expires_in"] == 600
+    assert not url.startswith(("file://", "s3://"))  # ブラウザが読めない
+
+    got = ctx.client.get(url.replace("http://testserver", ""))
+    assert got.status_code == 200
+    assert got.headers["content-type"] == "image/png"
+    assert got.content == b"\x89PNG-page-1"  # FakeRasterizer が書いた実バイト
+
+
+def test_page_image_content_requires_valid_token(ctx: SimpleNamespace) -> None:
+    doc_id = _upload(ctx)
+    r = ctx.client.get(f"/v1/documents/{doc_id}/pages/1/content?token=forged")
+    assert r.status_code == 403  # E5001
+    assert r.json()["error"]["code"] == "E5001"
+
+
+def test_page_image_content_without_token_is_rejected(ctx: SimpleNamespace) -> None:
+    doc_id = _upload(ctx)
+    assert ctx.client.get(f"/v1/documents/{doc_id}/pages/1/content").status_code == 422
 
 
 def test_tenant_isolation(ctx: SimpleNamespace) -> None:
