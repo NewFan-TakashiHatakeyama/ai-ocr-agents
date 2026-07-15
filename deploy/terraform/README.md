@@ -32,7 +32,50 @@ Fargate 上に MVP 一式を載せる IaC。**このリポジトリで唯一の�
 - **S3**: `export_s3_bucket`（＋任意 `export_s3_kms_key_id`）。
 - **ACM 証明書**: `acm_certificate_arn` を渡すと ALB に HTTPS:443 リスナを追加（空なら HTTP のみ）。
 
-## 使い方
+## 起動 / 停止とコスト（月に数回しか使わない前提）
+
+立てっぱなしは **$606.69/月（約91,000円）**。うち推論 2 台の 24/7 が $270（44%）を占めるが、
+月 1 万枚の処理に実際に必要な推論時間は **46 時間（1 台の 6.2%）** しかない。
+**使う時だけ立てる運用**が前提。
+
+止め方は 2 段階ある。AWS の仕様上、**ElastiCache / NAT Gateway / ALB には「停止」が無く削除しかない**
+ため、月単位で使わないなら `down`（destroy）が正解になる。
+
+| 操作 | 何が起きる | 止めても残る額 | 復旧時間 |
+|---|---|---|---|
+| `pause` | Fargate を 0 台に。DB とエンドポイントは保持 | **約 $189/月** | 数十秒 |
+| `down` | スナップショットを取って destroy | **約 $3.95/月**（ECR＋snapshot） | 15–20 分 |
+
+`pause` は「今夜は使わない」用。RDS も停止すれば $115/月まで下がるが、
+**RDS の停止は 7 日で自動起動する**ため月数回の運用には使えない。
+
+```bash
+scripts/aws_env.sh cost     # 時間単価と概算
+scripts/aws_env.sh up       # 起動（apply）
+scripts/aws_env.sh status   # 今どれが課金されているか
+scripts/aws_env.sh down     # スナップショット取得 → destroy
+```
+
+起動中の実費は **$0.766/h（約114円/時）**＝ Fargate $0.529 + RDS/Redis/NAT/ALB $0.236。
+
+| 使い方 | 月額 |
+|---|---|
+| 月2回 × 4時間 | 約 $10（約1,500円） |
+| **月4回 × 8時間** | **約 $28（約4,300円）** |
+| 月8回 × 8時間 | 約 $53（約7,900円） |
+| 立てっぱなし | $606.69（約91,000円） |
+
+単価は AWS Pricing API から取得した ap-northeast-1 の実値。処理時間は実測（16.4秒/枚 @4vCPU）。
+
+開発環境では `container_insights_enabled=false`（$18/月の削減）を推奨。
+さらに削るなら推論を Fargate Spot に載せる（約7割引）、NAT を捨てて public subnet に置く、等。
+
+> **`down` はデータを消す。** スクリプトが destroy 前に手動スナップショットを取るが、
+> **復元は手作業**（スナップショットから RDS を作成し直す）。terraform の `snapshot_identifier` は
+> マスタパスワードの扱いが分かりにくく、復元した DB と `DATABASE_URL` が食い違って接続不能に
+> なりうるため、あえて自動化していない。
+
+## 使い方（素の terraform）
 
 ```bash
 cd deploy/terraform

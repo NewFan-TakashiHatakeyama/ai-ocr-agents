@@ -48,7 +48,7 @@ resource "aws_ecs_service" "gateway" {
   name            = "${local.prefix}-gateway"
   cluster         = aws_ecs_cluster.app.id
   task_definition = aws_ecs_task_definition.gateway.arn
-  desired_count   = 2
+  desired_count   = local.desired.gateway
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -107,7 +107,7 @@ resource "aws_ecs_service" "orchestrator_worker" {
   name            = "${local.prefix}-orchestrator-worker"
   cluster         = aws_ecs_cluster.app.id
   task_definition = aws_ecs_task_definition.orchestrator_worker.arn
-  desired_count   = 1
+  desired_count   = local.desired.orchestrator
   launch_type     = "FARGATE"
   network_configuration {
     subnets         = local.private_subnet_ids
@@ -160,7 +160,7 @@ resource "aws_ecs_service" "export_worker" {
   name            = "${local.prefix}-export-worker"
   cluster         = aws_ecs_cluster.app.id
   task_definition = aws_ecs_task_definition.export_worker.arn
-  desired_count   = 1
+  desired_count   = local.desired.export
   launch_type     = "FARGATE"
   network_configuration {
     subnets         = local.private_subnet_ids

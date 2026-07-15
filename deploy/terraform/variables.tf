@@ -37,7 +37,34 @@ variable "vpc_cidr" {
   description = "AI-OCR VPC の CIDR（既存の 172.31.0.0/16 と 10.0.0.0/16 に重ねないこと）"
 }
 
+# --- 起動/停止 ---
+# 月に数回しか使わない環境では「立てっぱなし」がそのまま無駄になる。止め方は 2 段階:
+#
+#  1) services_enabled=false → Fargate を全て 0 台に。数十秒で戻せ、DB もエンドポイントも
+#     残る。ただし ElastiCache / NAT / ALB は AWS 側に「停止」が無く削除しかないため、
+#     RDS+Redis+NAT+ALB+ストレージ の約 $189/月 は残る。「今夜は使わない」用。
+#  2) terraform destroy → 残るのは ECR($3) と DB スナップショット($1) だけ。復旧は 15-20 分
+#     （RDS 作成が支配的）。月数回の利用ならこちらが既定。data は db_snapshot_identifier で戻す。
+#
+# 起動中の実費は $0.766/h（Fargate $0.529 + RDS/Redis/NAT/ALB $0.236）。
+variable "services_enabled" {
+  type        = bool
+  default     = true
+  description = "false で全 ECS サービスを 0 台にする（インフラは残す。完全に止めるなら destroy）"
+}
+
+variable "container_insights_enabled" {
+  type        = bool
+  default     = true
+  description = "Container Insights（約 $18/月）。開発環境では false 推奨"
+}
+
 # --- データストア（本スタックが作成し、接続文字列を Secrets Manager に格納する） ---
+#
+# destroy するとデータは消える（開発/デモ環境の前提）。残したい場合は destroy 前に
+# scripts/aws_env.sh が手動スナップショットを取る。復元は明示的な手作業とする
+# （terraform の snapshot_identifier はマスタパスワードの扱いが分かりにくく、
+#  復元時に DATABASE_URL と食い違って接続不能になりうるため、あえて自動化しない）。
 variable "db_instance_class" {
   type        = string
   default     = "db.t4g.medium"

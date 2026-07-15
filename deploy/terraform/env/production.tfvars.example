@@ -4,6 +4,14 @@
 aws_region = "ap-northeast-1"
 env        = "production"
 
+# --- 起動/停止（scripts/aws_env.sh が上書きする） ---
+# false で Fargate を 0 台に。ただし ElastiCache/NAT/ALB は停止できず約$189/月が残るため、
+# 月単位で使わないなら scripts/aws_env.sh down（destroy, 残$3.95/月）を使うこと。
+# services_enabled = true
+
+# Container Insights は約$18/月。開発・デモ用途では切る。
+container_insights_enabled = false
+
 # ECR に push 済みのタグ（CD の image_tag と一致させる）
 image_tag = "v0.1.0"
 

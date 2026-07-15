@@ -1,4 +1,14 @@
 locals {
+  # services_enabled=false で全サービスを 0 台に落とす（起動/停止スイッチ）。
+  # ここを 0 にしても RDS/Redis/NAT/ALB は残る（AWS 側に停止が無いため）。完全に止めるなら destroy。
+  desired = {
+    gateway      = var.services_enabled ? 2 : 0
+    orchestrator = var.services_enabled ? 1 : 0
+    export       = var.services_enabled ? 1 : 0
+    structure    = var.services_enabled ? 1 : 0
+    ocr          = var.services_enabled ? 1 : 0
+  }
+
   # 全リソース共通の接頭辞（例: ai-ocr-gateway）。別サービスと区別するため必ず ai-ocr を含む。
   prefix = var.name_prefix
 
@@ -111,9 +121,10 @@ resource "aws_iam_role_policy" "task_s3" {
 resource "aws_ecs_cluster" "app" {
   name = "${local.prefix}-${var.env}"
   tags = { Name = "${local.prefix}-${var.env}" }
+  # Container Insights は約 $18/月（メトリクス課金）。開発環境では切れるようにする。
   setting {
     name  = "containerInsights"
-    value = "enabled"
+    value = var.container_insights_enabled ? "enabled" : "disabled"
   }
 
   # STRUCTURE_URL=http://structure-svc:8080 を名前解決するための Service Connect 名前空間。

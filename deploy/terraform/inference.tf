@@ -61,7 +61,7 @@ resource "aws_ecs_service" "structure_svc" {
   name            = "${local.prefix}-structure-svc"
   cluster         = aws_ecs_cluster.app.id
   task_definition = aws_ecs_task_definition.structure_svc.arn
-  desired_count   = 1
+  desired_count   = local.desired.structure
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -124,7 +124,7 @@ resource "aws_ecs_service" "ocr_svc" {
   name            = "${local.prefix}-ocr-svc"
   cluster         = aws_ecs_cluster.app.id
   task_definition = aws_ecs_task_definition.ocr_svc.arn
-  desired_count   = 1
+  desired_count   = local.desired.ocr
   launch_type     = "FARGATE"
 
   network_configuration {
