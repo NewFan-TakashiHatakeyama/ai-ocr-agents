@@ -14,6 +14,7 @@ Local のトークンは tenant/document/page/exp を含む JWT。S3 の事前�
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -58,10 +59,24 @@ def verify_page_token(
     return str(tenant_id)
 
 
-def presign_s3(bucket: str, key: str, *, ttl_sec: int, client: Optional[Any] = None) -> str:
-    import boto3  # 遅延 import（runtime extra）
+def presign_s3(
+    bucket: str, key: str, *, ttl_sec: int, client: Optional[Any] = None, region: str = ""
+) -> str:
+    """S3 の事前署名 GET URL。
 
-    s3 = client or boto3.client("s3")
+    region と署名バージョンを明示する。既定の boto3.client("s3") はグローバル
+    エンドポイント宛の SigV2 URL を作ってしまい、ap-northeast-1（SigV4 のみ対応）では
+    S3 が TemporaryRedirect を返して画像が表示できない（実 AWS で検出）。
+    ECS のタスクロールは一時認証情報のため、SigV4 で x-amz-security-token を含める必要もある。
+    """
+    import boto3  # 遅延 import（runtime extra）
+    from botocore.config import Config
+
+    s3 = client or boto3.client(
+        "s3",
+        region_name=region or os.environ.get("AWS_REGION") or None,
+        config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+    )
     return str(
         s3.generate_presigned_url(
             "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=ttl_sec

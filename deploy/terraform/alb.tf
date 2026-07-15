@@ -42,6 +42,14 @@ resource "aws_security_group" "service" {
     security_groups = [aws_security_group.alb.id]
   }
 
+  ingress {
+    description     = "web from ALB"
+    from_port       = 3000
+    to_port         = 3000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
   # 推論サービング（structure-svc / ocr-svc）は同じ SG のタスクとして起動する。
   # SG 内の通信は既定で不許可のため、自己参照を入れないと orchestrator-worker から
   # http://structure-svc:8080 に到達できない（Service Connect でも宛先ポートは要開放）。
@@ -86,14 +94,53 @@ resource "aws_lb_target_group" "gateway" {
   }
 }
 
+# web（Next.js）。gateway と同じ ALB に相乗りさせ、/v1/* だけ gateway へ振る。
+# 同一オリジンになるのでブラウザから見て CORS が不要になり、web に焼き込む
+# NEXT_PUBLIC_API_BASE も ALB の URL 一本で済む。
+resource "aws_lb_target_group" "web" {
+  name        = "${local.prefix}-web"
+  port        = 3000
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.this.id
+  target_type = "ip"
+
+  health_check {
+    path = "/"
+    # Next.js の / は /dashboard へ 307 リダイレクトするため 200 固定だと落ちる
+    matcher             = "200-399"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+
+  tags = { Name = "${local.prefix}-web" }
+}
+
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.gateway.arn
   port              = 80
   protocol          = "HTTP"
 
+  # 既定は web。API だけをルールで gateway に振る。
   default_action {
     type             = "forward"
+    target_group_arn = aws_lb_target_group.web.arn
+  }
+}
+
+resource "aws_lb_listener_rule" "api" {
+  listener_arn = aws_lb_listener.http.arn
+  priority     = 10
+
+  action {
+    type             = "forward"
     target_group_arn = aws_lb_target_group.gateway.arn
+  }
+  condition {
+    path_pattern {
+      values = ["/v1/*", "/healthz"]
+    }
   }
 }
 

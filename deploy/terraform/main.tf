@@ -7,6 +7,7 @@ locals {
     export       = var.services_enabled ? 1 : 0
     structure    = var.services_enabled ? 1 : 0
     ocr          = var.services_enabled ? 1 : 0
+    web          = var.services_enabled ? 1 : 0
   }
 
   # 全リソース共通の接頭辞（例: ai-ocr-gateway）。別サービスと区別するため必ず ai-ocr を含む。
@@ -15,10 +16,10 @@ locals {
   # ECR リポジトリ（CD の matrix.repo と一致させること）
   # inference は structure-svc / ocr-svc / structure-svc-seal が共有する単一イメージ
   # （中身は同じで pipeline_config だけ違う。compose も同じ構成）。
-  images = ["gateway", "orchestrator-worker", "export-worker", "migrate", "inference"]
+  images = ["gateway", "orchestrator-worker", "export-worker", "migrate", "inference", "web"]
 
   # ロググループを作る task family
-  log_families = ["gateway", "orchestrator-worker", "export-worker", "migrate", "structure-svc", "ocr-svc"]
+  log_families = ["gateway", "orchestrator-worker", "export-worker", "migrate", "structure-svc", "ocr-svc", "web"]
 
   # 既存 ARN が渡されなければ本スタックが作った JWT 鍵を使う
   jwt_secret_arn = var.jwt_secret_arn != "" ? var.jwt_secret_arn : aws_secretsmanager_secret.jwt[0].arn

@@ -112,3 +112,31 @@ def test_presign_s3_uses_bucket_key_and_ttl() -> None:
         "params": {"Bucket": "bkt", "Key": "ten_1/doc_a/pages/1.png"},
         "ttl": 600,
     }
+
+
+def test_presign_s3_client_uses_region_and_sigv4(monkeypatch: pytest.MonkeyPatch) -> None:
+    """client 未注入時は region と SigV4 を明示すること。
+
+    既定の boto3.client("s3") はグローバルエンドポイント宛の SigV2 URL を作り、
+    ap-northeast-1（SigV4 のみ）では S3 が TemporaryRedirect を返して画像が出ない。
+    ECS のタスクロールは一時認証情報なので、SigV4 で security token を含める必要もある。
+    """
+    boto3 = pytest.importorskip("boto3", reason="boto3 は runtime extra")
+    captured: dict = {}
+
+    def _fake_client(service: str, *, region_name: object = None, config: object = None) -> object:
+        captured.update(service=service, region=region_name, config=config)
+
+        class _S:
+            def generate_presigned_url(self, op: str, *, Params: dict, ExpiresIn: int) -> str:
+                return "https://signed"
+
+        return _S()
+
+    monkeypatch.setattr(boto3, "client", _fake_client)
+    monkeypatch.setenv("AWS_REGION", "ap-northeast-1")
+    presign_s3("bkt", "k", ttl_sec=60)
+
+    assert captured["service"] == "s3"
+    assert captured["region"] == "ap-northeast-1"
+    assert captured["config"].signature_version == "s3v4"
