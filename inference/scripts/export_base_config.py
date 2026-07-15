@@ -41,9 +41,15 @@ def _build_structure():  # type: ignore[no-untyped-def]
 def _build_ocr():  # type: ignore[no-untyped-def]
     from paddleocr import PaddleOCR
 
+    # DD-03: OCR は PP-OCRv6_medium 固定。DD-01/ADR-0002: 前処理は ingest 側で実施済み。
+    # 付録C-3: return_word_box は常時有効（サービングのリクエストボディでは指定できないため）。
+    #   ※実測では本フラグを立てても単語/単文字座標は返らない（行レベルのみ）。設計どおり維持する。
     return PaddleOCR(
         text_detection_model_name="PP-OCRv6_medium_det",
         text_recognition_model_name="PP-OCRv6_medium_rec",
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=True,
         return_word_box=True,
     )
 

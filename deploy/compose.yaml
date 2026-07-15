@@ -13,16 +13,22 @@
 #   イメージに onnxruntime / paddle2onnx が必要（無い場合は起動時に DependencyError）。
 #   OpenVINO は PP-OCRv6_medium_rec を ultra-infer 1.2.0 が読めず不可（inference/README.md 参照）。
 
+# structure-svc / ocr-svc は同一イメージ（deploy/docker/inference.Dockerfile）を
+# PIPELINE_CONFIG で使い分ける。entrypoint が起動前に validate_config.py を実行し、
+# DD-03/DD-08 違反や実在しないモデル名なら起動しない。
 services:
   structure-svc:
-    image: ${PADDLEX_SERVING_IMAGE:-ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr:latest}
-    command: >-
-      paddlex --serve
-      --pipeline /configs/pipeline_config.yaml
-      --host 0.0.0.0 --port 8080
-      --engine onnxruntime
+    build:
+      context: ..
+      dockerfile: deploy/docker/inference.Dockerfile
+    image: ${INFERENCE_IMAGE:-newfan-inference:local}
+    environment:
+      PIPELINE_CONFIG: /opt/inference/structure/pipeline_config.yaml
+      INFERENCE_ENGINE: ${INFERENCE_ENGINE:-onnxruntime}
+      TENANT_LANG: ${TENANT_LANG:-ja}
     volumes:
-      - ./../inference/structure/pipeline_config.yaml:/configs/pipeline_config.yaml:ro
+      # モデルキャッシュ（初回 DL を再利用。本番は EFS 等に置く, 付録C-4）
+      - paddlex-models:/root/.paddlex
     ports:
       - "8081:8080"
     # GPU を使う場合は deploy.resources.reservations.devices を有効化
@@ -35,13 +41,16 @@ services:
     #           capabilities: [gpu]
 
   ocr-svc:
-    image: ${PADDLEX_SERVING_IMAGE:-ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr:latest}
-    command: >-
-      paddlex --serve
-      --pipeline /configs/pipeline_config.yaml
-      --host 0.0.0.0 --port 8080
+    build:
+      context: ..
+      dockerfile: deploy/docker/inference.Dockerfile
+    image: ${INFERENCE_IMAGE:-newfan-inference:local}
+    environment:
+      PIPELINE_CONFIG: /opt/inference/ocr/pipeline_config.yaml
+      INFERENCE_ENGINE: ${INFERENCE_ENGINE:-onnxruntime}
+      TENANT_LANG: ${TENANT_LANG:-ja}
     volumes:
-      - ./../inference/ocr/pipeline_config.yaml:/configs/pipeline_config.yaml:ro
+      - paddlex-models:/root/.paddlex
     ports:
       - "8082:8080"
 
@@ -82,3 +91,5 @@ services:
 
 volumes:
   pgdata:
+  # 推論モデルのキャッシュ（初回 DL は数百MB。毎回取り直さないよう永続化）
+  paddlex-models:
