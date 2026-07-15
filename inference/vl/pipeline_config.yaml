@@ -30,9 +30,12 @@ markdown_ignore_labels:
 SubModules:
   LayoutDetection:
     module_name: layout_detection
-    # paddlex 3.7.2 に PP-DocLayoutV3 は存在しない。structure-svc と同じ組成に揃える
-    # （実在モデル / PP-StructureV3 公式既定 = PP-DocLayout_plus-L）。
-    model_name: PP-DocLayout_plus-L
+    # VL パイプラインは V2/V3 しか受け付けない（paddlex 3.7.2 の
+    # pipelines/paddleocr_vl/pipeline.py が
+    # 「model_name must be PP-DocLayoutV2 or PP-DocLayoutV3」で assert する。実測で確認）。
+    # PP-DocLayoutV3 は paddlex 3.7.2 に存在しないため V2 を使う。
+    # structure-svc は PP-DocLayout_plus-L（実測で V2 より良い）だが、VL はこの制約で選べない。
+    model_name: PP-DocLayoutV2
     model_dir: null
     batch_size: 8
     threshold: 0.3
