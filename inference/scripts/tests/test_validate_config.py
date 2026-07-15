@@ -39,6 +39,16 @@ def test_dd08_tiny_japanese_blocked() -> None:
     assert any("DD-08" in e for e in errors)
 
 
+def test_dd08_small_medium_allowed_for_japanese() -> None:
+    """small/medium は日本語可（実測: かな180文字）。DD-08 のブロック対象は tiny のみ。"""
+    for tier in ("small", "medium"):
+        cfg = _structure_config()
+        subs = cfg["SubPipelines"]["GeneralOCR"]["SubModules"]
+        subs["TextRecognition"]["model_name"] = f"PP-OCRv6_{tier}_rec"
+        subs["TextDetection"]["model_name"] = f"PP-OCRv6_{tier}_det"
+        assert validate(cfg, "ja") == [], f"{tier} は日本語テナントで許可される"
+
+
 def test_dd08_tiny_allowed_for_non_japanese() -> None:
     cfg = _structure_config()
     cfg["SubPipelines"]["GeneralOCR"]["SubModules"]["TextRecognition"][

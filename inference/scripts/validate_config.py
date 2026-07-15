@@ -4,7 +4,7 @@ CI とコンテナ起動時に実行する:
     python inference/scripts/validate_config.py inference/structure/pipeline_config.yaml --lang ja
 
 チェック:
-- DD-08: 日本語テナントで PP-OCRv6_tiny（日本語非対応, 49言語）を指定していないか。
+- DD-08: 日本語テナントで PP-OCRv6_tiny（かな0文字＝日本語不可）を指定していないか。
 - DD-03: OCR 認識/検出モデルが明示固定されているか（既定依存を禁止）。
 - 実在性: model_name が導入済み paddlex に実在するか（例: PP-DocLayoutV3 は存在しない）。
   paddlex 未導入の環境（CI 等）ではこのチェックはスキップする。
@@ -23,7 +23,17 @@ except ModuleNotFoundError:  # pragma: no cover - 実行環境依存
     print("PyYAML が必要です: uv pip install pyyaml", file=sys.stderr)
     raise
 
-# 日本語非対応モデル（DD-08）。PP-OCRv6_tiny は 49 言語で日本語を含まない。
+# 日本語非対応モデル（DD-08）。
+#
+# PaddleOCR 3.7.0 のリリースノートは PP-OCRv6 を「50言語統一サポート（日本語含む）・
+# モデル切替不要」と謳うが、**tiny ティアは対象外**。実測（paddlex 3.7.2, inference.yml の
+# PostProcess.character_dict）:
+#     PP-OCRv6_tiny_rec  : 6,904 文字 / かな **0** / 漢字 6,174  → 日本語不可
+#     PP-OCRv6_small_rec : 18,708 文字 / かな 180 / 漢字 15,565 → 日本語可
+#     PP-OCRv6_medium_rec: 18,708 文字 / かな 180 / 漢字 15,565 → 日本語可
+# tiny_rec はひらがな・カタカナを1文字も持たないため日本語を読めない（＝ハード制約）。
+# tiny_det は検出のみで文字辞書を持たず言語非依存だが、ティアを跨いだ det/rec 混成は
+# 検証外のため保守的に併せて弾く（small/medium は日本語可なのでブロック対象外）。
 JAPANESE_UNSUPPORTED_MODELS = {"PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec"}
 
 
