@@ -91,12 +91,16 @@ variable "redis_node_type" {
 
 variable "jwt_secret_arn" {
   type        = string
-  description = "JWT_SECRET を格納した Secrets Manager ARN"
+  default     = ""
+  description = "既存の JWT 署名鍵の ARN。空なら terraform が生成する（secrets.tf）"
 }
 
+# LLM の API キーは利用者自身の資格情報のため terraform では作らない。
+# 事前に Secrets Manager へ登録し、ARN をここに渡す。
 variable "anthropic_secret_arn" {
   type        = string
-  description = "ANTHROPIC_API_KEY を格納した Secrets Manager ARN"
+  default     = ""
+  description = "ANTHROPIC_API_KEY の Secrets Manager ARN（llm_provider=anthropic なら必須）"
 }
 
 # --- アプリ設定 ---
@@ -154,6 +158,17 @@ variable "llm_provider" {
     condition     = contains(["anthropic", "gemini"], var.llm_provider)
     error_message = "llm_provider は anthropic か gemini。"
   }
+
+  # キーが無いまま apply すると、タスクは起動したあと provider 生成で落ちる。
+  # 気付きにくいので plan の時点で止める。
+  validation {
+    condition     = var.llm_provider != "anthropic" || var.anthropic_secret_arn != ""
+    error_message = "llm_provider=anthropic には anthropic_secret_arn が必要です。"
+  }
+  validation {
+    condition     = var.llm_provider != "gemini" || var.gemini_secret_arn != ""
+    error_message = "llm_provider=gemini には gemini_secret_arn が必要です。"
+  }
 }
 
 variable "llm_model" {
@@ -162,15 +177,18 @@ variable "llm_model" {
   description = "抽出/補正に使う LLM モデル ID"
 }
 
-variable "export_s3_bucket" {
-  type        = string
-  description = "確定 JSON / 原本の保存先 S3 バケット"
-}
-
-variable "export_s3_kms_key_id" {
+# 原本/ページ画像/確定JSON を置く単一バケット（s3.tf が作成する）。
+# gateway・orchestrator-worker・export-worker が同じバケットを共有する。
+variable "s3_bucket_name" {
   type        = string
   default     = ""
-  description = "S3 SSE-KMS キー ID（任意）"
+  description = "S3 バケット名。空なら ai-ocr-<env>-<accountid> を自動採番する"
+}
+
+variable "s3_kms_key_id" {
+  type        = string
+  default     = ""
+  description = "SSE-KMS のキー ID（空なら AWS マネージドキー aws/s3 を使う）"
 }
 
 variable "acm_certificate_arn" {

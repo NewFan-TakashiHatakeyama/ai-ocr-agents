@@ -24,11 +24,16 @@ resource "aws_ecs_task_definition" "gateway" {
       { name = "APP_ENV", value = var.env },
       { name = "AWS_REGION", value = var.aws_region },
       { name = "CORS_ORIGINS", value = var.cors_origins },
+      # 未設定だと ingest が LocalObjectStore になり file:///app/data/... を返す。
+      # Fargate のディスクはタスク毎に独立なので、gateway(2台) 間でも
+      # orchestrator-worker からも読めず抽出が失敗する。
+      { name = "S3_BUCKET", value = aws_s3_bucket.this.id },
+      { name = "S3_KMS_KEY_ID", value = var.s3_kms_key_id },
     ]
     secrets = [
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
       { name = "REDIS_URL", valueFrom = aws_secretsmanager_secret.redis_url.arn },
-      { name = "JWT_SECRET", valueFrom = var.jwt_secret_arn },
+      { name = "JWT_SECRET", valueFrom = local.jwt_secret_arn },
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -90,6 +95,7 @@ resource "aws_ecs_task_definition" "orchestrator_worker" {
     secrets = concat([
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
       { name = "REDIS_URL", valueFrom = aws_secretsmanager_secret.redis_url.arn },
+      ], var.anthropic_secret_arn == "" ? [] : [
       { name = "ANTHROPIC_API_KEY", valueFrom = var.anthropic_secret_arn },
       ], var.gemini_secret_arn == "" ? [] : [
       { name = "GEMINI_API_KEY", valueFrom = var.gemini_secret_arn },
@@ -142,8 +148,8 @@ resource "aws_ecs_task_definition" "export_worker" {
     environment = [
       { name = "APP_ENV", value = var.env },
       { name = "AWS_REGION", value = var.aws_region },
-      { name = "EXPORT_S3_BUCKET", value = var.export_s3_bucket },
-      { name = "EXPORT_S3_KMS_KEY_ID", value = var.export_s3_kms_key_id },
+      { name = "EXPORT_S3_BUCKET", value = aws_s3_bucket.this.id },
+      { name = "EXPORT_S3_KMS_KEY_ID", value = var.s3_kms_key_id },
     ]
     secrets = [
       { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },

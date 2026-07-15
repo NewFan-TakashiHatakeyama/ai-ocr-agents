@@ -27,9 +27,11 @@ anthropic_secret_arn = "arn:aws:secretsmanager:ap-northeast-1:654654601240:secre
 # llm_model         = "gemini-2.5-flash"
 # gemini_secret_arn = "arn:aws:secretsmanager:ap-northeast-1:654654601240:secret:ai-ocr/production/gemini-api-key-XXXXXX"
 
-# --- S3 ---
-export_s3_bucket = "ai-ocr-export-production"
-# export_s3_kms_key_id = ""
+# --- S3（バケットは terraform が作る。名前を固定したい時だけ指定） ---
+# 空なら ai-ocr-<env>-<accountid> を自動採番
+# s3_bucket_name = ""
+# 空なら AWS マネージドキー aws/s3 を使う
+# s3_kms_key_id  = ""
 
 # --- ALB ---
 # 空なら HTTP のみ（本番は ACM 証明書を入れて HTTPS 必須にすること）

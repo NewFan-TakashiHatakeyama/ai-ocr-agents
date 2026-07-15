@@ -27,10 +27,33 @@ Fargate 上に MVP 一式を載せる IaC。**このリポジトリで唯一の�
 
 ## 前提（このモジュールでは作らない = 変数入力）
 
-- **Secrets**: `jwt_secret_arn` / `anthropic_secret_arn`（任意で `gemini_secret_arn`）。
-  DB と Redis の URL は本スタックが作成するため渡さない。
-- **S3**: `export_s3_bucket`（＋任意 `export_s3_kms_key_id`）。
-- **ACM 証明書**: `acm_certificate_arn` を渡すと ALB に HTTPS:443 リスナを追加（空なら HTTP のみ）。
+**LLM の API キーだけは事前に登録が必要**。利用者自身の資格情報であり、terraform state に
+平文で載せないため、本スタックでは作らない。
+
+```bash
+# Gemini を使う場合（llm_provider=gemini）
+aws secretsmanager create-secret --region ap-northeast-1 \
+  --name ai-ocr/production/gemini-api-key \
+  --secret-string 'YOUR_KEY' \
+  --tags Key=Service,Value=ai-ocr
+
+# Anthropic を使う場合（既定）
+aws secretsmanager create-secret --region ap-northeast-1 \
+  --name ai-ocr/production/anthropic-api-key \
+  --secret-string 'YOUR_KEY' \
+  --tags Key=Service,Value=ai-ocr
+```
+
+出力された ARN を tfvars の `gemini_secret_arn` / `anthropic_secret_arn` に設定する。
+未設定のまま apply しようとすると **plan の時点で止まる**（タスクが起動してから
+provider 生成で落ちるのは気付きにくいため）。
+
+その他はすべて本スタックが作る:
+
+- **JWT 署名鍵**: 自動生成（既存を使うなら `jwt_secret_arn` に ARN を渡す）
+- **S3 バケット**: `ai-ocr-<env>-<accountid>` を自動採番（`s3_bucket_name` で上書き可）
+- **DB / Redis の接続文字列**: RDS・ElastiCache 作成時に Secrets Manager へ格納
+- **ACM 証明書**: `acm_certificate_arn` を渡すと ALB に HTTPS:443 リスナを追加（空なら HTTP のみ）
 
 ## 起動 / 停止とコスト（月に数回しか使わない前提）
 

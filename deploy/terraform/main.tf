@@ -20,10 +20,13 @@ locals {
   # ロググループを作る task family
   log_families = ["gateway", "orchestrator-worker", "export-worker", "migrate", "structure-svc", "ocr-svc"]
 
+  # 既存 ARN が渡されなければ本スタックが作った JWT 鍵を使う
+  jwt_secret_arn = var.jwt_secret_arn != "" ? var.jwt_secret_arn : aws_secretsmanager_secret.jwt[0].arn
+
   secret_arns = compact([
     aws_secretsmanager_secret.database_url.arn,
     aws_secretsmanager_secret.redis_url.arn,
-    var.jwt_secret_arn,
+    local.jwt_secret_arn,
     var.anthropic_secret_arn,
     var.gemini_secret_arn,
   ])
@@ -106,8 +109,24 @@ resource "aws_iam_role" "task" {
 
 data "aws_iam_policy_document" "task_s3" {
   statement {
-    actions   = ["s3:PutObject", "s3:GetObject"]
-    resources = ["arn:aws:s3:::${var.export_s3_bucket}/*"]
+    actions   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.this.arn}/*"]
+  }
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.this.arn]
+  }
+  # S3ObjectStore.put は KMS キー未指定でも SSE-KMS で PUT する。この権限が無いと
+  # アップロードが AccessDenied で落ちる（取得側も Decrypt が要る）。
+  # 対象を S3 経由の利用に限定する。
+  statement {
+    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${var.aws_region}.amazonaws.com"]
+    }
   }
 }
 
