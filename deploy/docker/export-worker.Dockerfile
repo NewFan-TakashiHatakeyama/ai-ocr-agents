@@ -15,9 +15,10 @@ RUN uv sync --frozen --no-dev --package newfan-export --extra runtime
 
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
 WORKDIR /app
-COPY --from=build /app /app
+RUN useradd -m -u 10001 app
+# COPY 後の chown -R は全ファイルを書き換えて同容量のレイヤをもう 1 枚作る。COPY --chown なら 1 枚。
+COPY --from=build --chown=app:app /app /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
-RUN useradd -m -u 10001 app && chown -R app /app
 USER app
 # 必須 env: DATABASE_URL, REDIS_URL / 任意: EXPORT_S3_BUCKET, EXPORT_S3_KMS_KEY_ID, EXPORT_STORAGE_ROOT
 CMD ["python", "-m", "newfan_export.worker_main"]

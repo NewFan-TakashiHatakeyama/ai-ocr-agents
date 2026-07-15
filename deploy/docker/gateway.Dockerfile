@@ -15,15 +15,17 @@ RUN uv sync --frozen --no-dev --package newfan-gateway --extra runtime
 
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
 WORKDIR /app
+RUN useradd -m -u 10001 app
 # editable workspace install（.venv の .pth が src を指す）ため src ごとコピー。
-COPY --from=build /app /app
+# COPY 後に chown -R すると全ファイルが書き換わり、同容量のレイヤがもう 1 枚増える
+# （orchestrator では 11GB→17.3GB になっていた）。COPY --chown なら 1 枚で済む。
+COPY --from=build --chown=app:app /app /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 # STORAGE_ROOT（既定 /data）は非 root で書くため、イメージ側で作成して app 所有にする。
 # 名前付きボリューム/EFS は空のときイメージ側のこの所有権を引き継ぐ。用意しないと
 # PermissionError: [Errno 13] Permission denied: '/data/<tenant>' でアップロードが 500 になる
 # （実コンテナで検出）。S3_BUCKET 運用時は未使用。
-RUN useradd -m -u 10001 app && chown -R app /app \
-    && mkdir -p /data && chown app /data
+RUN mkdir -p /data && chown app /data
 USER app
 EXPOSE 8000
 # ヘルスチェックは ALB/ECS 側の /healthz を使用。

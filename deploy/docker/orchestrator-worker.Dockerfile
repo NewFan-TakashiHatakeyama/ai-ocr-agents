@@ -23,12 +23,14 @@ RUN uv sync --frozen --no-dev --package newfan-orchestrator --extra ${EMBED_EXTR
 
 FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
 WORKDIR /app
-COPY --from=build /app /app
+RUN useradd -m -u 10001 app
+# COPY 後に chown -R すると全ファイルが書き換わり、5.5GB のレイヤがもう 1 枚増える
+# （実測: それだけでイメージが 11GB→17.3GB になっていた）。COPY --chown なら 1 枚で済む。
+COPY --from=build --chown=app:app /app /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 # /data は gateway が書いたページ画像を worker が読む共有領域（file:// image_uri）。
 # gateway と同じ uid で所有させる（S3_BUCKET 運用時は未使用）。
-RUN useradd -m -u 10001 app && chown -R app /app \
-    && mkdir -p /data && chown app /data
+RUN mkdir -p /data && chown app /data
 USER app
 # 必須 env: DATABASE_URL, REDIS_URL, STRUCTURE_URL / 任意: VL_URL, LLM_MODEL, ANTHROPIC_API_KEY
 CMD ["python", "-m", "newfan_orchestrator.worker_main"]

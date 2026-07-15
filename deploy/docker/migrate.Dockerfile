@@ -9,7 +9,7 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION}-python${PYTHON_VERSION}-bookworm-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 RUN uv pip install --system alembic "psycopg[binary]>=3.1" "sqlalchemy>=2.0"
-COPY db ./db
-RUN useradd -m -u 10001 app && chown -R app /app
+RUN useradd -m -u 10001 app
+COPY --chown=app:app db ./db
 USER app
 CMD ["alembic", "-c", "db/alembic.ini", "upgrade", "head"]

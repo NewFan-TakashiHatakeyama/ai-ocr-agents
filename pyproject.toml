@@ -8,7 +8,19 @@ readme = "README.md"
 [tool.uv.workspace]
 members = ["packages/*", "services/*"]
 
+# e5 埋め込み（sentence-transformers, DD-06）が torch を引くが、既定の PyPI wheel は
+# CUDA 版（実測: torch 2.13.0+cu130）で nvidia ランタイム 2.7GB と triton 691MB を道連れにする。
+# ADR-0003 で推論も含め全て CPU（Fargate）と決めており GPU は一切使わないため、
+# CPU 版 wheel に固定する。orchestrator イメージが 17.3GB → 数GB になり、
+# ECR への push 時間・保管料・タスク起動時間がすべて縮む。
+# GPU を使う構成（Option B）に移る場合はここを外すこと。
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
 newfan-schemas = { workspace = true }
 newfan-paddle-client = { workspace = true }
 newfan-normalizers = { workspace = true }
