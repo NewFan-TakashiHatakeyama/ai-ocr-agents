@@ -10,12 +10,15 @@ checkpointer 付きの graph（build_graph(checkpointer=..., context_store=...)�
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Optional
 
 from newfan_orchestrator.consumer import QueueConsumer
 from newfan_orchestrator.persistence import ContextStore
 
 WebhookFn = Callable[[str, dict[str, Any]], None]
+
+logger = logging.getLogger(__name__)
 
 
 class ExtractionWorker:
@@ -75,5 +78,12 @@ class ExtractionWorker:
                 self._consumer.ack(message_id)
                 processed += 1
             except Exception:  # noqa: BLE001 - 失敗ジョブは ACK せず再配信に委ねる（§9）
+                # 握り潰すと本番で原因究明できない（pending が増えるだけで無言になる）。
+                # ACK しない方針は維持しつつ、必ずスタックトレースを残す。
+                logger.exception(
+                    "[worker] ジョブ処理に失敗（ACK せず再配信に委ねる）: message_id=%s run_id=%s",
+                    message_id,
+                    payload.get("run_id"),
+                )
                 continue
         return processed

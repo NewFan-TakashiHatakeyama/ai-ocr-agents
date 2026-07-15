@@ -14,6 +14,11 @@ from sqlalchemy import create_engine, text
 
 from newfan_orchestrator.persistence import LoadedContext
 
+# schema 未割当（テンプレートレス既定）の run に渡す placeholder。
+# FieldSchema.doc_type は str 必須のため None を入れると deterministic_normalize が
+# ValidationError で落ちる（実コンテナの E2E で検出）。nodes 側の既定と同じ "" に揃える。
+EMPTY_SCHEMA: dict = {"doc_type": "", "fields": []}
+
 
 class PgContextStore:
     def __init__(self, dsn: str) -> None:
@@ -29,7 +34,7 @@ class PgContextStore:
             if run is None:
                 return None
             document_id, schema_id = run
-            schema = {"doc_type": None, "fields": []}
+            schema = dict(EMPTY_SCHEMA)
             if schema_id is not None:
                 srow = c.execute(
                     text("SELECT doc_type, fields FROM field_schemas WHERE id = :s"),

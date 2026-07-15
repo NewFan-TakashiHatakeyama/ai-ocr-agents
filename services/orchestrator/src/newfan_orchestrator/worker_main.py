@@ -14,6 +14,7 @@ list_memories からプロセス毎に再構築（MemoryService._rehydrate）。
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import socket
@@ -79,6 +80,12 @@ def _make_provider() -> Any:
 
 
 def main() -> None:
+    # ログ設定が無いと worker.run_once の logger.exception が出力されず、ジョブ失敗が
+    # 「pending が増えるだけの無言」になって本番で原因究明できない（実コンテナで検出）。
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
 
