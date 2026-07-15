@@ -22,7 +22,12 @@ use_region_detection: True
 SubModules:
   LayoutDetection:
     module_name: layout_detection
-    model_name: PP-DocLayoutV3
+    # paddlex 3.7.2 に PP-DocLayoutV3 は存在しない（実在: PP-DocLayout-L/M/S, PP-DocLayoutV2,
+    # PP-DocLayout_plus-L）。PP-StructureV3 の公式既定は PP-DocLayout_plus-L。
+    # 実測(sample2.png): PP-DocLayoutV2 は表を3分割しヘッダ行と合計/消費税行を落とす
+    # （列名が col1.. になり 13行→10行）。plus-L は 13行＋列名を正しく復元し conf も高い
+    # （0.9689 vs 0.9513）。よって plus-L を採用する。
+    model_name: PP-DocLayout_plus-L
     model_dir: null
     threshold: 0.3
     layout_nms: True

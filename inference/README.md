@@ -5,10 +5,18 @@ PaddleOCR 自己ホストサービング（structure / ocr / vl）のパイプ�
 
 | サービス | 設定 | モデル固定 | 備考 |
 |---|---|---|---|
-| structure-svc | `structure/pipeline_config.yaml` | PP-OCRv6_medium_det/rec（通常OCR・表内OCR両方） | formula/chart 無効、前処理無効（DD-01/ADR-0002） |
+| structure-svc | `structure/pipeline_config.yaml` | PP-OCRv6_medium_det/rec（通常OCR・表内OCR両方）＋ layout: PP-DocLayout_plus-L | formula/chart 無効、前処理無効（DD-01/ADR-0002） |
 | ocr-svc | `ocr/pipeline_config.yaml` | PP-OCRv6_medium_det/rec | `return_word_box: True` 固定（付録C-3） |
 | ocr-svc（照合） | `ocr/ocr_small_pipeline_config.yaml` | PP-OCRv6_small | two-model agreement 用（任意） |
-| vl-svc | `vl/pipeline_config.yaml` | PaddleOCR-VL-1.6-0.9B | genai(vLLM) 別コンテナ、GPU専用プール（DD-09） |
+| vl-svc | `vl/pipeline_config.yaml` | PaddleOCR-VL-1.6-0.9B ＋ layout: PP-DocLayout_plus-L | genai(vLLM) 別コンテナ、GPU専用プール（DD-09） |
+
+### レイアウトモデルの選定根拠（paddlex 3.7.2 実測）
+
+`PP-DocLayoutV3` は**存在しない**（実在: PP-DocBlockLayout / PP-DocLayout-L・M・S /
+PP-DocLayoutV2 / PP-DocLayout_plus-L）。名前が新しい `PP-DocLayoutV2` は PP-StructureV3 の
+相方ではなく、sample2.png 実測で**表を3分割しヘッダ行と合計/消費税行を落とす**
+（列名が `col1..` になり 13行→10行、平均conf 0.9513）。`PP-DocLayout_plus-L` は
+PP-StructureV3 の公式既定で 13行＋列名を正しく復元し conf 0.9689。よって plus-L を採用。
 
 ## 設定の確定手順（本番投入前）
 
@@ -31,6 +39,9 @@ uv run python inference/scripts/validate_config.py inference/ocr/pipeline_config
 
 - DD-08: 日本語テナントで PP-OCRv6_tiny（日本語非対応）を弾く。
 - DD-03: OCR 検出/認識モデルの明示固定を必須化。
+- 実在性: `model_name` が導入済み paddlex に実在するか（`configs/modules/<module>/*.yaml` を参照）。
+  存在しない名前（例: PP-DocLayoutV3）を起動前に弾く。paddlex 未導入の CI ではスキップされるため、
+  **実在性チェックは paddlex が入ったサービング環境（コンテナ entrypoint）で必ず実行すること**。
 
 CI とコンテナ起動 entrypoint の両方で実行すること。
 
