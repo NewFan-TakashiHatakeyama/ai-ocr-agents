@@ -73,10 +73,31 @@ provider 生成で落ちるのは気付きにくいため）。
 **RDS の停止は 7 日で自動起動する**ため月数回の運用には使えない。
 
 ```bash
-scripts/aws_env.sh cost     # 時間単価と概算
-scripts/aws_env.sh up       # 起動（apply）
-scripts/aws_env.sh status   # 今どれが課金されているか
+scripts/aws_env.sh up       # これ 1 つで起動（15-20分）
 scripts/aws_env.sh down     # スナップショット取得 → destroy
+scripts/aws_env.sh status   # 今どれが課金されているか
+scripts/aws_env.sh cost     # 時間単価と概算
+scripts/aws_env.sh token    # 検証用 JWT（web の localStorage["nf_token"] に入れる）
+```
+
+`up` は次を順にやるので、これ 1 つで検証できる状態まで戻る:
+
+1. `terraform apply`（VPC/RDS/Redis/ECR/ECS/ALB。RDS 作成が支配的で 15-20 分）
+2. ECR に `image_tag` が無ければ **Dockerfile からビルドして push**
+   （既にあればスキップ。ECR は destroy でも残るので通常 2 回目以降は不要）
+3. `alembic upgrade head` と dev テナント投入（destroy で DB ごと消えるため毎回必要）
+4. ECS サービスの安定待ち → UI の URL と次の手順を表示
+
+> ローカルの既存タグを使い回さず毎回ビルドするのは、古い config を焼いたイメージを
+> 掴む事故を実際に起こしたため（VL の layout モデルを直したのにイメージが古く AWS で
+> assert に当たった）。
+
+VL（GPU）は独立して切り替える:
+
+```bash
+scripts/aws_env.sh vl-up     # GPU g4dn.xlarge 起動（+$0.710/h）
+scripts/aws_env.sh vl-down   # GPU 0 台に（課金停止）
+scripts/vl_smoke.sh <S3キー> # 実画像を VL に通して中身まで確認
 ```
 
 起動中の実費は **$0.766/h（約114円/時）**＝ Fargate $0.529 + RDS/Redis/NAT/ALB $0.236。
