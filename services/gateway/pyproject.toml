@@ -24,6 +24,11 @@ runtime = [
     "redis>=5.0",
     # gateway は in-process で ingest を実行するため取込 runtime（pypdfium2/pillow/boto3）が必要。
     "newfan-ingest[runtime]",
+    # SCR-01 チャット: chat.py が anthropic / google.genai を遅延 import する
+    # （main.py が API キーの有無で LlmChatAgent / GeminiChatAgent を選ぶ）。
+    # 両方入れないとキー設定時に ModuleNotFoundError で起動できない。
+    # 版は llm-adapter の extras に集約する。
+    "newfan-llm-adapter[anthropic,gemini]",
 ]
 
 [build-system]

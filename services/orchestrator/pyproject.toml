@@ -21,7 +21,10 @@ graph = [
 ]
 # orchestrator-svc 常駐ワーカー（worker_main）の本番依存。
 # PgContextStore/PgMemoryRepository=sqlalchemy+psycopg, RedisQueue/Consumer=redis,
-# image_loaders(s3)=boto3, LLM=anthropic, 埋め込み=e5。graph を内包する。
+# image_loaders(s3)=boto3, 埋め込み=e5。graph を内包する。
+# LLM は **anthropic と gemini の両方**を入れる: worker_main._make_provider() が実行時に
+# 環境変数（LLM_PROVIDER / GEMINI_API_KEY の有無）でプロバイダを選ぶため、イメージに
+# 両方無いと選ばれた側で ModuleNotFoundError になる（gemini 欠落を実コンテナで検出済み）。
 runtime = [
     "langgraph>=0.2",
     "langgraph-checkpoint-postgres>=2.0",
@@ -29,7 +32,7 @@ runtime = [
     "psycopg[binary]>=3.1",
     "redis>=5.0",
     "boto3>=1.34",
-    "newfan-llm-adapter[anthropic]",
+    "newfan-llm-adapter[anthropic,gemini]",
     "newfan-memory[embeddings]",
 ]
 

@@ -41,10 +41,12 @@ services:
     #           capabilities: [gpu]
 
   ocr-svc:
-    build:
-      context: ..
-      dockerfile: deploy/docker/inference.Dockerfile
+    # structure-svc と同一イメージを PIPELINE_CONFIG だけ変えて使う。
+    # build: を書くと同じイメージを二重ビルドして "already exists" で失敗するため、
+    # ビルドは structure-svc 側に一本化する（`docker compose build` で両方揃う）。
     image: ${INFERENCE_IMAGE:-newfan-inference:local}
+    depends_on:
+      - structure-svc
     environment:
       PIPELINE_CONFIG: /opt/inference/ocr/pipeline_config.yaml
       INFERENCE_ENGINE: ${INFERENCE_ENGINE:-paddle}
@@ -84,12 +86,73 @@ services:
     ports:
       - "${REDIS_HOST_PORT:-6379}:6379"
 
-  # マイグレーション適用（postgres 起動後に 1 回実行）。
-  #   DATABASE_URL=postgresql://newfan:newfan@localhost:5432/newfan \
-  #     uv run alembic -c db/alembic.ini upgrade head
-  # （compose の migrate ジョブ化はイメージ整備後に追加）
+  # --- アプリ層（§14.1 結合テスト: アップロード→抽出→検証画面の全経路） ---
+
+  # マイグレーション適用（postgres 起動後に 1 回だけ走って終了する）
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/docker/migrate.Dockerfile
+    image: ${MIGRATE_IMAGE:-newfan-migrate:local}
+    environment:
+      DATABASE_URL: postgresql+psycopg://newfan:newfan@postgres:5432/newfan
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/docker/gateway.Dockerfile
+    image: ${GATEWAY_IMAGE:-newfan-gateway:local}
+    environment:
+      DATABASE_URL: postgresql+psycopg://newfan:newfan@postgres:5432/newfan
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-qa-secret-0123456789-abcdefghijklmnop}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      STORAGE_ROOT: /data
+      # ページ画像・原本は結合テストではローカル FS（本番は S3_BUCKET を設定）
+    volumes:
+      - appdata:/data
+    ports:
+      - "${GATEWAY_HOST_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  orchestrator-worker:
+    build:
+      context: ..
+      dockerfile: deploy/docker/orchestrator-worker.Dockerfile
+    image: ${ORCHESTRATOR_IMAGE:-newfan-orchestrator-worker:local}
+    environment:
+      DATABASE_URL: postgresql+psycopg://newfan:newfan@postgres:5432/newfan
+      REDIS_URL: redis://redis:6379/0
+      STRUCTURE_URL: http://structure-svc:8080
+      OCR_URL: http://ocr-svc:8080
+      # KIE/校正の LLM。実キーは .env から渡す（リポジトリには入れない）
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}
+    volumes:
+      - appdata:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # web は Dockerfile 未整備のためホストで動かす（結合テストではこれで足りる）:
+  #   cd web && NEXT_PUBLIC_API_BASE=http://localhost:8000/v1 npm run dev
 
 volumes:
   pgdata:
   # 推論モデルのキャッシュ（初回 DL は数百MB。毎回取り直さないよう永続化）
   paddlex-models:
+  # 原本・ページ画像（gateway が書き、orchestrator が読む）
+  appdata:

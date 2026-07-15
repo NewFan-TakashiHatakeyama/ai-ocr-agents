@@ -18,7 +18,12 @@ WORKDIR /app
 # editable workspace install（.venv の .pth が src を指す）ため src ごとコピー。
 COPY --from=build /app /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
-RUN useradd -m -u 10001 app && chown -R app /app
+# STORAGE_ROOT（既定 /data）は非 root で書くため、イメージ側で作成して app 所有にする。
+# 名前付きボリューム/EFS は空のときイメージ側のこの所有権を引き継ぐ。用意しないと
+# PermissionError: [Errno 13] Permission denied: '/data/<tenant>' でアップロードが 500 になる
+# （実コンテナで検出）。S3_BUCKET 運用時は未使用。
+RUN useradd -m -u 10001 app && chown -R app /app \
+    && mkdir -p /data && chown app /data
 USER app
 EXPOSE 8000
 # ヘルスチェックは ALB/ECS 側の /healthz を使用。
