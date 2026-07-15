@@ -36,8 +36,37 @@
   — export ワーカー（q.export 消費 → canonical JSON/webhook 配信）。torch 非依存で軽量。
 - [`task-definition.migrate.json`](task-definition.migrate.json)
   — Alembic マイグレーションの one-off タスク（`aws ecs run-task`）。
+- [`task-definition.structure-svc.json`](task-definition.structure-svc.json)
+  — PP-StructureV3（HTTP 8080 `/layout-parsing` + `/health`）。4 vCPU / 8GB。非公開（Service Connect）。
+- [`task-definition.ocr-svc.json`](task-definition.ocr-svc.json)
+  — PP-OCRv6 単体（HTTP 8080 `/ocr` + `/health`）。2 vCPU / 4GB。DD-02 の crop 再認識用。
 - GPU 推論（Option B）は `requiresCompatibilities: ["EC2"]` ＋
   `resourceRequirements: [{"type":"GPU","value":"1"}]` を付け、GPU 容量プロバイダのクラスタへ配置する。
+
+### 推論タスクのサイジング根拠（実測, linux/amd64 コンテナ）
+
+sample2.png（A4 請求書 1 ページ, 740x1046）を `--engine onnxruntime` で warm 実測:
+
+| vCPU | 1ページ処理 | 対 2vCPU |
+|---|---|---|
+| 2 | 111s | 1.0× |
+| 4 | **51s** | 2.2× |
+| 8 | 24s | 4.7× |
+| 32 | 7.9s | 14× |
+
+**vCPU にほぼ線形**（8→32 のみ 4倍CPUで3倍＝逓減）。ピークメモリは実測 **2.7GB**。
+
+- **structure-svc = 4 vCPU / 8GB**: Fargate は 4 vCPU で最小 8GB のためメモリは十分（実使用 2.7GB）。
+  線形スケールのため **1ページあたりのコストは 2/4/8 vCPU でほぼ同じ** → レイテンシ要件が無ければ
+  小さめのタスクを**数で並べる**方がビンパッキング・耐障害性・キュー深度スケールと相性が良い。
+  ページ latency を詰めたい場合は 8 vCPU / 16GB（24s/page、コストは 2 倍だがスループットも 2 倍）。
+- **ocr-svc = 2 vCPU / 4GB**: crop した小画像の再認識が主でページ全体を処理しないため小さめ。
+- スループットは**タスク数で線形に増やす**（キュー深度 → Application Auto Scaling、上表のとおり
+  vCPU あたり性能がほぼ一定なので水平スケールが素直に効く）。
+
+**コールドスタート注意**: モデル（数百MB〜）は初回起動時に `~/.paddlex` へ取得するため
+`startPeriod: 300` を設定している。恒常運用ではモデルをイメージへ焼くか EFS でキャッシュを
+共有して起動時間を短縮すること（付録C-4）。
 
 ## イメージ（ECR へ build/push）
 
@@ -50,6 +79,10 @@ for svc in gateway orchestrator-worker export-worker migrate; do
   docker build -f deploy/docker/$svc.Dockerfile -t $REG/newfan-$svc:$IMAGE_TAG .
   docker push $REG/newfan-$svc:$IMAGE_TAG
 done
+
+# 推論は structure/ocr で同一イメージ（PIPELINE_CONFIG で使い分け）
+docker build -f deploy/docker/inference.Dockerfile -t $REG/newfan-inference:$IMAGE_TAG .
+docker push $REG/newfan-inference:$IMAGE_TAG
 ```
 
 デプロイ順: ①`newfan-migrate` を run-task で単発実行 → ②gateway/worker サービス更新。
