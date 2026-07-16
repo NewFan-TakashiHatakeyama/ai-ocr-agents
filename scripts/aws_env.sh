@@ -19,8 +19,10 @@
 #   token   検証用 JWT を発行（web の localStorage["nf_token"] に入れる）
 #   push    ECR に不足しているイメージだけ push（up が内部で呼ぶ）
 #   migrate DB マイグレーション＋dev テナント投入（up が内部で呼ぶ）
+#   seed-schemas  field_schemas を投入（golden/data/schemas.json）
+#   golden  ゴールデンセット回帰（§14.2）を実系に流して測り、リリースゲートを判定
 #
-# 使い方: scripts/aws_env.sh up|down|pause|resume|status|cost|vl-up|vl-down|vl-test|token
+# 使い方: scripts/aws_env.sh up|down|pause|resume|status|cost|vl-up|vl-down|vl-test|token|golden
 set -euo pipefail
 
 TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../deploy/terraform" && pwd)"
@@ -188,6 +190,84 @@ JSON
   echo "[migrate] テナント投入完了"
 }
 
+cmd_seed_schemas() {
+  # golden/data/schemas.json の field_schemas を投入する（§7）。
+  # RDS はプライベート VPC にいて手元から繋がらないため、migrate タスクのコンテナ内で
+  # 実行する。スクリプトと JSON は gzip+base64 で渡す（ECS の overrides は 8KB 上限で、
+  # 生の JSON をシェルに埋めると引用符でも壊れる）。
+  local cluster; cluster="$(_prefix)"
+  local td sg subnets arn payload
+  td="$(cd "$TF_DIR" && terraform output -raw migrate_task_definition_arn)"
+  sg="$(cd "$TF_DIR" && terraform output -raw service_security_group_id)"
+  subnets="$(aws ec2 describe-subnets --region "$REGION" \
+    --filters "Name=tag:Name,Values=ai-ocr-private-*" \
+    --query "Subnets[].SubnetId" --output text | tr '\t' ',')"
+
+  payload=$(${PY_BIN} -c "
+import base64, gzip, json, pathlib
+root = pathlib.Path('.')
+src = (root / 'scripts/seed_schemas.py').read_bytes()
+doc = json.loads((root / 'golden/data/schemas.json').read_text(encoding='utf-8'))
+# _comment は投入に不要。8KB 制限に効くので落とす。
+data = json.dumps({'schemas': doc['schemas']}, ensure_ascii=False, separators=(',', ':'))
+enc = lambda b: base64.b64encode(gzip.compress(b)).decode('ascii')
+print(json.dumps({'s': enc(src), 'd': enc(data.encode('utf-8'))}))
+")
+  local b64_src b64_data
+  b64_src=$(echo "$payload" | ${PY_BIN} -c "import json,sys; print(json.load(sys.stdin)['s'])")
+  b64_data=$(echo "$payload" | ${PY_BIN} -c "import json,sys; print(json.load(sys.stdin)['d'])")
+
+  echo "[seed] field_schemas を投入します（tenant=${DEV_TENANT}）"
+  arn=$(aws ecs run-task --region "$REGION" --cluster "$cluster" --task-definition "$td" \
+    --launch-type FARGATE \
+    --network-configuration "awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${sg}],assignPublicIp=DISABLED}" \
+    --overrides "$(${PY_BIN} -c "
+import json, sys
+src, data, tenant = sys.argv[1], sys.argv[2], sys.argv[3]
+code = (
+    'import base64,gzip,sys;'
+    \"sys.argv=['seed_schemas.py', gzip.decompress(base64.b64decode('\" + data + \"')).decode('utf-8')];\"
+    \"exec(compile(gzip.decompress(base64.b64decode('\" + src + \"')).decode('utf-8'),'seed_schemas.py','exec'),{'__name__':'__main__'})\"
+)
+print(json.dumps({'containerOverrides': [{
+    'name': 'migrate',
+    'command': ['python', '-c', code],
+    'environment': [{'name': 'TENANT_ID', 'value': tenant}],
+}]}))
+" "$b64_src" "$b64_data" "$DEV_TENANT")" \
+    --query "tasks[0].taskArn" --output text)
+  aws ecs wait tasks-stopped --region "$REGION" --cluster "$cluster" --tasks "$arn"
+  local code tid
+  code=$(aws ecs describe-tasks --region "$REGION" --cluster "$cluster" --tasks "$arn" \
+    --query "tasks[0].containers[0].exitCode" --output text)
+  tid="${arn##*/}"
+  aws logs get-log-events --region "$REGION" --log-group-name "/ecs/ai-ocr-migrate" \
+    --log-stream-name "ecs/migrate/${tid}" --query "events[].message" --output text || true
+  [ "$code" = "0" ] || { echo "[seed] 失敗（exit=$code）" >&2; return 1; }
+  echo "[seed] 完了"
+}
+
+cmd_golden() {
+  # ゴールデンセット回帰（§14.2 / DD-03）を**実際に動いている系**に流して測る。
+  # 本番昇格の条件なので Fake は使わない。gold は既定で dev サンプル 2 件。
+  local gold="${GOLD:-golden/data/dev.jsonl}"
+  local out="${GOLDEN_OUT:-out/golden}"
+  local base token
+  base="$(cd "$TF_DIR" && terraform output -raw alb_dns_name 2>/dev/null)" || {
+    echo "[golden] ALB が見つかりません（up 済みですか）" >&2; return 1; }
+  token="$(cmd_token)"
+  mkdir -p "$out"
+
+  echo "[golden] ${gold} を http://${base}/v1 に流します"
+  uv run --extra collect --package newfan-golden python -m newfan_golden.collect \
+    --gold "$gold" --api "http://${base}/v1" --token "$token" --out "${out}/pred.jsonl"
+
+  local baseline=""
+  [ -f golden/baselines/production.json ] && baseline="--baseline golden/baselines/production.json"
+  ${PY_BIN} -m newfan_golden.cli --gold "$gold" --pred "${out}/pred.jsonl" \
+    --out "${out}/metrics.json" $baseline
+}
+
 cmd_token() {
   # 検証用の JWT を発行して表示する。web は localStorage["nf_token"] を読む
   # （イメージに焼くと公開バンドルに JWT が入るため、ここで出して手で入れる）。
@@ -325,6 +405,8 @@ case "${1:-}" in
   up)      cmd_up ;;
   push)    cmd_push ;;
   migrate) cmd_migrate ;;
+  seed-schemas) cmd_seed_schemas ;;
+  golden)  cmd_golden ;;
   token)   cmd_token ;;
   down)    cmd_down ;;
   pause)   cmd_pause ;;

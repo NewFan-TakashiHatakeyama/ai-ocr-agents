@@ -25,3 +25,12 @@ sample.png
 # ローカルデータ/成果物
 data/
 *.log
+
+# ローカル開発用の env。web の NEXT_PUBLIC_DEV_TOKEN（JWT）が入っており、
+# Next.js は NEXT_PUBLIC_* をビルド時に**公開 JS バンドルへ焼き込む**。
+# ALB は公開されているため、混入すると URL を知る誰もが API を叩けてしまう
+# （実際に .next/static へ JWT が入っていた）。イメージには絶対に持ち込まない。
+web/.env.local
+web/.env*.local
+.env
+.env.local

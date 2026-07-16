@@ -1,0 +1,10 @@
+{
+  "documents": 2,
+  "fields": 21,
+  "exact_match": 0.6667,
+  "critical_exact_match": 0.8,
+  "precision": 0.7,
+  "recall": 0.6667,
+  "stp_rate": 0.0,
+  "harmful_rate": 0.0
+}

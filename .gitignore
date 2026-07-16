@@ -7,7 +7,10 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
-uv.lock
+# uv.lock は **追跡する**（ignore しない）。ライブラリではなくアプリのリポジトリで、
+# Dockerfile が `COPY pyproject.toml uv.lock` を、CI が `uv sync --frozen` を要求する。
+# ignore していた間 CI は全 run で「Unable to find lockfile」により赤のままで、
+# テストが一度も実行されていなかった。
 
 # Node
 node_modules/
@@ -41,3 +44,6 @@ Thumbs.db
 # 環境固有の ARN 等。example のみコミットする
 *.tfvars
 !*.tfvars.example
+
+# ゴールデン計測の作業出力（実行のたびに変わる。ベースラインは golden/baselines/）
+out/

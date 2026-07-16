@@ -1,0 +1,28 @@
+// dev ゴールデンセット（§14.2 / DD-03）。
+// 値は sample.png / sample2.png を人が読んで起こした正解。OCR/KIE の出力ではない
+// （出力を正解にすると、間違ったまま固定されて回帰の意味が無くなる）。
+// critical=true は golden/data/schemas.json の critical と一致させること
+// （golden/scripts/check_critical.py が CI で突き合わせる）。
+//
+// 項目の意味の定義:
+//   issuer_*   … その帳票を**発行した側**（請求/見積を出した会社）
+//   customer_* … その帳票の**宛先**（御中/様 が付く側）
+// 帳票のどちら側かは「御中」「〜申し上げます」の主語で判断する。
+//
+// 本番のゴールデンセットは顧客帳票なのでリポジトリには置かない。S3 の専用バケットで
+// バージョン管理し、image_uri をローカルへ落としたパスに書き換えて collect に渡す。
+// ここにある 2 件は公開サンプル帳票で、疎通確認と CI 用。
+//
+// sample.png: 御見積書（SystemBase 公開サンプル, 793x1123）
+// issuer_name は "SystemBase"（右上ロゴ）。「ＡＡＡ食品株式会社／ＡＡＡ支社 御中」は
+// **宛先**であって発行元ではない（御中 が付く側は受け取る側）。ロゴは画像なので OCR は
+// 読めない見込みで、恒久的な取りこぼしになる。それは「ロゴだけの発行元名は取れない」
+// という実際の限界の記録であって、正解を出力に合わせて変える理由にはならない。
+{"document_id": "dev_quotation_001", "doc_type": "quotation", "schema_id": "sch_quo", "image_uri": "sample.png", "fields": [{"name": "issuer_name", "value": "SystemBase", "critical": true}, {"name": "total_amount", "value": "136998", "critical": true}, {"name": "quote_no", "value": "00000101"}, {"name": "quote_date", "value": "2014-04-01"}, {"name": "subtotal_amount", "value": "126850"}, {"name": "tax_amount", "value": "10148"}]}
+// sample2.png: 請求書（Pyxis 公開サンプル, 740x1046）。
+// registration_no は帳票上に存在しない＝正解が null。「拾わないのが正解」の項目を
+// 入れておかないと、幻覚（無い値をでっち上げる）を検出できない。
+// bank_accounts は帳票に 3 口座が並ぶ。複数値を 1 本の文字列にする正準形が決まって
+// いないため exact match は当面通らない。スキーマに配列型が入るまでは既知の取りこぼし
+// として残す（測れないから落とす、をやると指標が実態より良く見える）。
+{"document_id": "dev_invoice_001", "doc_type": "invoice", "schema_id": "sch_inv", "image_uri": "sample2.png", "fields": [{"name": "issuer_name", "value": "わくわく物産株式会社", "critical": true}, {"name": "total_amount", "value": "7003", "critical": true}, {"name": "tax_amount", "value": "599"}, {"name": "registration_no", "value": null, "critical": true}, {"name": "invoice_no", "value": "GS0001"}, {"name": "invoice_date", "value": "2020-01-31"}, {"name": "closing_date", "value": "2020-01-31"}, {"name": "payment_due", "value": "2020-02-29"}, {"name": "customer_dept", "value": "総務部"}, {"name": "customer_person", "value": "青田晴美"}, {"name": "customer_tel", "value": "044-999-9999"}, {"name": "customer_fax", "value": "044-999-9999"}, {"name": "customer_postal", "value": "222-0001"}, {"name": "customer_address", "value": "神奈川県横浜市港北区樽町エイビービル"}, {"name": "bank_accounts", "value": "大東京銀行 四谷支店 普通 1234567 / 大阪日日銀行 麹町支店 普通 1234567 / ルナ銀行 スター支店 普通 1234567"}]}

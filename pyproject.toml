@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 readme = "README.md"
 
 [tool.uv.workspace]
-members = ["packages/*", "services/*"]
+members = ["packages/*", "services/*", "golden"]
 
 # e5 埋め込み（sentence-transformers, DD-06）が torch を引くが、既定の PyPI wheel は
 # CUDA 版（実測: torch 2.13.0+cu130）で nvidia ランタイム 2.7GB と triton 691MB を道連れにする。
@@ -31,6 +31,7 @@ newfan-llm-adapter = { workspace = true }
 newfan-gateway = { workspace = true }
 newfan-memory = { workspace = true }
 newfan-export = { workspace = true }
+newfan-golden = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -69,4 +70,4 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-q"
-testpaths = ["packages", "services", "inference", "db", "tests"]
+testpaths = ["packages", "services", "inference", "db", "tests", "golden"]

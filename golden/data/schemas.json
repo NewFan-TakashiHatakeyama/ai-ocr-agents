@@ -1,0 +1,46 @@
+{
+  "_comment": [
+    "ゴールデンセット計測に使う field_schemas（§7 / §4.6.1）。KIE はスキーマ駆動なので、",
+    "ここに無い項目は OCR が読めていても抽出されない＝Recall 0 になる。",
+    "critical は golden/data/dev.jsonl の critical と一致させること（片方だけ直すと",
+    "critical_exact_match が実態とずれる）。",
+    "scripts/aws_env.sh seed-schemas で投入する。"
+  ],
+  "schemas": [
+    {
+      "id": "sch_inv",
+      "doc_type": "invoice",
+      "version": 5,
+      "fields": [
+        {"name": "issuer_name", "label": "取引先名", "type": "string", "required": true, "critical": true},
+        {"name": "total_amount", "label": "合計金額（税込）", "type": "money_jpy", "required": true, "critical": true},
+        {"name": "tax_amount", "label": "内消費税", "type": "money_jpy"},
+        {"name": "registration_no", "label": "登録番号", "type": "jp_invoice_reg_no", "critical": true},
+        {"name": "invoice_no", "label": "請求番号", "type": "string"},
+        {"name": "invoice_date", "label": "請求日", "type": "date", "required": true},
+        {"name": "closing_date", "label": "締切日", "type": "date"},
+        {"name": "payment_due", "label": "お支払期限", "type": "date"},
+        {"name": "customer_dept", "label": "担当部署", "type": "string"},
+        {"name": "customer_person", "label": "担当者", "type": "string"},
+        {"name": "customer_tel", "label": "取引先電話番号", "type": "string"},
+        {"name": "customer_fax", "label": "取引先FAX", "type": "string"},
+        {"name": "customer_postal", "label": "取引先郵便番号", "type": "string"},
+        {"name": "customer_address", "label": "取引先住所", "type": "string"},
+        {"name": "bank_accounts", "label": "振込先銀行", "type": "string"}
+      ]
+    },
+    {
+      "id": "sch_quo",
+      "doc_type": "quotation",
+      "version": 1,
+      "fields": [
+        {"name": "issuer_name", "label": "取引先名", "type": "string", "required": true, "critical": true},
+        {"name": "total_amount", "label": "御見積合計金額", "type": "money_jpy", "required": true, "critical": true},
+        {"name": "quote_no", "label": "見積番号", "type": "string"},
+        {"name": "quote_date", "label": "見積日", "type": "date", "required": true},
+        {"name": "subtotal_amount", "label": "合計（税抜）", "type": "money_jpy"},
+        {"name": "tax_amount", "label": "消費税（外税）", "type": "money_jpy"}
+      ]
+    }
+  ]
+}
