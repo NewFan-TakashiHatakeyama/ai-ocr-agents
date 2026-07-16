@@ -88,10 +88,11 @@ export function AppShell({ active, children }: { active: string; children: React
   return (
     <div className="app">
       <aside className="side">
-        <div className="side-logo">
-          <span className="logo-mark" />
-          NewFan OCR
-        </div>
+        {/* next/image を避けているのは standalone 出力での画像最適化に sharp が要るため。
+            固定サイズのロゴ 1 枚のために実行時依存を増やさない。 */}
+        <Link href="/chat" className="side-logo" aria-label="NewFan AI OCR">
+          <img src="/logo-full.png" alt="NewFan AI OCR" width={908} height={151} />
+        </Link>
         <Link href="/chat" className="nav-new">
           ＋ 新規
         </Link>

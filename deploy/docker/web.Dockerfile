@@ -40,6 +40,9 @@ RUN useradd -m -u 10001 app
 # standalone は必要な依存だけを含む。static / public は別途コピーが要る（Next の仕様）。
 COPY --from=build --chown=app:app /app/.next/standalone ./
 COPY --from=build --chown=app:app /app/.next/static ./.next/static
+# public/ はロゴ（/logo-full.png）の配信元。standalone に含まれないため明示コピーが要る。
+# 忘れると本番だけロゴが 404 になり、ローカルの dev サーバでは再現しない。
+COPY --from=build --chown=app:app /app/public ./public
 USER app
 EXPOSE 3000
 CMD ["node", "server.js"]

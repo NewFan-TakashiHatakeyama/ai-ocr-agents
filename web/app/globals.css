@@ -81,20 +81,17 @@ a {
 }
 
 .side-logo {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-weight: 800;
-  font-size: 14px;
-  padding: 6px 8px 10px;
+  display: block;
+  padding: 6px 8px 12px;
 }
 
-.logo-mark {
-  width: 22px;
-  height: 22px;
-  border-radius: 7px;
-  background: var(--grad);
-  box-shadow: var(--sh-s);
+/* サイドナビは 216px 幅。ロゴは 908x151（約6:1）なので、幅に追随させて
+   高さは aspect-ratio に任せる（height 固定だと縮小時に潰れる）。 */
+.side-logo img {
+  display: block;
+  width: 100%;
+  max-width: 172px;
+  height: auto;
 }
 
 .nav-new {
@@ -1557,6 +1554,9 @@ a {
   background: var(--card, #fff);
 }
 .signin-card h1 { font-size: 20px; margin: 0; }
+/* ロゴは 908x151。カード幅いっぱいだと大きすぎるので上限を置く。 */
+.signin-logo { line-height: 0; }
+.signin-logo img { display: block; width: 100%; max-width: 260px; height: auto; }
 .signin-lead { margin: 0; color: var(--muted, #6b7280); font-size: 14px; }
 .signin-card textarea {
   width: 100%;

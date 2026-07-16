@@ -51,7 +51,11 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   return (
     <div className="signin">
       <form className="signin-card" onSubmit={submit}>
-        <h1>NewFan AI-OCR</h1>
+        {/* 見出しはロゴが担う。h1 のまま画像を入れて、名前は alt に持たせる
+            （画像が出ない環境やスクリーンリーダにサービス名が残る）。 */}
+        <h1 className="signin-logo">
+          <img src="/logo-full.png" alt="NewFan AI OCR" width={908} height={151} />
+        </h1>
         <p className="signin-lead">アクセストークンを貼り付けてください。</p>
         <textarea
           value={token}
