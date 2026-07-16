@@ -44,6 +44,16 @@ class ContextStore(Protocol):
         """
         ...
 
+    def set_job_status(
+        self, tenant_id: str, job_id: str, status: str, *, error_code: Optional[str] = None
+    ) -> None:
+        """jobs.status を遷移する（§9）。status は queued/running/succeeded/failed/dead。
+
+        §6.3 の API は「GET /jobs/{id} を polling して終了を待つ」契約なので、ここが
+        更新されないとクライアントは永久に queued を見続ける（実際にそうなっていた）。
+        """
+        ...
+
 
 @dataclass
 class _RunSeed:
@@ -65,6 +75,7 @@ class InMemoryContextStore:
         self._saved_tables: dict[str, list[TableResult]] = {}
         self._saved_fallback: dict[str, list[int]] = {}
         self._result_version: dict[str, int] = {}
+        self._job_status: dict[str, tuple[str, Optional[str]]] = {}
 
     def seed_run(
         self,
@@ -119,7 +130,15 @@ class InMemoryContextStore:
         self._document_status[seed.document_id] = status
         self._result_version[run_id] = self._result_version.get(run_id, 1)
 
+    def set_job_status(
+        self, tenant_id: str, job_id: str, status: str, *, error_code: Optional[str] = None
+    ) -> None:
+        self._job_status[job_id] = (status, error_code)
+
     # --- テスト用アクセサ ---
+    def job_status(self, job_id: str) -> Optional[tuple[str, Optional[str]]]:
+        return self._job_status.get(job_id)
+
     def run_status(self, run_id: str) -> Optional[str]:
         return self._run_status.get(run_id)
 

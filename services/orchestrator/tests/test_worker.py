@@ -152,3 +152,45 @@ def test_worker_run_once_consumes_queue() -> None:
     assert processed == 1
     assert worker._consumer.pending_count() == 0  # type: ignore[attr-defined]
     assert store.run_status("run_1") == "confirmed"
+
+
+# --- jobs.status（§6.3 の polling 契約） ---
+# gateway は {"job_id","tenant_id","run_id"} を enqueue するが、ワーカーが jobs を
+# 一切更新していなかった。上のテストが job_id を渡していなかったため誰も気づかず、
+# GET /jobs/{id} が永久に queued を返していた（実 AWS のゴールデン計測で発覚）。
+
+_JOB = {"job_id": "job_1", "run_id": "run_1", "tenant_id": "ten_1"}
+
+
+def test_成功したジョブは_succeeded_になる() -> None:
+    worker, store, _, _ = _build(conf=0.99)
+    assert worker.process(dict(_JOB)) == "confirmed"
+    assert store.job_status("job_1") == ("succeeded", None)
+
+
+def test_needs_reviewでもジョブは成功扱い() -> None:
+    # 人の確認待ちは失敗ではない。failed にすると再配信されて二重実行になる（§4.4）。
+    worker, store, _, _ = _build(conf=0.78)
+    assert worker.process(dict(_JOB)) == "needs_review"
+    assert store.job_status("job_1") == ("succeeded", None)
+
+
+def test_resumeジョブも_succeeded_になる() -> None:
+    worker, store, _, _ = _build(conf=0.78)
+    worker.process(dict(_JOB))
+    worker.process({**_JOB, "job_id": "job_2", "resume": {"corrections": []}})
+    assert store.job_status("job_2") == ("succeeded", None)
+
+
+def test_失敗したジョブは_failed_になる() -> None:
+    worker, store, _, _ = _build(conf=0.99)
+    worker._consumer.push({**_JOB, "run_id": "run_missing"})  # type: ignore[attr-defined]
+    assert worker.run_once() == 0  # ACK せず再配信に委ねる（§9）
+    assert store.job_status("job_1") == ("failed", "E9001")
+
+
+def test_job_idの無いpayloadでも落ちない() -> None:
+    # 旧形式/テスト経路。状態表示の都合で抽出そのものを失敗させない。
+    worker, store, _, _ = _build(conf=0.99)
+    assert worker.process({"run_id": "run_1", "tenant_id": "ten_1"}) == "confirmed"
+    assert store.job_status("job_1") is None

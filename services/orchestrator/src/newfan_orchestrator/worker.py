@@ -35,16 +35,30 @@ class ExtractionWorker:
         self._consumer = consumer
         self._webhook = webhook
 
+    def _job(self, payload: dict[str, Any], status: str, error_code: Optional[str] = None) -> None:
+        """jobs.status を進める。§6.3 の API はクライアントが GET /jobs/{id} を polling して
+        終了を待つ契約で、ここを更新しないと成功しても queued のまま見え続ける。
+        job_id の無い payload（旧形式・テスト）でも落とさない。"""
+        job_id = payload.get("job_id")
+        if job_id is None:
+            return
+        try:
+            self._store.set_job_status(payload["tenant_id"], job_id, status, error_code=error_code)
+        except Exception:  # noqa: BLE001 - 状態表示の失敗で抽出そのものを落とさない
+            logger.exception("[worker] jobs.status の更新に失敗: job_id=%s status=%s", job_id, status)
+
     def process(self, payload: dict[str, Any]) -> str:
         """1 ジョブを処理して最終 status を返す（'confirmed' / 'needs_review'）。"""
         run_id = payload["run_id"]
         tenant_id = payload["tenant_id"]
         config = {"configurable": {"thread_id": run_id}}
+        self._job(payload, "running")
 
         if "resume" in payload:  # 再開ジョブ（feedback は None/空でも可＝上書きなし確定）
             from langgraph.types import Command  # 遅延 import
 
             self._graph.invoke(Command(resume=payload.get("resume") or {}), config)
+            self._job(payload, "succeeded")
             return "confirmed"
 
         self._graph.invoke({"run_id": run_id, "tenant_id": tenant_id}, config)
@@ -65,7 +79,11 @@ class ExtractionWorker:
                     "document.needs_review",
                     {"run_id": run_id, "tenant_id": tenant_id, "document_id": state.get("document_id", "")},
                 )
+            # ジョブとしては成功。needs_review は「人の確認待ち」であって失敗ではない
+            # （§4.4 の interrupt。ここを failed にすると再配信されて二重実行になる）。
+            self._job(payload, "succeeded")
             return "needs_review"
+        self._job(payload, "succeeded")
         return "confirmed"  # finalize が confirmed 保存＋q.export enqueue 済み
 
     def run_once(self, *, count: int = 10) -> int:
@@ -85,5 +103,8 @@ class ExtractionWorker:
                     message_id,
                     payload.get("run_id"),
                 )
+                # 再配信で running に戻るので failed のままにはならない。ここを書かないと
+                # 落ちたジョブが queued に見え、クライアントは待ち続ける。
+                self._job(payload, "failed", "E9001")
                 continue
         return processed

@@ -138,3 +138,22 @@ class PgContextStore:
                 ),
                 {"st": status, "r": run_id},
             )
+
+    def set_job_status(self, tenant_id, job_id, status, *, error_code=None) -> None:
+        # §6.3 の契約はクライアントが GET /jobs/{id} を polling して終了を待つこと。
+        # ここを書かないと jobs.status は queued のままで、ジョブが成功しても
+        # クライアントはタイムアウトするまで待ち続ける。
+        with self._engine.begin() as c:
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
+            c.execute(
+                text(
+                    "UPDATE jobs SET status = :st, error_code = :ec, "
+                    " started_at = COALESCE(started_at, CASE WHEN :st = 'running' "
+                    "                       THEN now() ELSE started_at END), "
+                    " finished_at = CASE WHEN :st IN ('succeeded','failed','dead') "
+                    "                    THEN now() ELSE finished_at END, "
+                    " attempt = attempt + CASE WHEN :st = 'running' THEN 1 ELSE 0 END "
+                    "WHERE id = :j AND tenant_id = :t"
+                ),
+                {"st": status, "ec": error_code, "j": job_id, "t": tenant_id},
+            )
