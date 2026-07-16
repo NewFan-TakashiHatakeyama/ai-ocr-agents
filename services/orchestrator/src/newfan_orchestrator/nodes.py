@@ -12,6 +12,7 @@ from datetime import date
 from typing import Any
 
 from newfan_memory import TenantRule, apply_rule
+from newfan_metrics import current_tenant, rule_auto_apply_total
 from newfan_normalizers import NormContext, normalize
 from newfan_schemas import ExtractedField, ExtractionState, FieldSchema, FieldType, ReviewStatus
 from newfan_validators import run_validations
@@ -111,7 +112,15 @@ def _apply_tenant_rules(value: str, field_name: str, active_rules: list[dict[str
             rule = TenantRule.model_validate(rule_dict)
         except (ValueError, KeyError):
             continue  # 不正ルールは skip（WARN 相当）
-        value = apply_rule(rule, value)
+        applied = apply_rule(rule, value)
+        # §12.1 rule_auto_apply_total{tenant,rule_type}。値が変わった時だけ数える。
+        # 「マッチしたルール数」ではなく「実際に効いたルール数」を測る指標のため
+        # （全フィールドに対してループするので、前者だと数字が意味を持たない）。
+        if applied != value:
+            rule_auto_apply_total.labels(
+                tenant=current_tenant(), rule_type=rule.rule_type.value
+            ).inc()
+        value = applied
     return value
 
 

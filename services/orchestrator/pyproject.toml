@@ -11,6 +11,7 @@ dependencies = [
     "newfan-validators",
     "newfan-llm-adapter",
     "newfan-memory",
+    "newfan-metrics",
 ]
 
 [project.optional-dependencies]

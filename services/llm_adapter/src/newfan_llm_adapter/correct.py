@@ -78,7 +78,7 @@ def llm_correct(
             "confusion_pairs": _flatten_confusion(bundle),
         },
     )
-    data, resp = adapter.complete_json(system=system, user=user)
+    data, resp = adapter.complete_json(system=system, user=user, purpose="correct")
 
     corrected = data.get("corrected")
     changed = bool(data.get("changed", False))

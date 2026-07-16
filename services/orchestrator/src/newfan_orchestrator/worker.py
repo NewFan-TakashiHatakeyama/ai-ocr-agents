@@ -11,7 +11,10 @@ checkpointer 付きの graph（build_graph(checkpointer=..., context_store=...)�
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable, Optional
+
+from newfan_metrics import run_duration_seconds, tenant_scope
 
 from newfan_orchestrator.consumer import QueueConsumer
 from newfan_orchestrator.persistence import ContextStore
@@ -49,6 +52,18 @@ class ExtractionWorker:
 
     def process(self, payload: dict[str, Any]) -> str:
         """1 ジョブを処理して最終 status を返す（'confirmed' / 'needs_review'）。"""
+        # §12.1 の {tenant} ラベル用。ここで一度張れば、LLMAdapter のような
+        # tenant_id を受け取らない低レイヤの計装も正しいラベルを付けられる。
+        with tenant_scope(payload.get("tenant_id", "")):
+            started = time.monotonic()
+            outcome = "failed"
+            try:
+                outcome = self._process(payload)
+                return outcome
+            finally:
+                run_duration_seconds.labels(outcome=outcome).observe(time.monotonic() - started)
+
+    def _process(self, payload: dict[str, Any]) -> str:
         run_id = payload["run_id"]
         tenant_id = payload["tenant_id"]
         config = {"configurable": {"thread_id": run_id}}

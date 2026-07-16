@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional, Protocol
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
+from newfan_metrics import ocr_page_latency_seconds, ocr_pages_total
 from newfan_paddle_client import (
     LayoutParsingResponse,
     OcrResponse,
@@ -109,11 +110,16 @@ def make_structure_ocr(
         errors: list[dict[str, Any]] = list(state.get("errors", []))
         next_span_id = 0
 
+        tenant = state.get("tenant_id", "unknown")
         for page in state.get("pages", []):
             page_no = int(page["page_no"])
             try:
                 data = image_loader(str(page["image_uri"]))
-                resp = client.layout_parsing(encode_image(data), file_type=1)
+                # §12.1 ocr_page_latency_seconds{engine} / ocr_pages_total{tenant,engine}。
+                # 失敗ページは数えない（成功したページの所要を測る指標のため）。
+                with ocr_page_latency_seconds.labels(engine="structure").time():
+                    resp = client.layout_parsing(encode_image(data), file_type=1)
+                ocr_pages_total.labels(tenant=tenant, engine="structure").inc()
             except Exception as exc:  # noqa: BLE001 - ページ単位で errors に積み継続（§10）
                 # errors に積むだけだと state の中に埋もれ、運用側からは「spans が 0 件で
                 # LLM が幻覚を返す」という結果しか見えない（実 AWS で構造抽出が丸ごと
@@ -184,7 +190,11 @@ def make_vl_fallback(
                 continue
             try:
                 data = image_loader(str(page["image_uri"]))
-                resp = client.layout_parsing(encode_image(data), file_type=1)
+                with ocr_page_latency_seconds.labels(engine="vl").time():
+                    resp = client.layout_parsing(encode_image(data), file_type=1)
+                ocr_pages_total.labels(
+                    tenant=state.get("tenant_id", "unknown"), engine="vl"
+                ).inc()
             except Exception as exc:  # noqa: BLE001 - 失敗ページはレビュー直行（§4.3）
                 errors.append({"page": page_no, "stage": "vl_fallback", "error": str(exc)})
                 review_items.append(

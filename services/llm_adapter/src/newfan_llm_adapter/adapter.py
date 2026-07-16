@@ -5,8 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from newfan_metrics import current_tenant, llm_cost_jpy_total, llm_tokens_total
+
 from newfan_llm_adapter.errors import LLMError
 from newfan_llm_adapter.provider import LLMProvider, LLMResponse
+
+# §12.1 の llm_cost_jpy_total は円建て。相場は動くので概算の固定レートで換算する
+# （課金の正確な金額ではなく、テナント別のコスト傾向を見るための指標）。
+USD_JPY = 150.0
 
 # per-1M USD（claude-api skill のモデル表）。jpy 換算はテナント/構成側で行う。
 _RATES = {
@@ -67,20 +73,36 @@ class LLMAdapter:
         self.total_output_tokens = 0
         self.total_cost_usd = 0.0
 
-    def _account(self, resp: LLMResponse) -> None:
+    def _account(self, resp: LLMResponse, purpose: str) -> None:
         self.total_input_tokens += resp.input_tokens
         self.total_output_tokens += resp.output_tokens
-        self.total_cost_usd += estimate_cost_usd(
+        cost_usd = estimate_cost_usd(
             resp.model or self._model, resp.input_tokens, resp.output_tokens
         )
+        self.total_cost_usd += cost_usd
+
+        # §12.1: llm_tokens_total{purpose} / llm_cost_jpy_total{tenant}。
+        # LLM 呼出しは全てここを通るので、計装はこの 1 箇所で足りる。
+        tenant = current_tenant()
+        llm_tokens_total.labels(purpose=purpose, direction="input").inc(resp.input_tokens)
+        llm_tokens_total.labels(purpose=purpose, direction="output").inc(resp.output_tokens)
+        llm_cost_jpy_total.labels(tenant=tenant).inc(cost_usd * USD_JPY)
 
     def complete_json(
-        self, *, system: str, user: str, max_tokens: Optional[int] = None
+        self,
+        *,
+        system: str,
+        user: str,
+        max_tokens: Optional[int] = None,
+        purpose: str = "unknown",
     ) -> tuple[Any, LLMResponse]:
-        """JSON 応答を要求し parse して返す。不正なら 1 回だけ矯正リトライ（→E3002）。"""
+        """JSON 応答を要求し parse して返す。不正なら 1 回だけ矯正リトライ（→E3002）。
+
+        purpose は §12.1 の llm_tokens_total{purpose}（kie/correct/chat 別）に使う。
+        """
         budget = max_tokens or self._max_tokens
         resp = self._provider.complete(system=system, user=user, max_tokens=budget)
-        self._account(resp)
+        self._account(resp, purpose)
         try:
             return _extract_json(resp.text), resp
         except (ValueError, json.JSONDecodeError):
@@ -91,7 +113,7 @@ class LLMAdapter:
             + "\n\n# 重要\n直前の出力は JSON として不正でした。JSON のみを出力してください。"
         )
         resp2 = self._provider.complete(system=system, user=repair_user, max_tokens=budget)
-        self._account(resp2)
+        self._account(resp2, purpose)
         try:
             return _extract_json(resp2.text), resp2
         except (ValueError, json.JSONDecodeError) as exc:

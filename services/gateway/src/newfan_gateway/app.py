@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from newfan_metrics import render_latest
+from prometheus_client import CONTENT_TYPE_LATEST
 
 from newfan_gateway.admin import AdminRepository, InMemoryAdminRepository
 from newfan_gateway.auth import ApiKeyStore, InMemoryApiKeyStore
@@ -84,6 +86,16 @@ def create_app(
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/metrics")
+    def metrics() -> Response:
+        """Prometheus スクレイプ先（§12.1）。
+
+        認証は付けない。ALB のリスナルールが /v1/* と /healthz しか gateway へ
+        流さないため、この経路はインターネットからは到達しない（VPC 内のみ）。
+        UI 用の集計 API は /v1/metrics/summary で別物。
+        """
+        return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
 
     app.include_router(router)
     return app

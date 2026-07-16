@@ -68,7 +68,7 @@ def kie_extract(
             "rule_hints": rule_hints,
         },
     )
-    data, resp = adapter.complete_json(system=system, user=user)
+    data, resp = adapter.complete_json(system=system, user=user, purpose="kie")
 
     result = KieResult(response=resp)
     for item in data.get("fields", []) or []:

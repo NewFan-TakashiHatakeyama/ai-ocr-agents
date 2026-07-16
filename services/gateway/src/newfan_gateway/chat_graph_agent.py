@@ -13,6 +13,8 @@ import json
 import re
 from typing import Any, Iterator, Optional
 
+from newfan_metrics import llm_tokens_total, tenant_scope
+
 from newfan_gateway.chat import ChatEvent, _tokens
 from newfan_gateway.chat_graph import TOOL_SPECS, ChatState, build_chat_graph
 from newfan_gateway.chat_tools import ChatTools
@@ -64,6 +66,10 @@ class SupervisorChatAgent:
             ensure_ascii=False,
         )
         resp = self._provider.complete(system=_SYSTEM, user=user, max_tokens=self._max_tokens)
+        # §12.1 llm_tokens_total{purpose}。チャットは LLMAdapter を経由せず provider を
+        # 直接叩くため、計上もここで行う（adapter._account を通らない）。
+        llm_tokens_total.labels(purpose="chat", direction="input").inc(resp.input_tokens)
+        llm_tokens_total.labels(purpose="chat", direction="output").inc(resp.output_tokens)
         try:
             data = _extract_json(resp.text)
         except (ValueError, json.JSONDecodeError):
@@ -77,7 +83,10 @@ class SupervisorChatAgent:
         }
 
     def stream(self, tenant_id: str, message: str) -> Iterator[ChatEvent]:
-        final: dict[str, Any] = self._graph.invoke({"tenant_id": tenant_id, "message": message})
+        with tenant_scope(tenant_id):
+            final: dict[str, Any] = self._graph.invoke(
+                {"tenant_id": tenant_id, "message": message}
+            )
 
         # 使ったツールを進捗として見せる（§3.3 の tool_call）
         for obs in final.get("observations") or []:
