@@ -10,22 +10,33 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import ipaddress
 import json
-import socket
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
-from urllib.parse import urlparse
+from typing import Any, Optional
 
 import httpx
+from newfan_metrics import current_tenant, webhook_delivery_failures_total
+
+# SSRF ガードの実体は newfan-netguard。gateway（配信先の登録時）も同じ判定を使うが、
+# gateway が export を import すると層が逆転するため共有パッケージへ置いた。
+# ここは既存の import（newfan_export.webhook.is_blocked_url）を保つ再エクスポート。
+from newfan_netguard import Resolver, default_resolver, is_blocked_url
 
 from newfan_export.errors import ExportError
 
+__all__ = [
+    "RETRY_SCHEDULE_SEC",
+    "Resolver",
+    "WebhookSender",
+    "build_event",
+    "is_blocked_url",
+    "next_retry_delay",
+    "sign",
+]
+
 # §6.4 の指数バックオフ（秒）
 RETRY_SCHEDULE_SEC = [60, 300, 1800, 7200, 43200]
-
-Resolver = Callable[[str], list[str]]
 
 
 def next_retry_delay(attempt: int) -> Optional[int]:
@@ -59,54 +70,13 @@ def build_event(
     }
 
 
-def _default_resolver(host: str) -> list[str]:
-    infos = socket.getaddrinfo(host, None)
-    return [str(info[4][0]) for info in infos]
-
-
-def is_blocked_url(url: str, *, resolver: Resolver = _default_resolver) -> bool:
-    """SSRF ガード: 非 http(s) / 解決先がプライベート等の URL を拒否（§11）。"""
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        return True
-    host = parsed.hostname
-    if host in ("localhost",):
-        return True
-
-    candidates: list[str]
-    try:
-        ipaddress.ip_address(host)
-        candidates = [host]
-    except ValueError:
-        try:
-            candidates = resolver(host)
-        except OSError:
-            return True  # 解決不能は拒否
-
-    for addr in candidates:
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            return True
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            return True
-    return False
-
-
 class WebhookSender:
     def __init__(
         self,
         *,
         client: Optional[httpx.Client] = None,
         timeout: float = 10.0,
-        resolver: Resolver = _default_resolver,
+        resolver: Resolver = default_resolver,
     ) -> None:
         self._client = client or httpx.Client(timeout=timeout)
         self._resolver = resolver
@@ -124,5 +94,11 @@ class WebhookSender:
         try:
             resp = self._client.post(url, content=body, headers=headers)
         except httpx.HTTPError:
+            # §12.1 webhook_delivery_failures_total。§12.3 は「webhook 失敗率>10%」で
+            # アラートするので、ネットワーク例外も HTTP エラーも同じく失敗として数える。
+            webhook_delivery_failures_total.labels(tenant=current_tenant()).inc()
             return False
-        return 200 <= resp.status_code < 300
+        ok = 200 <= resp.status_code < 300
+        if not ok:
+            webhook_delivery_failures_total.labels(tenant=current_tenant()).inc()
+        return ok

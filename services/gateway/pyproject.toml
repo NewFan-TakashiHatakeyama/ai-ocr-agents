@@ -11,6 +11,8 @@ dependencies = [
     "httpx>=0.27",
     "newfan-schemas",
     "newfan-ingest",
+    "newfan-metrics",
+    "newfan-netguard",
 ]
 
 [project.optional-dependencies]

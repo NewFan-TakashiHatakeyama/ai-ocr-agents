@@ -9,12 +9,14 @@ runtime extra（sqlalchemy）が必要。CI では未実行（DB 前提）。テ
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
 from sqlalchemy import JSON, Integer, String, Text, create_engine, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
+from newfan_gateway.ids import new_id
 from newfan_gateway.records import (
     CorrectionRecord,
     DocumentRecord,
@@ -497,6 +499,97 @@ class PgAdminRepository:
         return self.get_rule(tenant_id, rule_id)
 
     # --- metrics ---
+    def list_memories(self, tenant_id: str, *, doc_type=None, field_name=None, limit=50):
+        """§5.8 の修正メモリを人が読める形で返す。
+
+        tenant_memories は faiss_vector_id しか持たないので、元の修正内容
+        （correction_logs）と結合しないと「何を学習したのか」が分からない。
+        """
+        from newfan_gateway.records import MemoryRecord
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT m.id, m.tenant_id, m.correction_log_id, m.embed_model,"
+                    " m.created_at, l.field_name, l.original_value, l.corrected_value,"
+                    " l.doc_type, l.supplier_key, l.context, l.document_id "
+                    "FROM tenant_memories m JOIN correction_logs l"
+                    " ON l.id = m.correction_log_id "
+                    "WHERE m.tenant_id=:t "
+                    "AND (CAST(:d AS text) IS NULL OR l.doc_type=CAST(:d AS text)) "
+                    "AND (CAST(:f AS text) IS NULL OR l.field_name=CAST(:f AS text)) "
+                    "ORDER BY m.created_at DESC LIMIT :n"
+                ),
+                {"t": tenant_id, "d": doc_type, "f": field_name, "n": limit},
+            ).mappings()
+            return [
+                MemoryRecord(
+                    id=r["id"],
+                    tenant_id=r["tenant_id"],
+                    correction_log_id=r["correction_log_id"],
+                    embed_model=r["embed_model"],
+                    field_name=r["field_name"],
+                    original_value=r["original_value"],
+                    corrected_value=r["corrected_value"],
+                    doc_type=r["doc_type"],
+                    supplier_key=r["supplier_key"],
+                    context=r["context"],
+                    document_id=r["document_id"],
+                    created_at=r["created_at"].isoformat() if r["created_at"] else None,
+                )
+                for r in rows
+            ]
+
+    def add_webhook_endpoint(self, tenant_id: str, *, url: str, secret: str, name: str):
+        from newfan_gateway.records import ConnectionRecord
+
+        rec_id = new_id("connection")
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            c.execute(
+                text(
+                    "INSERT INTO connections (id, tenant_id, type, name, config, status)"
+                    " VALUES (:i,:t,'webhook',:n, CAST(:c AS jsonb), 'untested')"
+                ),
+                {
+                    "i": rec_id,
+                    "t": tenant_id,
+                    "n": name,
+                    "c": json.dumps({"url": url, "secret": secret}),
+                },
+            )
+        return ConnectionRecord(
+            id=rec_id, tenant_id=tenant_id, type="webhook", name=name,
+            config={"url": url}, status="untested",
+        )
+
+    def list_webhook_endpoints(self, tenant_id: str):
+        from newfan_gateway.records import ConnectionRecord
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT id, name, config, status, created_at FROM connections"
+                    " WHERE tenant_id=:t AND type='webhook' ORDER BY created_at DESC"
+                ),
+                {"t": tenant_id},
+            ).mappings().all()
+        return [
+            ConnectionRecord(
+                id=r["id"],
+                tenant_id=tenant_id,
+                type="webhook",
+                name=r["name"],
+                # secret は返さない（登録時に一度だけ利用者が持つ。§6.4 の署名鍵）
+                config={"url": (r["config"] or {}).get("url", "")},
+                status=r["status"],
+                created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            )
+            for r in rows
+        ]
+
     def metrics_summary(self, tenant_id: str):
         from newfan_gateway.records import MetricsSummary
 

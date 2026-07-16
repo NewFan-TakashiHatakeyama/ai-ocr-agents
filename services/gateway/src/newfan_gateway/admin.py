@@ -9,7 +9,14 @@ from __future__ import annotations
 from typing import Any, Optional, Protocol
 
 from newfan_gateway.ids import new_id
-from newfan_gateway.records import MetricsSummary, RuleRecord, SchemaFieldDef, SchemaRecord
+from newfan_gateway.records import (
+    ConnectionRecord,
+    MemoryRecord,
+    MetricsSummary,
+    RuleRecord,
+    SchemaFieldDef,
+    SchemaRecord,
+)
 
 # ルール有効化の閾値（§2.5 rules.validation_pass: 再現率≥90% かつ 回帰0件）
 MIN_REPRODUCTION = 0.9
@@ -40,6 +47,22 @@ class AdminRepository(Protocol):
         self, tenant_id: str, rule_id: str, status: str
     ) -> Optional[RuleRecord]: ...
 
+    # 修正メモリ（§5.8 / DD-06）
+    def list_memories(
+        self,
+        tenant_id: str,
+        *,
+        doc_type: Optional[str] = None,
+        field_name: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[MemoryRecord]: ...
+
+    # Webhook 配信先（§6.4）。connections(type='webhook') 行として持つ
+    def add_webhook_endpoint(
+        self, tenant_id: str, *, url: str, secret: str, name: str
+    ) -> ConnectionRecord: ...
+    def list_webhook_endpoints(self, tenant_id: str) -> list[ConnectionRecord]: ...
+
     # KPI（§12.1）
     def metrics_summary(self, tenant_id: str) -> MetricsSummary: ...
 
@@ -48,6 +71,8 @@ class InMemoryAdminRepository:
     def __init__(self) -> None:
         self._schemas: dict[str, SchemaRecord] = {}
         self._rules: dict[str, RuleRecord] = {}
+        self._memories: list[MemoryRecord] = []
+        self._connections: list[ConnectionRecord] = []
         self._metrics: dict[str, MetricsSummary] = {}
 
     # --- schemas ---
@@ -107,6 +132,49 @@ class InMemoryAdminRepository:
             return None
         r.status = status
         return r
+
+    # --- 修正メモリ（§5.8 / DD-06） ---
+    def seed_memory(self, rec: MemoryRecord) -> None:
+        self._memories.append(rec)
+
+    def list_memories(
+        self,
+        tenant_id: str,
+        *,
+        doc_type: Optional[str] = None,
+        field_name: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[MemoryRecord]:
+        rows = [
+            m
+            for m in self._memories
+            if m.tenant_id == tenant_id
+            and (doc_type is None or m.doc_type == doc_type)
+            and (field_name is None or m.field_name == field_name)
+        ]
+        # 新しい順。学習は追記なので、直近何を覚えたかが最も知りたい情報。
+        rows.sort(key=lambda m: m.created_at or "", reverse=True)
+        return rows[:limit]
+
+    # --- webhook 配信先（§6.4） ---
+    def add_webhook_endpoint(
+        self, tenant_id: str, *, url: str, secret: str, name: str
+    ) -> ConnectionRecord:
+        rec = ConnectionRecord(
+            id=new_id("connection"),
+            tenant_id=tenant_id,
+            type="webhook",
+            name=name,
+            config={"url": url, "secret": secret},
+            # 疎通確認前は untested。export の list_webhook_endpoints は
+            # active/tested しか拾わないため、登録しただけでは配信されない（§16.5 の安全策）。
+            status="untested",
+        )
+        self._connections.append(rec)
+        return rec
+
+    def list_webhook_endpoints(self, tenant_id: str) -> list[ConnectionRecord]:
+        return [c for c in self._connections if c.tenant_id == tenant_id and c.type == "webhook"]
 
     # --- metrics ---
     def set_metrics(self, tenant_id: str, m: MetricsSummary) -> None:

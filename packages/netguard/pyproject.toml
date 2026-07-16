@@ -1,0 +1,15 @@
+[project]
+name = "newfan-netguard"
+version = "0.1.0"
+description = "外向き HTTP の SSRF ガード（§11）"
+requires-python = ">=3.12"
+# 標準ライブラリのみ。gateway と export の両方が import するため、
+# どちらの重い依存（httpx 等）も引き込まないこと。
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/newfan_netguard"]

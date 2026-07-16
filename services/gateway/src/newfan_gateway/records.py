@@ -105,6 +105,42 @@ class SchemaRecord(BaseModel):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class ConnectionRecord(BaseModel):
+    """connections 行（§6.4 Webhook / §16.5 接続管理）。
+
+    secret は config に入るが API では返さない（登録時に一度だけ利用者が持つ）。
+    """
+
+    id: str
+    tenant_id: str
+    type: str
+    name: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    status: str = "untested"
+    created_at: Optional[str] = None
+
+
+class MemoryRecord(BaseModel):
+    """tenant_memories × correction_logs（§5.8）。
+
+    tenant_memories 単体は faiss_vector_id しか持たず人が読んでも何も分からない。
+    「何をどう直したから学習されたのか」を見せるため correction_logs と結合した形で扱う。
+    """
+
+    id: str
+    tenant_id: str
+    correction_log_id: str
+    embed_model: str
+    field_name: str
+    original_value: Optional[str] = None
+    corrected_value: str = ""
+    doc_type: Optional[str] = None
+    supplier_key: Optional[str] = None
+    context: Optional[str] = None
+    document_id: Optional[str] = None
+    created_at: Optional[str] = None
+
+
 class RuleRecord(BaseModel):
     """tenant_rules 行（§5.8.4）。"""
 

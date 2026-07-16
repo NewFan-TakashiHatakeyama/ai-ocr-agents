@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import secrets
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
+from newfan_netguard import is_blocked_url
 
 from newfan_gateway import dto
 from newfan_gateway.auth import Principal
@@ -539,6 +541,79 @@ def put_schema(
     fields = [SchemaFieldDef(**f.model_dump()) for f in body.fields]
     rec = admin.put_schema(principal.tenant_id, body.doc_type, fields)  # 常に新版
     return _schema_dto(rec)
+
+
+@router.post("/webhooks/endpoints", status_code=201, response_model=dto.WebhookEndpointDto)
+def add_webhook_endpoint(
+    body: dto.WebhookEndpointRequest,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.WebhookEndpointDto:
+    """Webhook 配信先の登録（§6.2 / §6.4）。
+
+    これが無く、配信先は DB 直投入でしか登録できなかった（export は connections から読む）。
+    """
+    # 内部ネットワークへ配信させない（SSRF）。export 側の送信直前でも弾いているが、
+    # そこで初めて落ちると利用者には「なぜか届かない」としか見えない。登録時に断る。
+    if is_blocked_url(body.url):
+        raise ApiError("E5001", "配信先 URL が拒否されました", details={"url": body.url})
+
+    # 署名鍵を利用者に選ばせない。弱い鍵を使われると署名検証（§6.4）が意味を失う。
+    secret = body.secret or secrets.token_urlsafe(32)
+    rec = admin.add_webhook_endpoint(
+        principal.tenant_id, url=body.url, secret=secret, name=body.name
+    )
+    return dto.WebhookEndpointDto(
+        id=rec.id,
+        name=rec.name,
+        url=body.url,
+        status=rec.status,
+        created_at=rec.created_at,
+        secret=secret,  # ここでしか返さない
+    )
+
+
+@router.get("/webhooks/endpoints", response_model=dto.WebhookEndpointList)
+def list_webhook_endpoints(
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.WebhookEndpointList:
+    rows = admin.list_webhook_endpoints(principal.tenant_id)
+    return dto.WebhookEndpointList(
+        items=[
+            dto.WebhookEndpointDto(
+                id=r.id,
+                name=r.name,
+                url=str(r.config.get("url", "")),
+                status=r.status,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+    )
+
+
+@router.get("/tenants/{tenant_id}/memory", response_model=dto.MemoryList)
+def list_memory(
+    tenant_id: str,
+    doc_type: Optional[str] = None,
+    field_name: Optional[str] = None,
+    limit: int = 50,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.MemoryList:
+    """修正メモリ照会（§6.2 / §5.8）。学習された内容を人が確認する唯一の手段。
+
+    パスの tenant_id は自テナントのみ許す。他テナントを指定できると、RLS を
+    掻い潜ってデータを引ける入口になる（admin ロールはテナント内の権限であって
+    テナントを跨ぐ権限ではない）。
+    """
+    if tenant_id != principal.tenant_id:
+        raise ApiError("E5001", "他テナントのメモリは参照できません", details={"tenant_id": tenant_id})
+    rows = admin.list_memories(
+        principal.tenant_id, doc_type=doc_type, field_name=field_name, limit=min(limit, 200)
+    )
+    return dto.MemoryList(items=[dto.MemoryDto(**r.model_dump(exclude={"tenant_id"})) for r in rows])
 
 
 @router.get("/rules", response_model=dto.RuleList)

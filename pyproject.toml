@@ -32,6 +32,8 @@ newfan-gateway = { workspace = true }
 newfan-memory = { workspace = true }
 newfan-export = { workspace = true }
 newfan-golden = { workspace = true }
+newfan-metrics = { workspace = true }
+newfan-netguard = { workspace = true }
 
 [dependency-groups]
 dev = [

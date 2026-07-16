@@ -165,6 +165,47 @@ class RuleList(BaseModel):
     items: list[RuleDto]
 
 
+class MemoryDto(BaseModel):
+    """修正メモリ 1 件（§5.8 / DD-06）。何をどう直した結果が学習されたかを見せる。"""
+
+    id: str
+    correction_log_id: str
+    embed_model: str
+    field_name: str
+    original_value: Optional[str] = None
+    corrected_value: str = ""
+    doc_type: Optional[str] = None
+    supplier_key: Optional[str] = None
+    context: Optional[str] = None
+    document_id: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class MemoryList(BaseModel):
+    items: list[MemoryDto]
+
+
+class WebhookEndpointRequest(BaseModel):
+    url: str
+    # 署名鍵（§6.4 X-NF-Signature）。省略時はサーバが生成して 1 度だけ返す。
+    secret: Optional[str] = None
+    name: str = "webhook"
+
+
+class WebhookEndpointDto(BaseModel):
+    id: str
+    name: str
+    url: str
+    status: str
+    created_at: Optional[str] = None
+    # 登録時のみ返す。以降は取得できない（保存しているのはサーバだけ）。
+    secret: Optional[str] = None
+
+
+class WebhookEndpointList(BaseModel):
+    items: list[WebhookEndpointDto]
+
+
 class PatchRuleRequest(BaseModel):
     status: str  # "active"（有効化）/ "retired"（退役）
 
