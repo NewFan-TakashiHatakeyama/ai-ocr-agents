@@ -44,7 +44,7 @@ def _pg_dsn() -> str:
     return os.environ["DATABASE_URL"].replace("+psycopg", "")
 
 
-def _memory() -> MemoryService:
+def _memory(adapter: LLMAdapter, bundle: PromptBundle) -> MemoryService:
     # 正本は PostgreSQL（§5.8.3）。DATABASE_URL 未設定時のみ InMemory へ degrade。
     dsn = os.environ.get("DATABASE_URL")
     if dsn:
@@ -64,7 +64,10 @@ def _memory() -> MemoryService:
         from newfan_memory import HashingEmbedder
 
         embedder = HashingEmbedder()
-    return MemoryService(embedder, repo)
+    # adapter/bundle を渡さないと learn が「_adapter is None」で即 return し、
+    # 修正が何件たまってもルール抽出（§5.8.4）が一度も走らない。実 AWS で
+    # tenant_memories は増えるのに tenant_rules が 0 件のままなのはこれが原因だった。
+    return MemoryService(embedder, repo, adapter=adapter, bundle=bundle)
 
 
 def _make_provider() -> Any:
@@ -121,7 +124,7 @@ def main() -> None:
             checkpointer=checkpointer,
             adapter=adapter,
             bundle=bundle,
-            memory=_memory(),
+            memory=_memory(adapter, bundle),
             structure_client=structure,
             vl_client=vl,
             ocr_client=ocr,

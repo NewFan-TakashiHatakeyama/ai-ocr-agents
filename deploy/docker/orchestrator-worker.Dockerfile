@@ -32,5 +32,17 @@ ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 # gateway と同じ uid で所有させる（S3_BUCKET 運用時は未使用）。
 RUN mkdir -p /data && chown app /data
 USER app
+
+# e5 埋め込みモデル（DD-06）を焼き込む。焼かないと **起動のたびに** HuggingFace から
+# 取得し（実 AWS のログで確認）、起動時間と NAT 転送量を食い、HF 障害時は起動できない。
+# 実行ユーザーのキャッシュに置く必要があるため USER app のあとで行う。
+# HF_HOME を固定して実行時と同じ場所に入れる。
+ENV HF_HOME=/home/app/.cache/huggingface
+RUN python -c "\
+from sentence_transformers import SentenceTransformer; \
+SentenceTransformer('intfloat/multilingual-e5-small')" \
+    && echo '[build] e5 モデルを焼き込みました'
+# 焼き込み済みなので実行時はネットワークに出ない（HF 障害・NAT 課金の影響を受けない）。
+ENV HF_HUB_OFFLINE=1
 # 必須 env: DATABASE_URL, REDIS_URL, STRUCTURE_URL / 任意: VL_URL, LLM_MODEL, ANTHROPIC_API_KEY
 CMD ["python", "-m", "newfan_orchestrator.worker_main"]

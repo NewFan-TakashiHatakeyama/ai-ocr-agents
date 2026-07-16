@@ -69,6 +69,10 @@ resource "aws_secretsmanager_secret" "redis_url" {
   name        = "${local.prefix}/${var.env}/redis-url"
   description = "AI-OCR REDIS_URL"
   tags        = { Name = "${local.prefix}-redis-url" }
+  # down→up を繰り返す運用のため、削除後すぐ同名で作れるようにする。既定(30日)のままだと
+  # 「scheduled for deletion」で up が失敗する（実際に踏んだ）。中身は terraform が
+  # 毎回生成し直すので復旧猶予に意味がない。
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "redis_url" {

@@ -31,7 +31,7 @@ ACCOUNT_ID="${ACCOUNT_ID:-654654601240}"
 DEV_TENANT="${DEV_TENANT:-ten_1}"
 # Windows の素の `python` は Microsoft Store のスタブで無言終了するため明示する
 PY_BIN="${PY_BIN:-uv run python}"
-# aws CLI に /aws/... のようなパスを渡すと MSYS が Windows パスへ変換して壊す
+# aws CLI に /aws/... のようなパスを渡すと MSYS が Windows パスへ変換して壊すため無効化する。
 export MSYS_NO_PATHCONV=1
 
 # 起動中の時間単価（AWS Pricing API 実取得値, ap-northeast-1）
@@ -127,7 +127,9 @@ cmd_push() {
 
   local i
   for i in "${missing[@]}"; do
-    local args=(-f "${repo_root}/deploy/docker/${i}.Dockerfile" -t "${reg}/ai-ocr-${i}:${tag}")
+    # -f には相対パスを渡す。MSYS 環境の bash から /c/... 形式の絶対パスを渡すと
+    # docker が解釈できず「resolve: CreateFile \c: …」で落ちる（実測）。
+    local args=(-f "deploy/docker/${i}.Dockerfile" -t "${reg}/ai-ocr-${i}:${tag}")
     case "$i" in
       web)
         [ -z "$alb" ] && { echo "  [!] ALB 未確定のため web をビルドできません（apply 後に実行してください）" >&2; return 1; }
