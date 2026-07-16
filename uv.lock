@@ -25,6 +25,7 @@ members = [
     "newfan-paddle-client",
     "newfan-schemas",
     "newfan-validators",
+    "newfan-workflow",
 ]
 
 [[package]]
@@ -1497,6 +1498,17 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "newfan-schemas", editable = "packages/schemas" }]
+
+[[package]]
+name = "newfan-workflow"
+version = "0.1.0"
+source = { editable = "packages/workflow" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.7" }]
 
 [[package]]
 name = "numpy"

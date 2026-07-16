@@ -34,6 +34,7 @@ newfan-export = { workspace = true }
 newfan-golden = { workspace = true }
 newfan-metrics = { workspace = true }
 newfan-netguard = { workspace = true }
+newfan-workflow = { workspace = true }
 
 [dependency-groups]
 dev = [
