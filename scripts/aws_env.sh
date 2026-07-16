@@ -20,6 +20,7 @@
 #   push    ECR に不足しているイメージだけ push（up が内部で呼ぶ）
 #   migrate DB マイグレーション＋dev テナント投入（up が内部で呼ぶ）
 #   seed-schemas  field_schemas を投入（golden/data/schemas.json）
+#   probe-rls  実 RDS で RLS が効いているかを検査（§7.3）
 #   golden  ゴールデンセット回帰（§14.2）を実系に流して測り、リリースゲートを判定
 #
 # 使い方: scripts/aws_env.sh up|down|pause|resume|status|cost|vl-up|vl-down|vl-test|token|golden
@@ -188,63 +189,91 @@ JSON
 )" --query "tasks[0].taskArn" --output text)
   aws ecs wait tasks-stopped --region "$REGION" --cluster "$cluster" --tasks "$arn"
   echo "[migrate] テナント投入完了"
+
+  # §7.3 RLS: アプリは所有者でないロールで繋ぐ。terraform は接続情報（Secrets Manager の
+  # app-database-url）しか作れないので、ロールの実体と GRANT はここで作る。
+  # apply でパスワードが変わっても追随するよう、up のたびに流す。
+  echo "[migrate] アプリ用ロール（RLS 適用側）を用意します"
+  _run_in_migrate scripts/ensure_app_role.py || { echo "[migrate] ロール作成に失敗" >&2; return 1; }
+
+  # langgraph のチェックポイント表（§4.4）。DDL なので所有者で作る。ワーカーは
+  # 所有者でないロールになり CREATE 権限を持たないため、ここで作らないと全ジョブが落ちる。
+  echo "[migrate] チェックポイント表を用意します"
+  _run_in_migrate scripts/setup_checkpointer.py \
+    || { echo "[migrate] チェックポイント表の作成に失敗" >&2; return 1; }
 }
 
-cmd_seed_schemas() {
-  # golden/data/schemas.json の field_schemas を投入する（§7）。
-  # RDS はプライベート VPC にいて手元から繋がらないため、migrate タスクのコンテナ内で
-  # 実行する。スクリプトと JSON は gzip+base64 で渡す（ECS の overrides は 8KB 上限で、
-  # 生の JSON をシェルに埋めると引用符でも壊れる）。
+_run_in_migrate() {
+  # 手元の python スクリプトを migrate タスクのコンテナ内で実行する。
+  # RDS はプライベート VPC にいて手元からは繋がらないため、DB を触る作業は全部ここを通す。
+  # スクリプトと引数は gzip+base64 で渡す（ECS の overrides は 8KB 上限で、生の JSON を
+  # シェルに埋めると引用符で壊れる）。
+  #   _run_in_migrate <script_path> [argv1] [env NAME=VALUE ...]
+  local script="$1"; shift
+  local arg="${1:-}"; [ $# -gt 0 ] && shift
   local cluster; cluster="$(_prefix)"
-  local td sg subnets arn payload
+  local td sg subnets arn overrides code tid
   td="$(cd "$TF_DIR" && terraform output -raw migrate_task_definition_arn)"
   sg="$(cd "$TF_DIR" && terraform output -raw service_security_group_id)"
   subnets="$(aws ec2 describe-subnets --region "$REGION" \
     --filters "Name=tag:Name,Values=ai-ocr-private-*" \
     --query "Subnets[].SubnetId" --output text | tr '\t' ',')"
 
-  payload=$(${PY_BIN} -c "
-import base64, gzip, json, pathlib
-root = pathlib.Path('.')
-src = (root / 'scripts/seed_schemas.py').read_bytes()
-doc = json.loads((root / 'golden/data/schemas.json').read_text(encoding='utf-8'))
-# _comment は投入に不要。8KB 制限に効くので落とす。
-data = json.dumps({'schemas': doc['schemas']}, ensure_ascii=False, separators=(',', ':'))
+  overrides=$(${PY_BIN} -c "
+import base64, gzip, json, pathlib, sys
+script, arg = sys.argv[1], sys.argv[2]
+envs = [dict(zip(('name', 'value'), a.split('=', 1))) for a in sys.argv[3:]]
 enc = lambda b: base64.b64encode(gzip.compress(b)).decode('ascii')
-print(json.dumps({'s': enc(src), 'd': enc(data.encode('utf-8'))}))
-")
-  local b64_src b64_data
-  b64_src=$(echo "$payload" | ${PY_BIN} -c "import json,sys; print(json.load(sys.stdin)['s'])")
-  b64_data=$(echo "$payload" | ${PY_BIN} -c "import json,sys; print(json.load(sys.stdin)['d'])")
+src = enc(pathlib.Path(script).read_bytes())
+name = pathlib.Path(script).name
+# argv も JSON→gzip→base64 で渡す。スキーマ JSON は日本語とクォートを含むため、
+# シェルやコンテナの command 配列に生で載せると壊れる。
+argv = enc(json.dumps([name] + ([arg] if arg else []), ensure_ascii=False).encode('utf-8'))
+code = (
+    'import base64,gzip,json,sys;'
+    f\"sys.argv=json.loads(gzip.decompress(base64.b64decode('{argv}')).decode('utf-8'));\"
+    f\"exec(compile(gzip.decompress(base64.b64decode('{src}')).decode('utf-8'),'{name}','exec'),{{'__name__':'__main__'}})\"
+)
+print(json.dumps({'containerOverrides': [
+    {'name': 'migrate', 'command': ['python', '-c', code], 'environment': envs}
+]}))
+" "$script" "$arg" "$@")
 
-  echo "[seed] field_schemas を投入します（tenant=${DEV_TENANT}）"
   arn=$(aws ecs run-task --region "$REGION" --cluster "$cluster" --task-definition "$td" \
     --launch-type FARGATE \
     --network-configuration "awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${sg}],assignPublicIp=DISABLED}" \
-    --overrides "$(${PY_BIN} -c "
-import json, sys
-src, data, tenant = sys.argv[1], sys.argv[2], sys.argv[3]
-code = (
-    'import base64,gzip,sys;'
-    \"sys.argv=['seed_schemas.py', gzip.decompress(base64.b64decode('\" + data + \"')).decode('utf-8')];\"
-    \"exec(compile(gzip.decompress(base64.b64decode('\" + src + \"')).decode('utf-8'),'seed_schemas.py','exec'),{'__name__':'__main__'})\"
-)
-print(json.dumps({'containerOverrides': [{
-    'name': 'migrate',
-    'command': ['python', '-c', code],
-    'environment': [{'name': 'TENANT_ID', 'value': tenant}],
-}]}))
-" "$b64_src" "$b64_data" "$DEV_TENANT")" \
-    --query "tasks[0].taskArn" --output text)
+    --overrides "$overrides" --query "tasks[0].taskArn" --output text)
   aws ecs wait tasks-stopped --region "$REGION" --cluster "$cluster" --tasks "$arn"
-  local code tid
   code=$(aws ecs describe-tasks --region "$REGION" --cluster "$cluster" --tasks "$arn" \
     --query "tasks[0].containers[0].exitCode" --output text)
   tid="${arn##*/}"
   aws logs get-log-events --region "$REGION" --log-group-name "/ecs/ai-ocr-migrate" \
     --log-stream-name "ecs/migrate/${tid}" --query "events[].message" --output text || true
-  [ "$code" = "0" ] || { echo "[seed] 失敗（exit=$code）" >&2; return 1; }
+  return "$code"
+}
+
+cmd_seed_schemas() {
+  # golden/data/schemas.json の field_schemas を投入する（§7）。
+  local data
+  data=$(${PY_BIN} -c "
+import json, pathlib
+doc = json.loads(pathlib.Path('golden/data/schemas.json').read_text(encoding='utf-8'))
+# _comment は投入に不要。8KB 制限に効くので落とす。
+print(json.dumps({'schemas': doc['schemas']}, ensure_ascii=False, separators=(',', ':')))
+")
+  echo "[seed] field_schemas を投入します（tenant=${DEV_TENANT}）"
+  _run_in_migrate scripts/seed_schemas.py "$data" "TENANT_ID=${DEV_TENANT}" \
+    || { echo "[seed] 失敗" >&2; return 1; }
   echo "[seed] 完了"
+}
+
+cmd_probe_rls() {
+  # RLS が実 RDS で効いているかを測る（§7.3）。ローカル compose の newfan は
+  # superuser で無条件にバイパスするため、ローカルでは検証にならない。
+  echo "[rls] 実 RDS で RLS を検査します"
+  _run_in_migrate scripts/probe_rls.py \
+    || { echo "[rls] ★RLS が効いていません（上のログを参照）" >&2; return 1; }
+  echo "[rls] RLS は有効です"
 }
 
 cmd_golden() {
@@ -406,6 +435,8 @@ case "${1:-}" in
   push)    cmd_push ;;
   migrate) cmd_migrate ;;
   seed-schemas) cmd_seed_schemas ;;
+  probe-rls) cmd_probe_rls ;;
+  probe-role) _run_in_migrate scripts/probe_role.py ;;
   golden)  cmd_golden ;;
   token)   cmd_token ;;
   down)    cmd_down ;;

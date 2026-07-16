@@ -35,7 +35,7 @@ resource "aws_ecs_task_definition" "gateway" {
       { name = "LLM_MODEL", value = var.llm_model },
     ]
     secrets = concat([
-      { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
+      { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.app_database_url.arn },
       { name = "REDIS_URL", valueFrom = aws_secretsmanager_secret.redis_url.arn },
       { name = "JWT_SECRET", valueFrom = local.jwt_secret_arn },
       ], var.anthropic_secret_arn == "" ? [] : [
@@ -105,7 +105,7 @@ resource "aws_ecs_task_definition" "orchestrator_worker" {
     ] : [])
     # LLM_PROVIDER=gemini のときは GEMINI_API_KEY が要る（未設定だと provider 生成で落ちる）
     secrets = concat([
-      { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
+      { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.app_database_url.arn },
       { name = "REDIS_URL", valueFrom = aws_secretsmanager_secret.redis_url.arn },
       ], var.anthropic_secret_arn == "" ? [] : [
       { name = "ANTHROPIC_API_KEY", valueFrom = var.anthropic_secret_arn },
@@ -164,7 +164,7 @@ resource "aws_ecs_task_definition" "export_worker" {
       { name = "EXPORT_S3_KMS_KEY_ID", value = var.s3_kms_key_id },
     ]
     secrets = [
-      { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
+      { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.app_database_url.arn },
       { name = "REDIS_URL", valueFrom = aws_secretsmanager_secret.redis_url.arn },
     ]
     logConfiguration = {
@@ -201,7 +201,13 @@ resource "aws_ecs_task_definition" "migrate" {
     image     = "${data.aws_ecr_repository.this["migrate"].repository_url}:${var.image_tag}"
     essential = true
     command   = ["alembic", "-c", "db/alembic.ini", "upgrade", "head"]
-    secrets   = [{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }]
+    # migrate だけは所有者（マスタ）で繋ぐ。DDL とアプリロールの作成/GRANT に所有権が要る。
+    # APP_DATABASE_URL は scripts/ensure_app_role.py がアプリロールを作る際に読む
+    # （ユーザ名とパスワードをそこから取り出す。terraform から RDS 内にロールは作れない）。
+    secrets = [
+      { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn },
+      { name = "APP_DATABASE_URL", valueFrom = aws_secretsmanager_secret.app_database_url.arn },
+    ]
     logConfiguration = {
       logDriver = "awslogs"
       options   = merge(local.awslogs, { "awslogs-group" = aws_cloudwatch_log_group.this["migrate"].name })

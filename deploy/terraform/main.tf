@@ -24,8 +24,14 @@ locals {
   # 既存 ARN が渡されなければ本スタックが作った JWT 鍵を使う
   jwt_secret_arn = var.jwt_secret_arn != "" ? var.jwt_secret_arn : aws_secretsmanager_secret.jwt[0].arn
 
+  # §7.3 RLS: アプリは所有者でないロールで繋ぐ。所有者（マスタ newfan）は RLS を
+  # バイパスするため、アプリがそれを使うとテナント分離が全く効かない（実 RDS で計測済み）。
+  # 所有者は migrate/バッチ専用に残す。
+  db_app_username = "newfan_app"
+
   secret_arns = compact([
     aws_secretsmanager_secret.database_url.arn,
+    aws_secretsmanager_secret.app_database_url.arn,
     aws_secretsmanager_secret.redis_url.arn,
     local.jwt_secret_arn,
     var.anthropic_secret_arn,

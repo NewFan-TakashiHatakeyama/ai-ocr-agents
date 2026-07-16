@@ -118,7 +118,10 @@ def main() -> None:
     from langgraph.checkpoint.postgres import PostgresSaver
 
     with PostgresSaver.from_conn_string(_pg_dsn()) as checkpointer:
-        checkpointer.setup()
+        # setup() はここでは呼ばない。チェックポイント表の DDL はスキーマ変更であり
+        # migrate の仕事（scripts/setup_checkpointer.py）。§7.3 でアプリは所有者でない
+        # ロールに移したため、ワーカーには schema public への CREATE 権限が無く、
+        # ここで setup() すると permission denied で全ジョブが落ちる（実 AWS で踏んだ）。
         checkpointer.serde = newfan_serde()  # schema 型を許可（未登録型ブロック回避, §4.4）
         graph = build_graph(
             checkpointer=checkpointer,

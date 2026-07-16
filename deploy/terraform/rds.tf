@@ -93,3 +93,35 @@ resource "aws_secretsmanager_secret_version" "database_url" {
     aws_db_instance.this.db_name,
   )
 }
+
+# --- アプリ用ロール（§7.3 RLS） ---
+# マスタユーザ newfan は全テーブルの所有者で、PostgreSQL の所有者は RLS をバイパスする。
+# アプリがこれで繋いでいる限り FORCE を付けてもテナント分離は効かない（実 RDS で計測:
+# app.tenant_id=ten_a のまま他テナントの行が見えていた）。
+# アプリは**所有者でない** newfan_app で繋ぎ、所有者は migrate/バッチ専用にする。
+# ロール自体の作成と GRANT は scripts/ensure_app_role.py（migrate コンテナ内）で行う。
+# terraform から RDS の中にロールは作れないため。
+
+resource "random_password" "db_app" {
+  length           = 32
+  override_special = "!#$%&*()-_=+[]{}<>:?"
+}
+
+resource "aws_secretsmanager_secret" "app_database_url" {
+  name        = "${local.prefix}/${var.env}/app-database-url"
+  description = "AI-OCR DATABASE_URL for application role (RLS applies)"
+  tags        = { Name = "${local.prefix}-app-database-url" }
+  # database_url と同じ理由（down→up を繰り返すため即時削除）
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "app_database_url" {
+  secret_id = aws_secretsmanager_secret.app_database_url.id
+  secret_string = format(
+    "postgresql+psycopg://%s:%s@%s/%s",
+    local.db_app_username,
+    urlencode(random_password.db_app.result),
+    aws_db_instance.this.endpoint,
+    aws_db_instance.this.db_name,
+  )
+}
