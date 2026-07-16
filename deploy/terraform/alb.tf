@@ -122,15 +122,53 @@ resource "aws_lb_listener" "http" {
   port              = 80
   protocol          = "HTTP"
 
+  # 証明書があれば HTTP は HTTPS へ寄せる。JWT を Authorization ヘッダで送るため、
+  # 平文の 80 を残すとトークンが盗聴されうる（証明書が無い開発時のみ 80 で受ける）。
+  dynamic "default_action" {
+    for_each = var.acm_certificate_arn == "" ? [] : [1]
+    content {
+      type = "redirect"
+      redirect {
+        port        = "443"
+        protocol    = "HTTPS"
+        status_code = "HTTP_301"
+      }
+    }
+  }
+
   # 既定は web。API だけをルールで gateway に振る。
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.web.arn
+  dynamic "default_action" {
+    for_each = var.acm_certificate_arn == "" ? [1] : []
+    content {
+      type             = "forward"
+      target_group_arn = aws_lb_target_group.web.arn
+    }
   }
 }
 
+# HTTP(80) の API ルール。HTTPS へリダイレクトする構成では 80 にルールを付けない
+# （付けると API だけ平文で通ってしまい、リダイレクトの意味が無くなる）。
 resource "aws_lb_listener_rule" "api" {
+  count        = var.acm_certificate_arn == "" ? 1 : 0
   listener_arn = aws_lb_listener.http.arn
+  priority     = 10
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.gateway.arn
+  }
+  condition {
+    path_pattern {
+      values = ["/v1/*", "/healthz"]
+    }
+  }
+}
+
+# HTTPS(443) の API ルール。80 と同じ振り分けを 443 にも用意する
+# （これが無いと HTTPS では全部 web に行き、API が 404 になる）。
+resource "aws_lb_listener_rule" "api_https" {
+  count        = var.acm_certificate_arn == "" ? 0 : 1
+  listener_arn = aws_lb_listener.https[0].arn
   priority     = 10
 
   action {
@@ -153,8 +191,9 @@ resource "aws_lb_listener" "https" {
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn   = var.acm_certificate_arn
 
+  # 既定は web（80 と同じ）。API は aws_lb_listener_rule.api_https で振る。
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.gateway.arn
+    target_group_arn = aws_lb_target_group.web.arn
   }
 }

@@ -1536,3 +1536,52 @@ a {
   outline: 1.5px solid var(--brand);
   outline-offset: -1.5px;
 }
+
+/* サインイン（トークン投入）。§6.1 の JWT を貼り付けてもらう画面。 */
+.signin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+.signin-card {
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 28px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 12px;
+  background: var(--card, #fff);
+}
+.signin-card h1 { font-size: 20px; margin: 0; }
+.signin-lead { margin: 0; color: var(--muted, #6b7280); font-size: 14px; }
+.signin-card textarea {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 8px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+.signin-card button {
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent, #2563eb);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.signin-card button:disabled { opacity: .5; cursor: not-allowed; }
+.signin-error { margin: 0; color: #b91c1c; font-size: 13px; }
+.signin-hint { margin: 0; color: var(--muted, #6b7280); font-size: 12px; line-height: 1.6; }
+.signin-hint code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--chip, #f3f4f6);
+  font-size: 11px;
+}

@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { type ReactNode, useEffect, useState } from "react";
 
+import { SignIn } from "@/components/SignIn";
 import { StatusChip } from "@/components/StatusChip";
 import { api } from "@/lib/api";
 
@@ -25,15 +26,23 @@ function decodePrincipal(token: string | undefined | null): Principal {
 // localStorage を render 中に読むと SSR と初回クライアントレンダで結果が変わり
 // hydration mismatch になる（サーバは env トークン、クライアントは localStorage を見るため）。
 // 初期値は env 由来の決定論的な値にし、localStorage はマウント後にのみ反映する。
-function usePrincipal(): Principal {
-  const [me, setMe] = useState<Principal>(() =>
-    decodePrincipal(process.env.NEXT_PUBLIC_DEV_TOKEN),
-  );
+type Session = { me: Principal; hasToken: boolean; ready: boolean };
+
+function usePrincipal(): Session {
+  const envToken = process.env.NEXT_PUBLIC_DEV_TOKEN;
+  const [me, setMe] = useState<Principal>(() => decodePrincipal(envToken));
+  // ready=false の間は判定を出さない。localStorage を見る前に「トークン無し」と
+  // 決めるとサインイン画面が一瞬ちらつく（SSR と初回クライアントで結果が違うため）。
+  const [state, setState] = useState<{ hasToken: boolean; ready: boolean }>({
+    hasToken: Boolean(envToken),
+    ready: false,
+  });
   useEffect(() => {
-    const t = window.localStorage.getItem("nf_token") || process.env.NEXT_PUBLIC_DEV_TOKEN;
+    const t = window.localStorage.getItem("nf_token") || envToken;
     setMe(decodePrincipal(t));
-  }, []);
-  return me;
+    setState({ hasToken: Boolean(t), ready: true });
+  }, [envToken]);
+  return { me, ...state };
 }
 
 const ICON = {
@@ -55,10 +64,26 @@ function NavIcon({ d }: { d: string }) {
 }
 
 export function AppShell({ active, children }: { active: string; children: ReactNode }) {
-  const me = usePrincipal();
+  const { me, hasToken, ready } = usePrincipal();
+  const [signedIn, setSignedIn] = useState(false);
   const isAdmin = me.role === "admin";
-  const { data } = useQuery({ queryKey: ["documents"], queryFn: () => api.listDocuments() });
+  const needsSignIn = ready && !hasToken && !signedIn;
+
+  // トークンが無ければ 403 になるだけなので API を叩かない（enabled）。
+  // 早期 return はフックを全て呼び終えてから行う。フックより前に return すると
+  // レンダー間でフック数が変わり React error #300 で画面が落ちる（実際に踏んだ）。
+  const { data } = useQuery({
+    queryKey: ["documents"],
+    queryFn: () => api.listDocuments(),
+    enabled: !needsSignIn,
+  });
   const recent = (data?.items ?? []).slice(0, 20);
+
+  // トークンが無ければ先に投入してもらう。以前は DevTools で localStorage を
+  // 手打ちする以外に入れる手段が無かった。
+  if (needsSignIn) {
+    return <SignIn onSignedIn={() => { setSignedIn(true); location.reload(); }} />;
+  }
 
   return (
     <div className="app">
