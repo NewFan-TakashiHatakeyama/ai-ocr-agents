@@ -36,21 +36,66 @@ jobs:
         with:
           version: "0.9.8"
           enable-cache: true
-      - name: Sync workspace (dev group)
-        run: uv sync --frozen
-      # PgRepository の結合テスト用。extras が要る（sqlalchemy/psycopg）。
-      - name: Sync gateway runtime (PG 結合テスト用)
-        run: uv sync --frozen --package newfan-gateway --extra runtime
+      # --package で同期すると環境がそのパッケージだけに絞られ、他のメンバー
+      # （newfan_orchestrator 等）が消えて pytest が収集エラーになる。実 PG に当てる
+      # 結合テストには extras（sqlalchemy/psycopg）も要るので、全メンバー＋全 extras を
+      # 1 つの環境に入れる。--no-sync は uv run が環境を張り替えて extras を落とすのを防ぐ。
+      - name: Sync workspace (全メンバー＋extras)
+        run: uv sync --frozen --all-packages --all-extras
       - name: Apply migrations
-        run: uv run alembic -c db/alembic.ini upgrade head
+        run: uv run --no-sync alembic -c db/alembic.ini upgrade head
         env:
           DATABASE_URL: postgresql+psycopg://newfan:newfan@localhost:5432/newfan
       - name: ruff
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .
       - name: mypy (strict, src のみ)
-        run: uv run mypy $(ls -d packages/*/src services/*/src)
+        run: uv run --no-sync mypy $(ls -d packages/*/src services/*/src golden/src)
       - name: pytest
-        run: uv run pytest
+        run: uv run --no-sync pytest
+      - name: 実 PG の結合テストが skip されていないことを確認
+        # DATABASE_URL_TEST や psycopg が落ちると importorskip/skipif で静かに
+        # 全部 skip され、「緑だが何も検証していない」状態になる。明示的に呼んで確かめる。
+        run: |
+          uv run --no-sync pytest -q \
+            services/gateway/tests/test_pg_repository_integration.py \
+            services/orchestrator/tests/test_pg_jobs_integration.py \
+            -o addopts="" --no-header -rN | tee /tmp/pg.txt
+          grep -qE '[0-9]+ passed' /tmp/pg.txt
+          if grep -qE 'skipped' /tmp/pg.txt; then
+            echo '[FATAL] 実 PostgreSQL の結合テストが skip されました（DB に繋がっていません）' >&2
+            exit 1
+          fi
+
+  golden:
+    name: ゴールデンセット回帰（§14.2 / DD-03）
+    runs-on: ubuntu-latest
+    # 採点ロジックそのものの検証。「本番昇格の条件」を測る実測は AWS の実系が要るため
+    # scripts/aws_env.sh golden で回す（CI には推論も LLM も無く、Fake で測っても意味が無い）。
+    # ここが守るのは「指標定義とゲート判定が壊れていないこと」＋「ゴールデンデータが読めること」。
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.8"
+          enable-cache: true
+      - name: Sync workspace
+        run: uv sync --frozen --all-packages
+      - name: 採点ロジックのテスト
+        run: uv run --no-sync pytest golden -q
+      - name: ゴールデンデータが読めることを確認
+        # 壊れた JSONL を気づかず merge すると、次の実測でいきなり収集が落ちる。
+        run: |
+          uv run --no-sync python -c "
+          from pathlib import Path
+          from newfan_golden.dataset import load_jsonl
+          docs = load_jsonl(Path('golden/data/dev.jsonl'))
+          n = sum(len(d.fields) for d in docs)
+          print(f'[golden] {len(docs)} 文書 / {n} 項目 を読み込みました')
+          "
+      - name: スキーマとゴールデンの critical 整合
+        # critical は片方だけ直すと critical_exact_match が実態とずれる。機械で突き合わせる。
+        run: uv run --no-sync python golden/scripts/check_critical.py
 
   images:
     name: docker build (軽量イメージ)
