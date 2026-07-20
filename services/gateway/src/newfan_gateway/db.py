@@ -23,6 +23,7 @@ from newfan_gateway.records import (
     JobRecord,
     PageRecord,
     RunRecord,
+    WorkflowRecord,
 )
 from newfan_schemas import ExtractedField, TableResult
 
@@ -657,9 +658,7 @@ class PgWorkflowsRepository:
         c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
 
     @staticmethod
-    def _row_to_record(r) -> "WorkflowRecord":
-        from newfan_gateway.records import WorkflowRecord
-
+    def _row_to_record(r) -> WorkflowRecord:
         return WorkflowRecord(
             id=r["id"],
             tenant_id=r["tenant_id"],
