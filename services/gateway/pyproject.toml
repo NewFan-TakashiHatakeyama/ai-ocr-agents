@@ -13,6 +13,7 @@ dependencies = [
     "newfan-ingest",
     "newfan-metrics",
     "newfan-netguard",
+    "newfan-workflow",
 ]
 
 [project.optional-dependencies]

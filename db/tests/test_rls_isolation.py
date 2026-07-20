@@ -151,7 +151,9 @@ def test_業務テーブルは_force_rls_になっている(owner) -> None:
             text(
                 "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class"
                 " WHERE relname IN ('documents','extraction_fields','correction_logs',"
-                " 'tenant_memories','tenant_rules','jobs','audit_logs')"
+                " 'tenant_memories','tenant_rules','jobs','audit_logs',"
+                " 'workflows','workflow_runs','workflow_node_runs','connections',"
+                " 'source_cursors')"
             )
         ).all()
     assert rows, "対象テーブルが見つからない（migration 未適用？）"

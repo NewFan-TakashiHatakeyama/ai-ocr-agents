@@ -25,6 +25,7 @@ from newfan_gateway.locks import InMemoryLockStore
 from newfan_gateway.ports import FakeOrchestratorClient, Ingestor, OrchestratorClient
 from newfan_gateway.queue import InMemoryQueue, Queue
 from newfan_gateway.repository import InMemoryRepository, Repository
+from newfan_gateway.workflows_repo import InMemoryWorkflowsRepository, WorkflowsRepository
 from newfan_gateway.routers import router
 
 
@@ -38,6 +39,7 @@ def create_app(
     api_keys: Optional[ApiKeyStore] = None,
     admin: Optional[AdminRepository] = None,
     chat_agent: Optional[ChatAgent] = None,
+    workflows: Optional[WorkflowsRepository] = None,
 ) -> FastAPI:
     app = FastAPI(title="NewFan AI-OCR Gateway", version="0.1.0")
 
@@ -57,6 +59,7 @@ def create_app(
     app.state.orchestrator = orchestrator or FakeOrchestratorClient()
     app.state.admin = admin or InMemoryAdminRepository()
     app.state.chat_agent = chat_agent or RuleBasedChatAgent()
+    app.state.workflows = workflows or InMemoryWorkflowsRepository()
     app.state.api_keys = api_keys or InMemoryApiKeyStore({})
     app.state.lock_store = InMemoryLockStore()
     app.state.idempotency = {}

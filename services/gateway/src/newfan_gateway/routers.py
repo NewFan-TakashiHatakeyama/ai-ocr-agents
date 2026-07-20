@@ -10,6 +10,9 @@ from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, U
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
+from newfan_workflow import WorkflowGraph, catalog, has_errors, lint
+from newfan_workflow.lint import Finding
+from pydantic import ValidationError
 
 from newfan_gateway import dto
 from newfan_gateway.auth import Principal
@@ -25,6 +28,7 @@ from newfan_gateway.deps import (
     get_queue,
     get_repo,
     get_settings,
+    get_workflows,
     require_role,
 )
 from newfan_gateway.errors import ApiError
@@ -38,6 +42,7 @@ from newfan_gateway.page_images import (
 )
 from newfan_gateway.ports import Ingestor, OrchestratorClient
 from newfan_gateway.queue import Queue
+from newfan_gateway.workflows_repo import IMPLEMENTED_NODE_TYPES, WorkflowsRepository
 from newfan_gateway.records import (
     CorrectionRecord,
     DocumentRecord,
@@ -45,6 +50,7 @@ from newfan_gateway.records import (
     PageRecord,
     RunRecord,
     SchemaFieldDef,
+    WorkflowRecord,
 )
 from newfan_gateway.repository import Repository
 from newfan_ingest import IngestError, UploadInput
@@ -541,6 +547,224 @@ def put_schema(
     fields = [SchemaFieldDef(**f.model_dump()) for f in body.fields]
     rec = admin.put_schema(principal.tenant_id, body.doc_type, fields)  # 常に新版
     return _schema_dto(rec)
+
+
+# ---------- ワークフロー管理（§16 設計 v0.2 §11 / P2） ----------
+# 注意: /workflows/catalog は /workflows/{workflow_id} より先に登録すること。
+# FastAPI は登録順にマッチするため、後にすると "catalog" が id として解釈される。
+
+
+def _validate_graph(data: dict[str, Any]) -> "WorkflowGraph":
+    """graph_json をモデル検証する。不正は 422（E4001 スキーマ不正）。
+
+    未知のノード種別・config の typo・不正な条件式は保存の瞬間に断る（§4.1）。
+    実行時に初めて落ちると、有効化済みのワークフローが本番で死ぬ。
+    """
+    try:
+        return WorkflowGraph.model_validate(data)
+    except ValidationError as exc:
+        errors = [
+            {"loc": ".".join(str(p) for p in e["loc"]), "msg": e["msg"], "type": e["type"]}
+            for e in exc.errors(include_url=False)[:20]
+        ]
+        raise ApiError("E4001", "graph_json がスキーマに合いません", details={"errors": errors}) from exc
+
+
+def _lint_workflow(
+    rec: "WorkflowRecord", graph: "WorkflowGraph", wf: WorkflowsRepository, tenant_id: str
+) -> tuple[list[Finding], list[str]]:
+    findings = lint(
+        graph,
+        auto_confirm=rec.auto_confirm,
+        schema_exists=lambda sid: wf.schema_exists(tenant_id, sid),
+        connection_ok=lambda cid: wf.connection_ok(tenant_id, cid),
+    )
+    unsupported = sorted(str(t) for t in {n.type for n in graph.nodes} - IMPLEMENTED_NODE_TYPES)
+    return findings, unsupported
+
+
+def _workflow_dto(rec: "WorkflowRecord") -> dto.WorkflowDto:
+    return dto.WorkflowDto(
+        id=rec.id,
+        name=rec.name,
+        status=rec.status,
+        version=rec.version,
+        auto_confirm=rec.auto_confirm,
+        updated_at=rec.updated_at,
+        graph_json=rec.graph_json,
+    )
+
+
+@router.get("/workflows/catalog")
+def workflow_catalog(
+    principal: Principal = Depends(require_role("admin")),
+) -> dict[str, Any]:
+    """ノード種別 → config の JSON Schema（SCR-07 のフォーム自動生成用, §4.4）。"""
+    return {"types": catalog(), "implemented": sorted(IMPLEMENTED_NODE_TYPES)}
+
+
+@router.get("/workflows", response_model=dto.WorkflowList)
+def list_workflows(
+    principal: Principal = Depends(require_role("admin")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.WorkflowList:
+    rows = wf.list_workflows(principal.tenant_id)
+    return dto.WorkflowList(
+        items=[dto.WorkflowSummaryDto(**_workflow_dto(r).model_dump(exclude={"graph_json"})) for r in rows]
+    )
+
+
+@router.post("/workflows", status_code=201, response_model=dto.WorkflowDto)
+def create_workflow(
+    body: dto.WorkflowCreateRequest,
+    principal: Principal = Depends(require_role("admin")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.WorkflowDto:
+    graph = _validate_graph(body.graph_json)
+    rec = wf.create_workflow(
+        WorkflowRecord(
+            id=new_id("workflow"),
+            tenant_id=principal.tenant_id,
+            name=body.name,
+            graph_json=graph.model_dump(by_alias=True, exclude_none=True),
+            auto_confirm=body.auto_confirm,
+            created_by=principal.sub,
+        )
+    )
+    wf.record_audit(
+        principal.tenant_id,
+        actor_id=principal.sub,
+        action="workflow.create",
+        target_id=rec.id,
+        detail={"version": rec.version, "name": rec.name},
+    )
+    return _workflow_dto(rec)
+
+
+@router.get("/workflows/{workflow_id}", response_model=dto.WorkflowDto)
+def get_workflow(
+    workflow_id: str,
+    principal: Principal = Depends(require_role("admin")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.WorkflowDto:
+    rec = wf.get_workflow(principal.tenant_id, workflow_id)
+    if rec is None:
+        raise ApiError("E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id})
+    return _workflow_dto(rec)
+
+
+@router.put("/workflows/{workflow_id}", response_model=dto.WorkflowDto)
+def update_workflow(
+    workflow_id: str,
+    body: dto.WorkflowUpdateRequest,
+    principal: Principal = Depends(require_role("admin")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.WorkflowDto:
+    graph = _validate_graph(body.graph_json)
+    rec = wf.update_workflow(
+        principal.tenant_id,
+        workflow_id,
+        graph_json=graph.model_dump(by_alias=True, exclude_none=True),
+        name=body.name,
+        auto_confirm=body.auto_confirm,
+    )
+    if rec is None:
+        raise ApiError("E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id})
+    wf.record_audit(
+        principal.tenant_id,
+        actor_id=principal.sub,
+        action="workflow.update",
+        target_id=rec.id,
+        detail={"version": rec.version},
+    )
+    return _workflow_dto(rec)
+
+
+@router.post("/workflows/{workflow_id}/lint", response_model=dto.WorkflowLintResponse)
+def lint_workflow(
+    workflow_id: str,
+    body: Optional[dto.WorkflowLintRequest] = None,
+    principal: Principal = Depends(require_role("admin")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.WorkflowLintResponse:
+    rec = wf.get_workflow(principal.tenant_id, workflow_id)
+    if rec is None:
+        raise ApiError("E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id})
+    graph_data = body.graph_json if (body and body.graph_json is not None) else rec.graph_json
+    graph = _validate_graph(graph_data)
+    findings, unsupported = _lint_workflow(rec, graph, wf, principal.tenant_id)
+    return dto.WorkflowLintResponse(
+        findings=[dto.LintFindingDto(**f.__dict__) for f in findings],
+        activatable=not has_errors(findings) and not unsupported,
+        unsupported_types=unsupported,
+    )
+
+
+@router.post("/workflows/{workflow_id}/activate", response_model=dto.WorkflowDto)
+def activate_workflow(
+    workflow_id: str,
+    principal: Principal = Depends(require_role("admin")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.WorkflowDto:
+    """有効化＝版の固定（§11.1）。lint error ゼロ + 実装済みノードのみが条件。"""
+    rec = wf.get_workflow(principal.tenant_id, workflow_id)
+    if rec is None:
+        raise ApiError("E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id})
+    graph = _validate_graph(rec.graph_json)
+
+    findings, unsupported = _lint_workflow(rec, graph, wf, principal.tenant_id)
+    if unsupported:
+        # 保存と lint は 13 種すべて通すが、実行できないノードの有効化はここで断る。
+        # 「エディタに置けるのに動かない」を有効化の境界で明示する（§4.2）。
+        raise ApiError(
+            "E4001",
+            "未実装のノード種別が含まれています（有効化できません）",
+            details={"unsupported_types": unsupported},
+        )
+    errors = [f for f in findings if f.severity == "error"]
+    if errors:
+        raise ApiError(
+            "E4001",
+            "構成 lint にエラーがあります（有効化できません）",
+            details={"findings": [f.__dict__ for f in errors]},
+        )
+
+    updated = wf.set_status(principal.tenant_id, workflow_id, "active")
+    assert updated is not None  # 直前に取得済み
+    wf.record_audit(
+        principal.tenant_id,
+        actor_id=principal.sub,
+        action="workflow.activate",
+        target_id=workflow_id,
+        detail={"version": updated.version,
+                "warnings": [f.__dict__ for f in findings if f.severity == "warning"]},
+    )
+    return _workflow_dto(updated)
+
+
+@router.post("/workflows/{workflow_id}/pause", response_model=dto.WorkflowDto)
+def pause_workflow(
+    workflow_id: str,
+    principal: Principal = Depends(require_role("admin")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.WorkflowDto:
+    rec = wf.get_workflow(principal.tenant_id, workflow_id)
+    if rec is None:
+        raise ApiError("E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id})
+    if rec.status != "active":
+        raise ApiError(
+            "E1005", "active でないワークフローは停止できません", details={"status": rec.status}
+        )
+    updated = wf.set_status(principal.tenant_id, workflow_id, "paused")
+    assert updated is not None
+    wf.record_audit(
+        principal.tenant_id,
+        actor_id=principal.sub,
+        action="workflow.pause",
+        target_id=workflow_id,
+        detail={"version": updated.version},
+    )
+    return _workflow_dto(updated)
 
 
 @router.post("/webhooks/endpoints", status_code=201, response_model=dto.WebhookEndpointDto)

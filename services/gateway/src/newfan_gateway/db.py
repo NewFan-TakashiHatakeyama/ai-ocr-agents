@@ -641,3 +641,156 @@ class PgAdminRepository:
             pending_rules=pending,
             memories_total=memories,
         )
+
+
+class PgWorkflowsRepository:
+    """WorkflowsRepository の PostgreSQL 実装（§16 設計 v0.2）。
+
+    接続はアプリロール（newfan_app）。RLS（ENABLE+FORCE）が効く前提で、
+    各トランザクションの先頭で app.tenant_id を設定する（§7.3）。
+    """
+
+    def __init__(self, dsn: str) -> None:
+        self._engine = create_engine(dsn, future=True)
+
+    def _rls(self, c, tenant_id: str) -> None:
+        c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
+
+    @staticmethod
+    def _row_to_record(r) -> "WorkflowRecord":
+        from newfan_gateway.records import WorkflowRecord
+
+        return WorkflowRecord(
+            id=r["id"],
+            tenant_id=r["tenant_id"],
+            name=r["name"],
+            status=r["status"],
+            version=r["version"],
+            graph_json=r["graph_json"] or {},
+            auto_confirm=r["auto_confirm"],
+            created_by=r["created_by"],
+            updated_at=r["updated_at"].isoformat() if r["updated_at"] else None,
+        )
+
+    def list_workflows(self, tenant_id: str):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT id, tenant_id, name, status, version, graph_json, auto_confirm,"
+                    " created_by, updated_at FROM workflows WHERE tenant_id=:t"
+                    " ORDER BY updated_at DESC"
+                ),
+                {"t": tenant_id},
+            ).mappings().all()
+        return [self._row_to_record(r) for r in rows]
+
+    def get_workflow(self, tenant_id: str, workflow_id: str):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "SELECT id, tenant_id, name, status, version, graph_json, auto_confirm,"
+                    " created_by, updated_at FROM workflows WHERE tenant_id=:t AND id=:i"
+                ),
+                {"t": tenant_id, "i": workflow_id},
+            ).mappings().first()
+        return self._row_to_record(r) if r else None
+
+    def create_workflow(self, rec):
+        with self._engine.begin() as c:
+            self._rls(c, rec.tenant_id)
+            c.execute(
+                text(
+                    "INSERT INTO workflows (id, tenant_id, name, status, version, graph_json,"
+                    " auto_confirm, created_by)"
+                    " VALUES (:i,:t,:n,'draft',1, CAST(:g AS jsonb), :a, :cb)"
+                ),
+                {
+                    "i": rec.id,
+                    "t": rec.tenant_id,
+                    "n": rec.name,
+                    "g": json.dumps(rec.graph_json, ensure_ascii=False),
+                    "a": rec.auto_confirm,
+                    "cb": rec.created_by,
+                },
+            )
+        return self.get_workflow(rec.tenant_id, rec.id)
+
+    def update_workflow(self, tenant_id: str, workflow_id: str, *, graph_json,
+                        name=None, auto_confirm=None):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    # 新版は必ず draft に戻す。「有効化＝版の固定」（§11.1）を守るため、
+                    # active の定義を活性のまま差し替える経路を作らない。
+                    "UPDATE workflows SET graph_json = CAST(:g AS jsonb),"
+                    " name = COALESCE(:n, name),"
+                    " auto_confirm = COALESCE(:a, auto_confirm),"
+                    " version = version + 1, status = 'draft', updated_at = now()"
+                    " WHERE tenant_id=:t AND id=:i RETURNING id"
+                ),
+                {
+                    "g": json.dumps(graph_json, ensure_ascii=False),
+                    "n": name,
+                    "a": auto_confirm,
+                    "t": tenant_id,
+                    "i": workflow_id,
+                },
+            ).first()
+        return self.get_workflow(tenant_id, workflow_id) if r else None
+
+    def set_status(self, tenant_id: str, workflow_id: str, status: str):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "UPDATE workflows SET status=:s, updated_at=now()"
+                    " WHERE tenant_id=:t AND id=:i RETURNING id"
+                ),
+                {"s": status, "t": tenant_id, "i": workflow_id},
+            ).first()
+        return self.get_workflow(tenant_id, workflow_id) if r else None
+
+    def schema_exists(self, tenant_id: str, schema_id: str) -> bool:
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text("SELECT 1 FROM field_schemas WHERE tenant_id=:t AND id=:i"),
+                {"t": tenant_id, "i": schema_id},
+            ).first()
+        return r is not None
+
+    def connection_ok(self, tenant_id: str, connection_id: str) -> bool:
+        # 疎通未確認（untested）の接続は有効化に使わせない（§16.5 の安全策）
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "SELECT 1 FROM connections WHERE tenant_id=:t AND id=:i"
+                    " AND status IN ('active','tested')"
+                ),
+                {"t": tenant_id, "i": connection_id},
+            ).first()
+        return r is not None
+
+    def record_audit(self, tenant_id: str, *, actor_id: str, action: str,
+                     target_id: str, detail) -> None:
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            c.execute(
+                text(
+                    "INSERT INTO audit_logs (id, tenant_id, actor_type, actor_id, action,"
+                    " target_type, target_id, detail)"
+                    " VALUES (:i,:t,'human',:a,:ac,'workflow',:tg, CAST(:d AS jsonb))"
+                ),
+                {
+                    "i": new_id("audit"),
+                    "t": tenant_id,
+                    "a": actor_id,
+                    "ac": action,
+                    "tg": target_id,
+                    "d": json.dumps(detail, ensure_ascii=False),
+                },
+            )

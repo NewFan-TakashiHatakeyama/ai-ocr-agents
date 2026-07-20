@@ -14,6 +14,7 @@ from newfan_gateway.locks import LockStore
 from newfan_gateway.ports import Ingestor, OrchestratorClient
 from newfan_gateway.queue import Queue
 from newfan_gateway.repository import Repository
+from newfan_gateway.workflows_repo import WorkflowsRepository
 
 
 def get_settings(request: Request) -> Settings:
@@ -38,6 +39,10 @@ def get_orchestrator(request: Request) -> OrchestratorClient:
 
 def get_admin(request: Request) -> AdminRepository:
     return request.app.state.admin  # type: ignore[no-any-return]
+
+
+def get_workflows(request: Request) -> WorkflowsRepository:
+    return request.app.state.workflows  # type: ignore[no-any-return]
 
 
 def get_chat_agent(request: Request) -> ChatAgent:

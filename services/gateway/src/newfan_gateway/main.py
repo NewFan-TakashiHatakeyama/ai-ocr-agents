@@ -41,11 +41,13 @@ def build_app(settings: Settings | None = None) -> FastAPI:
 
     repo: Repository | None = None
     admin = None
+    workflows = None
     if settings.database_url:
-        from newfan_gateway.db import PgAdminRepository, PgRepository
+        from newfan_gateway.db import PgAdminRepository, PgRepository, PgWorkflowsRepository
 
         repo = PgRepository(settings.database_url)
         admin = PgAdminRepository(settings.database_url)
+        workflows = PgWorkflowsRepository(settings.database_url)
 
     queue: Queue | None = None
     orchestrator: OrchestratorClient | None = None
@@ -91,6 +93,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         api_keys=api_keys,
         admin=admin,
         chat_agent=chat_agent,
+        workflows=workflows,
     )
 
 

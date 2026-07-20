@@ -105,6 +105,25 @@ class SchemaRecord(BaseModel):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class WorkflowRecord(BaseModel):
+    """workflows 行（§16 設計 v0.2）。
+
+    graph_json は newfan_workflow.WorkflowGraph で検証済みの dict を保持する。
+    version はワークフロー定義の版（graph_json の形式版とは別物）。
+    実行中の workflow_run は開始時点の版を参照し続ける（§11.1 版の固定）。
+    """
+
+    id: str
+    tenant_id: str
+    name: str
+    status: str = "draft"  # draft / active / paused / retired
+    version: int = 1
+    graph_json: dict[str, Any] = Field(default_factory=dict)
+    auto_confirm: bool = False
+    created_by: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
 class ConnectionRecord(BaseModel):
     """connections 行（§6.4 Webhook / §16.5 接続管理）。
 

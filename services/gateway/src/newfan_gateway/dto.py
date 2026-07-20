@@ -185,6 +185,58 @@ class MemoryList(BaseModel):
     items: list[MemoryDto]
 
 
+class WorkflowCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    graph_json: dict[str, Any]
+    auto_confirm: bool = False
+
+
+class WorkflowUpdateRequest(BaseModel):
+    """PUT = 新版作成（version+1・draft に戻る）。graph_json は必須。"""
+
+    graph_json: dict[str, Any]
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    auto_confirm: Optional[bool] = None
+
+
+class WorkflowSummaryDto(BaseModel):
+    id: str
+    name: str
+    status: str
+    version: int
+    auto_confirm: bool
+    updated_at: Optional[str] = None
+
+
+class WorkflowDto(WorkflowSummaryDto):
+    graph_json: dict[str, Any]
+
+
+class WorkflowList(BaseModel):
+    items: list[WorkflowSummaryDto]
+
+
+class LintFindingDto(BaseModel):
+    rule: str
+    severity: str
+    message: str
+    node_id: Optional[str] = None
+
+
+class WorkflowLintRequest(BaseModel):
+    """省略時は保存済みの graph を lint する。graph_json を渡すと保存せずに検査だけ行う
+    （エディタの編集中プレビュー用）。"""
+
+    graph_json: Optional[dict[str, Any]] = None
+
+
+class WorkflowLintResponse(BaseModel):
+    findings: list[LintFindingDto]
+    # activate 可能か（error なし かつ 未実装ノードなし）。ボタン活性の判定に使う
+    activatable: bool
+    unsupported_types: list[str] = Field(default_factory=list)
+
+
 class WebhookEndpointRequest(BaseModel):
     url: str
     # 署名鍵（§6.4 X-NF-Signature）。省略時はサーバが生成して 1 度だけ返す。
