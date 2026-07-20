@@ -42,6 +42,11 @@ def _wf_dsn(dsn: str) -> str:
 def _schema() -> None:
     import psycopg
 
+    # 本番は scripts/setup_checkpointer.py が public / lg_wf の両方を作る。CI の
+    # postgres は alembic しか流していないため、ここで両方を用意する
+    # （public 側が無いと分離テストの「public から見えない」確認ができない）。
+    with PostgresSaver.from_conn_string(_plain(_DSN)) as saver:  # type: ignore[arg-type]
+        saver.setup()
     with psycopg.connect(_plain(_DSN), autocommit=True) as conn:  # type: ignore[arg-type]
         conn.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
     with PostgresSaver.from_conn_string(_wf_dsn(_DSN)) as saver:  # type: ignore[arg-type]
