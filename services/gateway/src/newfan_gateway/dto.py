@@ -237,6 +237,48 @@ class WorkflowLintResponse(BaseModel):
     unsupported_types: list[str] = Field(default_factory=list)
 
 
+class WorkflowRunRequest(BaseModel):
+    document_id: str = Field(min_length=1)
+
+
+class WorkflowRunAccepted(BaseModel):
+    workflow_run_id: str
+    workflow_version: int
+
+
+class WorkflowNodeRunDto(BaseModel):
+    node_id: str
+    node_type: str
+    status: str
+    attempt: int
+    output: Optional[dict[str, Any]] = None
+    error: Optional[dict[str, Any]] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
+class WorkflowRunSummaryDto(BaseModel):
+    id: str
+    workflow_id: str
+    workflow_version: int
+    document_id: Optional[str] = None
+    status: str
+    error: Optional[dict[str, Any]] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
+class WorkflowRunDto(WorkflowRunSummaryDto):
+    # waiting（何を待っているか）だけを出す。trigger の graph_json スナップショットは
+    # 大きいので API には出さない
+    waiting: Optional[dict[str, Any]] = None
+    node_runs: list[WorkflowNodeRunDto] = Field(default_factory=list)
+
+
+class WorkflowRunList(BaseModel):
+    items: list[WorkflowRunSummaryDto]
+
+
 class WebhookEndpointRequest(BaseModel):
     url: str
     # 署名鍵（§6.4 X-NF-Signature）。省略時はサーバが生成して 1 度だけ返す。

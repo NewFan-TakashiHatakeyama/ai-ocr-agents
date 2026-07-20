@@ -1413,6 +1413,7 @@ name = "newfan-orchestrator"
 version = "0.1.0"
 source = { editable = "services/orchestrator" }
 dependencies = [
+    { name = "newfan-export" },
     { name = "newfan-llm-adapter" },
     { name = "newfan-memory" },
     { name = "newfan-metrics" },
@@ -1420,6 +1421,7 @@ dependencies = [
     { name = "newfan-paddle-client" },
     { name = "newfan-schemas" },
     { name = "newfan-validators" },
+    { name = "newfan-workflow" },
     { name = "pydantic" },
 ]
 
@@ -1446,6 +1448,7 @@ requires-dist = [
     { name = "langgraph", marker = "extra == 'runtime'", specifier = ">=0.2" },
     { name = "langgraph-checkpoint-postgres", marker = "extra == 'graph'", specifier = ">=2.0" },
     { name = "langgraph-checkpoint-postgres", marker = "extra == 'runtime'", specifier = ">=2.0" },
+    { name = "newfan-export", editable = "services/export" },
     { name = "newfan-llm-adapter", editable = "services/llm_adapter" },
     { name = "newfan-llm-adapter", extras = ["anthropic", "gemini"], marker = "extra == 'runtime'", editable = "services/llm_adapter" },
     { name = "newfan-memory", editable = "services/memory" },
@@ -1455,6 +1458,7 @@ requires-dist = [
     { name = "newfan-paddle-client", editable = "packages/paddle_client" },
     { name = "newfan-schemas", editable = "packages/schemas" },
     { name = "newfan-validators", editable = "packages/validators" },
+    { name = "newfan-workflow", editable = "packages/workflow" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'runtime'", specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "redis", marker = "extra == 'runtime'", specifier = ">=5.0" },

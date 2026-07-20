@@ -30,6 +30,9 @@ from newfan_orchestrator.pg_persistence import PgContextStore
 from newfan_orchestrator.redis_io import RedisQueue, RedisStreamConsumer
 from newfan_orchestrator.serde import newfan_serde
 from newfan_orchestrator.worker import ExtractionWorker
+from newfan_orchestrator.workflow_graph import RunnerDeps
+from newfan_orchestrator.workflow_runner import WorkflowRunner
+from newfan_orchestrator.workflow_store import PgWorkflowRunStore
 
 _STOP = False
 
@@ -42,6 +45,18 @@ def _handle_sigterm(*_: Any) -> None:
 def _pg_dsn() -> str:
     # PostgresSaver / psycopg は plain な postgresql:// を期待（SQLAlchemy の +psycopg を除去）。
     return os.environ["DATABASE_URL"].replace("+psycopg", "")
+
+
+def _wf_dsn() -> str:
+    """ワークフロー層 checkpointer の接続（lg_wf スキーマ, §16 設計 v0.2 §1.2）。
+
+    PostgresSaver はテーブル名が固定・スキーマ非修飾のため、search_path を接続文字列に
+    焼いて抽出グラフ（public）と分離する。分離が効くことは実測済み。SET で後から
+    切り替える方式は接続プール経由の混線があり得るため使わない。
+    """
+    dsn = _pg_dsn()
+    sep = "&" if "?" in dsn else "?"
+    return f"{dsn}{sep}options=-csearch_path%3Dlg_wf"
 
 
 def _memory(adapter: LLMAdapter, bundle: PromptBundle) -> MemoryService:
@@ -117,7 +132,10 @@ def main() -> None:
 
     from langgraph.checkpoint.postgres import PostgresSaver
 
-    with PostgresSaver.from_conn_string(_pg_dsn()) as checkpointer:
+    with (
+        PostgresSaver.from_conn_string(_pg_dsn()) as checkpointer,
+        PostgresSaver.from_conn_string(_wf_dsn()) as wf_checkpointer,
+    ):
         # setup() はここでは呼ばない。チェックポイント表の DDL はスキーマ変更であり
         # migrate の仕事（scripts/setup_checkpointer.py）。§7.3 でアプリは所有者でない
         # ロールに移したため、ワーカーには schema public への CREATE 権限が無く、
@@ -135,10 +153,31 @@ def main() -> None:
             context_store=store,
             export_enqueue=export_queue.enqueue,
         )
-        worker = ExtractionWorker(graph, store, consumer)
-        print("[worker] orchestrator-svc 起動: q.extract を消費します")
+        worker = ExtractionWorker(graph, store, consumer, enqueue=export_queue.enqueue)
+
+        # workflow-runner（§16 設計 v0.2 §6）。q.workflow を同じプロセスで消費する。
+        # 常駐プロセスは増やさない（コスト。設計 §2.1）。
+        from newfan_export.webhook import WebhookSender
+
+        wf_store = PgWorkflowRunStore(
+            os.environ["DATABASE_URL"], enqueue=export_queue.enqueue
+        )
+        wf_consumer = RedisStreamConsumer(
+            os.environ["REDIS_URL"],
+            "q.workflow",
+            "workflow-runner",
+            os.environ.get("CONSUMER_NAME", socket.gethostname()),
+        )
+        runner = WorkflowRunner(
+            wf_store,
+            wf_consumer,
+            RunnerDeps(store=wf_store, send_webhook=WebhookSender().send),
+            checkpointer=wf_checkpointer,
+        )
+        print("[worker] orchestrator-svc 起動: q.extract / q.workflow を消費します")
         while not _STOP:
             worker.run_once()  # consume は block_ms 待機するため busy-loop にならない
+            runner.run_once(count=10)
     print("[worker] SIGTERM 受信: 停止しました")
 
 

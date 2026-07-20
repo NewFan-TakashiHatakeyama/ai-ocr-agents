@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any, Optional, Protocol
 
 from newfan_gateway.ids import new_id
-from newfan_gateway.records import WorkflowRecord
+from newfan_gateway.records import WorkflowNodeRunRecord, WorkflowRecord, WorkflowRunRecord
 
 # activate を許すノード種別（実装済み Phase のもののみ）。
 # 保存と lint は 13 種すべて通すが、実行できない種別を含むワークフローの有効化は
@@ -53,6 +53,19 @@ class WorkflowsRepository(Protocol):
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool: ...
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool: ...
 
+    # 実行（§16 設計 v0.2 §11 / P3）
+    def create_run(self, rec: WorkflowRunRecord) -> WorkflowRunRecord: ...
+    def get_run(self, tenant_id: str, run_id: str) -> Optional[WorkflowRunRecord]: ...
+    def list_runs(
+        self,
+        tenant_id: str,
+        workflow_id: str,
+        *,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[WorkflowRunRecord]: ...
+    def list_node_runs(self, tenant_id: str, run_id: str) -> list[WorkflowNodeRunRecord]: ...
+
     # §16.8: config 変更・有効化/停止は audit_logs へ（actor=human/agent）
     def record_audit(
         self,
@@ -68,6 +81,8 @@ class WorkflowsRepository(Protocol):
 class InMemoryWorkflowsRepository:
     def __init__(self) -> None:
         self._rows: dict[str, WorkflowRecord] = {}
+        self._runs: dict[str, WorkflowRunRecord] = {}
+        self._node_runs: dict[str, list[WorkflowNodeRunRecord]] = {}
         self._schemas: set[tuple[str, str]] = set()
         self._connections: set[tuple[str, str]] = set()
         self.audits: list[dict[str, Any]] = []
@@ -127,6 +142,37 @@ class InMemoryWorkflowsRepository:
 
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool:
         return (tenant_id, connection_id) in self._connections
+
+    # --- 実行（P3） ---
+    def create_run(self, rec: WorkflowRunRecord) -> WorkflowRunRecord:
+        self._runs[rec.id] = rec
+        return rec
+
+    def get_run(self, tenant_id: str, run_id: str) -> Optional[WorkflowRunRecord]:
+        r = self._runs.get(run_id)
+        return r if r and r.tenant_id == tenant_id else None
+
+    def list_runs(
+        self,
+        tenant_id: str,
+        workflow_id: str,
+        *,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[WorkflowRunRecord]:
+        rows = [
+            r
+            for r in self._runs.values()
+            if r.tenant_id == tenant_id
+            and r.workflow_id == workflow_id
+            and (status is None or r.status == status)
+        ]
+        return sorted(rows, key=lambda r: r.started_at or "", reverse=True)[:limit]
+
+    def list_node_runs(self, tenant_id: str, run_id: str) -> list[WorkflowNodeRunRecord]:
+        if self.get_run(tenant_id, run_id) is None:
+            return []
+        return list(self._node_runs.get(run_id, []))
 
     def record_audit(
         self,

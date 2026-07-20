@@ -51,6 +51,7 @@ from newfan_gateway.records import (
     RunRecord,
     SchemaFieldDef,
     WorkflowRecord,
+    WorkflowRunRecord,
 )
 from newfan_gateway.repository import Repository
 from newfan_ingest import IngestError, UploadInput
@@ -547,6 +548,126 @@ def put_schema(
     fields = [SchemaFieldDef(**f.model_dump()) for f in body.fields]
     rec = admin.put_schema(principal.tenant_id, body.doc_type, fields)  # 常に新版
     return _schema_dto(rec)
+
+
+# ---------- ワークフロー実行（§16 設計 v0.2 §11 / P3） ----------
+
+WORKFLOW_STREAM = "q.workflow"
+
+
+def _run_summary(rec: WorkflowRunRecord) -> dto.WorkflowRunSummaryDto:
+    return dto.WorkflowRunSummaryDto(
+        id=rec.id,
+        workflow_id=rec.workflow_id,
+        workflow_version=rec.workflow_version,
+        document_id=rec.document_id,
+        status=rec.status,
+        error=rec.error,
+        started_at=rec.started_at,
+        finished_at=rec.finished_at,
+    )
+
+
+@router.post(
+    "/workflows/{workflow_id}/runs", status_code=202, response_model=dto.WorkflowRunAccepted
+)
+def start_workflow_run(
+    workflow_id: str,
+    body: dto.WorkflowRunRequest,
+    principal: Principal = Depends(require_role("uploader")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+    repo: Repository = Depends(get_repo),
+    queue: Queue = Depends(get_queue),
+) -> dto.WorkflowRunAccepted:
+    """手動実行（source.manual, §7.1）。UI アップロード起点・API 起点の両方がこれに乗る。"""
+    rec = wf.get_workflow(principal.tenant_id, workflow_id)
+    if rec is None:
+        raise ApiError("E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id})
+    if rec.status != "active":
+        # 有効化＝版の固定（§11.1）。draft のまま動かすと「編集途中の定義が走る」事故になる
+        raise ApiError(
+            "E1005", "active でないワークフローは実行できません", details={"status": rec.status}
+        )
+    _require_document(repo, principal.tenant_id, body.document_id)
+
+    run = wf.create_run(
+        WorkflowRunRecord(
+            id=new_id("wfrun"),
+            tenant_id=principal.tenant_id,
+            workflow_id=workflow_id,
+            workflow_version=rec.version,
+            document_id=body.document_id,
+            # graph_json のスナップショットで版を固定する（§11.1）。以後 workflows 側が
+            # 更新されても、この run は開始時点の定義で最後まで走る
+            trigger={"type": "manual", "by": principal.sub, "graph_json": rec.graph_json},
+        )
+    )
+    queue.enqueue(
+        WORKFLOW_STREAM,
+        {"type": "start", "tenant_id": principal.tenant_id, "workflow_run_id": run.id},
+    )
+    return dto.WorkflowRunAccepted(workflow_run_id=run.id, workflow_version=rec.version)
+
+
+@router.get("/workflows/{workflow_id}/runs", response_model=dto.WorkflowRunList)
+def list_workflow_runs(
+    workflow_id: str,
+    status: Optional[str] = None,
+    limit: int = 50,
+    principal: Principal = Depends(require_role("viewer")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.WorkflowRunList:
+    rows = wf.list_runs(principal.tenant_id, workflow_id, status=status, limit=min(limit, 200))
+    return dto.WorkflowRunList(items=[_run_summary(r) for r in rows])
+
+
+@router.get("/workflow-runs/{run_id}", response_model=dto.WorkflowRunDto)
+def get_workflow_run(
+    run_id: str,
+    principal: Principal = Depends(require_role("viewer")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.WorkflowRunDto:
+    rec = wf.get_run(principal.tenant_id, run_id)
+    if rec is None:
+        raise ApiError("E1001", "workflow run が見つかりません", details={"run_id": run_id})
+    node_runs = wf.list_node_runs(principal.tenant_id, run_id)
+    return dto.WorkflowRunDto(
+        **_run_summary(rec).model_dump(),
+        waiting=(rec.state or {}).get("waiting"),
+        node_runs=[dto.WorkflowNodeRunDto(**n.model_dump()) for n in node_runs],
+    )
+
+
+@router.post("/workflow-runs/{run_id}/retry", status_code=202, response_model=dto.WorkflowRunAccepted)
+def retry_workflow_run(
+    run_id: str,
+    principal: Principal = Depends(require_role("admin")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+    queue: Queue = Depends(get_queue),
+) -> dto.WorkflowRunAccepted:
+    """失敗セグメントからの再実行（§6.5）。checkpoint から続きが走り、完了済みノードは
+    再実行されない（実測済みの再実行境界）。"""
+    rec = wf.get_run(principal.tenant_id, run_id)
+    if rec is None:
+        raise ApiError("E1001", "workflow run が見つかりません", details={"run_id": run_id})
+    if rec.status != "failed":
+        raise ApiError(
+            "E1005", "failed でない run は retry できません", details={"status": rec.status}
+        )
+    queue.enqueue(
+        WORKFLOW_STREAM,
+        {"type": "retry", "tenant_id": principal.tenant_id, "workflow_run_id": run_id},
+    )
+    wf.record_audit(
+        principal.tenant_id,
+        actor_id=principal.sub,
+        action="workflow.retry",
+        target_id=run_id,
+        detail={"workflow_id": rec.workflow_id},
+    )
+    return dto.WorkflowRunAccepted(
+        workflow_run_id=run_id, workflow_version=rec.workflow_version
+    )
 
 
 # ---------- ワークフロー管理（§16 設計 v0.2 §11 / P2） ----------

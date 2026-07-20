@@ -25,6 +25,8 @@ from newfan_metrics.registry import (
     run_duration_seconds,
     stp_rate,
     webhook_delivery_failures_total,
+    workflow_node_duration_seconds,
+    workflow_runs_total,
 )
 
 __all__ = [
@@ -44,4 +46,6 @@ __all__ = [
     "rule_auto_apply_total",
     "review_time_seconds",
     "webhook_delivery_failures_total",
+    "workflow_node_duration_seconds",
+    "workflow_runs_total",
 ]

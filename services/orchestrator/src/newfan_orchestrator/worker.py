@@ -32,11 +32,43 @@ class ExtractionWorker:
         consumer: QueueConsumer,
         *,
         webhook: Optional[WebhookFn] = None,
+        enqueue: Optional[Callable[[str, dict[str, Any]], None]] = None,
     ) -> None:
         self._graph = graph
         self._store = store
         self._consumer = consumer
         self._webhook = webhook
+        self._enqueue = enqueue
+
+    def _notify(self, payload: dict[str, Any], status: str) -> None:
+        """ジョブ payload に notify 先が書かれていたら、完了をそこへ積む（§16 設計 v0.2 §6.3）。
+
+        ワークフロー層はこれで抽出の完了を受けて resume する。ワーカーは
+        「指定された stream に完了を書く」ことしか知らず、ワークフローの概念は
+        持ち込まない（DD-11）。顧客向け webhook（§6.4、失敗や再送がある）には
+        内部制御を乗せない。
+        """
+        notify = payload.get("notify")
+        if not notify or self._enqueue is None:
+            return
+        try:
+            self._enqueue(
+                notify["stream"],
+                {
+                    "type": "resume",
+                    "tenant_id": payload["tenant_id"],
+                    "workflow_run_id": notify["workflow_run_id"],
+                    "event": {
+                        "kind": "confirm_done" if "resume" in payload else "extract_done",
+                        "run_id": payload["run_id"],
+                        "status": status,
+                    },
+                },
+            )
+        except Exception:  # noqa: BLE001 - notify の失敗で抽出そのものを落とさない
+            logger.exception(
+                "[worker] 完了 notify の enqueue に失敗: run_id=%s", payload.get("run_id")
+            )
 
     def _job(self, payload: dict[str, Any], status: str, error_code: Optional[str] = None) -> None:
         """jobs.status を進める。§6.3 の API はクライアントが GET /jobs/{id} を polling して
@@ -74,6 +106,7 @@ class ExtractionWorker:
 
             self._graph.invoke(Command(resume=payload.get("resume") or {}), config)
             self._job(payload, "succeeded")
+            self._notify(payload, "confirmed")
             return "confirmed"
 
         self._graph.invoke({"run_id": run_id, "tenant_id": tenant_id}, config)
@@ -97,8 +130,10 @@ class ExtractionWorker:
             # ジョブとしては成功。needs_review は「人の確認待ち」であって失敗ではない
             # （§4.4 の interrupt。ここを failed にすると再配信されて二重実行になる）。
             self._job(payload, "succeeded")
+            self._notify(payload, "needs_review")
             return "needs_review"
         self._job(payload, "succeeded")
+        self._notify(payload, "confirmed")
         return "confirmed"  # finalize が confirmed 保存＋q.export enqueue 済み
 
     def run_once(self, *, count: int = 10) -> int:

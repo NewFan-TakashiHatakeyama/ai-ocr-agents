@@ -37,6 +37,9 @@ EXPECTED_TYPES = {
     "rule_auto_apply_total": "counter",
     "review_time_seconds": "histogram",
     "webhook_delivery_failures_total": "counter",
+    # §16.8（ワークフロー自動化層）
+    "workflow_runs_total": "counter",
+    "workflow_node_duration_seconds": "histogram",
 }
 
 # prometheus_client が自動で足す付随メトリクス。設計書の表には無いが実装都合で出る。

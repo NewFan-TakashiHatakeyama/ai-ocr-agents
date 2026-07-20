@@ -71,6 +71,17 @@ review_time_seconds = Histogram(
 webhook_delivery_failures_total = Counter(
     "webhook_delivery_failures_total", "webhook 配信失敗数", ["tenant"], registry=REGISTRY
 )
+workflow_runs_total = Counter(
+    "workflow_runs_total", "ワークフロー run 数（終端遷移で計上, §16.8）",
+    ["workflow", "status"], registry=REGISTRY,
+)
+workflow_node_duration_seconds = Histogram(
+    "workflow_node_duration_seconds",
+    "ワークフローノード所要（§16.8）",
+    ["type"],
+    buckets=_LATENCY_BUCKETS,
+    registry=REGISTRY,
+)
 
 
 def render_latest() -> bytes:

@@ -23,7 +23,9 @@ from newfan_gateway.records import (
     JobRecord,
     PageRecord,
     RunRecord,
+    WorkflowNodeRunRecord,
     WorkflowRecord,
+    WorkflowRunRecord,
 )
 from newfan_schemas import ExtractedField, TableResult
 
@@ -793,3 +795,96 @@ class PgWorkflowsRepository:
                     "d": json.dumps(detail, ensure_ascii=False),
                 },
             )
+
+    # --- 実行（§16 設計 v0.2 §11 / P3） ---
+
+    def create_run(self, rec):
+        with self._engine.begin() as c:
+            self._rls(c, rec.tenant_id)
+            c.execute(
+                text(
+                    "INSERT INTO workflow_runs (id, tenant_id, workflow_id, workflow_version,"
+                    " trigger, document_id, state, status)"
+                    " VALUES (:i,:t,:w,:v, CAST(:tr AS jsonb), :d, '{}'::jsonb, 'running')"
+                ),
+                {
+                    "i": rec.id,
+                    "t": rec.tenant_id,
+                    "w": rec.workflow_id,
+                    "v": rec.workflow_version,
+                    "tr": json.dumps(rec.trigger, ensure_ascii=False),
+                    "d": rec.document_id,
+                },
+            )
+        return self.get_run(rec.tenant_id, rec.id)
+
+    @staticmethod
+    def _run_record(r) -> WorkflowRunRecord:
+        return WorkflowRunRecord(
+            id=r["id"],
+            tenant_id=r["tenant_id"],
+            workflow_id=r["workflow_id"],
+            workflow_version=r["workflow_version"],
+            document_id=r["document_id"],
+            # trigger には graph_json スナップショット（版固定, §11.1）が入っており大きい。
+            # API 応答には出さない（dto 層で落とす）が、record としては保持する
+            trigger=r["trigger"] or {},
+            state=r["state"] or {},
+            status=r["status"],
+            error=r["error"],
+            started_at=r["started_at"].isoformat() if r["started_at"] else None,
+            finished_at=r["finished_at"].isoformat() if r["finished_at"] else None,
+        )
+
+    def get_run(self, tenant_id: str, run_id: str):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "SELECT id, tenant_id, workflow_id, workflow_version, document_id,"
+                    " trigger, state, status, error, started_at, finished_at"
+                    " FROM workflow_runs WHERE tenant_id=:t AND id=:i"
+                ),
+                {"t": tenant_id, "i": run_id},
+            ).mappings().first()
+        return self._run_record(r) if r else None
+
+    def list_runs(self, tenant_id: str, workflow_id: str, *, status=None, limit=50):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT id, tenant_id, workflow_id, workflow_version, document_id,"
+                    " trigger, state, status, error, started_at, finished_at"
+                    " FROM workflow_runs WHERE tenant_id=:t AND workflow_id=:w"
+                    " AND (CAST(:s AS text) IS NULL OR status=CAST(:s AS text))"
+                    " ORDER BY started_at DESC LIMIT :n"
+                ),
+                {"t": tenant_id, "w": workflow_id, "s": status, "n": limit},
+            ).mappings().all()
+        return [self._run_record(r) for r in rows]
+
+    def list_node_runs(self, tenant_id: str, run_id: str):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT node_id, node_type, status, attempt, output, error,"
+                    " started_at, finished_at FROM workflow_node_runs"
+                    " WHERE tenant_id=:t AND workflow_run_id=:r ORDER BY started_at NULLS LAST"
+                ),
+                {"t": tenant_id, "r": run_id},
+            ).mappings().all()
+        return [
+            WorkflowNodeRunRecord(
+                node_id=r["node_id"],
+                node_type=r["node_type"],
+                status=r["status"],
+                attempt=r["attempt"],
+                output=r["output"],
+                error=r["error"],
+                started_at=r["started_at"].isoformat() if r["started_at"] else None,
+                finished_at=r["finished_at"].isoformat() if r["finished_at"] else None,
+            )
+            for r in rows
+        ]

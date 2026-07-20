@@ -12,6 +12,8 @@ dependencies = [
     "newfan-llm-adapter",
     "newfan-memory",
     "newfan-metrics",
+    "newfan-workflow",
+    "newfan-export",
 ]
 
 [project.optional-dependencies]

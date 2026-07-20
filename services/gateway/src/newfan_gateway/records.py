@@ -124,6 +124,33 @@ class WorkflowRecord(BaseModel):
     updated_at: Optional[str] = None
 
 
+class WorkflowRunRecord(BaseModel):
+    """workflow_runs 行（§16 設計 v0.2 §3）。trigger.graph_json が実行時の版スナップショット。"""
+
+    id: str
+    tenant_id: str
+    workflow_id: str
+    workflow_version: int = 1
+    document_id: Optional[str] = None
+    trigger: dict[str, Any] = Field(default_factory=dict)
+    state: dict[str, Any] = Field(default_factory=dict)
+    status: str = "running"
+    error: Optional[dict[str, Any]] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
+class WorkflowNodeRunRecord(BaseModel):
+    node_id: str
+    node_type: str
+    status: str = "pending"
+    attempt: int = 0
+    output: Optional[dict[str, Any]] = None
+    error: Optional[dict[str, Any]] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
 class ConnectionRecord(BaseModel):
     """connections 行（§6.4 Webhook / §16.5 接続管理）。
 

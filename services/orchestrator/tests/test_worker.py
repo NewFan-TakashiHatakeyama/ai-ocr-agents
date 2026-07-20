@@ -194,3 +194,53 @@ def test_job_idの無いpayloadでも落ちない() -> None:
     worker, store, _, _ = _build(conf=0.99)
     assert worker.process({"run_id": "run_1", "tenant_id": "ten_1"}) == "confirmed"
     assert store.job_status("job_1") is None
+
+
+# --- 完了 notify（§16 設計 v0.2 §6.3。ワークフロー層の resume 契機） ---
+
+
+def _build_with_notify(conf: float):  # noqa: ANN202
+    worker, store, exports, webhooks = _build(conf=conf)
+    notified: list[tuple[str, dict]] = []
+    worker._enqueue = lambda stream, msg: notified.append((stream, msg))  # noqa: SLF001
+    return worker, notified
+
+
+def test_notify指定があれば完了をそのstreamへ積む() -> None:
+    worker, notified = _build_with_notify(conf=0.99)
+    payload = {
+        "run_id": "run_1",
+        "tenant_id": "ten_1",
+        "notify": {"stream": "q.workflow", "workflow_run_id": "wfrun_9"},
+    }
+    assert worker.process(payload) == "confirmed"
+    assert notified == [
+        (
+            "q.workflow",
+            {
+                "type": "resume",
+                "tenant_id": "ten_1",
+                "workflow_run_id": "wfrun_9",
+                "event": {"kind": "extract_done", "run_id": "run_1", "status": "confirmed"},
+            },
+        )
+    ]
+
+
+def test_needs_reviewでもnotifyされる() -> None:
+    # ワークフロー側は needs_review を分岐条件（run.status）に使う。届かないと
+    # run が永久に await_extract のまま残る。
+    worker, notified = _build_with_notify(conf=0.78)
+    payload = {
+        "run_id": "run_1",
+        "tenant_id": "ten_1",
+        "notify": {"stream": "q.workflow", "workflow_run_id": "wfrun_9"},
+    }
+    assert worker.process(payload) == "needs_review"
+    assert notified[0][1]["event"]["status"] == "needs_review"
+
+
+def test_notifyが無ければ何も積まない() -> None:
+    worker, notified = _build_with_notify(conf=0.99)
+    worker.process({"run_id": "run_1", "tenant_id": "ten_1"})
+    assert notified == []
