@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "nodes": [
+    {"id": "t1", "type": "source.manual", "config": {}},
+    {"id": "x1", "type": "process.extract", "config": {"schema_id": "sch_inv"}},
+    {"id": "b1", "type": "branch.condition", "config": {"branches": [{"when": "run.status == 'needs_review'", "to": "h1"}], "else": "m1"}},
+    {"id": "h1", "type": "branch.hitl_gate", "config": {}},
+    {"id": "m1", "type": "transform.map_fields", "config": {"mappings": [{"from": "total_amount", "to": "amount"}]}},
+    {"id": "s1", "type": "sink.webhook", "config": {"connection_id": "con_hook"}}
+  ],
+  "edges": [
+    {"from": "t1", "to": "x1"},
+    {"from": "x1", "to": "b1"},
+    {"from": "h1", "to": "m1"},
+    {"from": "m1", "to": "s1"}
+  ]
+}
