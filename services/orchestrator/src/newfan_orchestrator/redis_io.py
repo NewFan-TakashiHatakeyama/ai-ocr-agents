@@ -34,11 +34,31 @@ class RedisStreamConsumer:
         except Exception:  # noqa: BLE001 - 既存グループは無視
             pass
 
+    # 死んだ consumer の PEL を引き取るまでの猶予。ack 前にタスクが落ちたメッセージは
+    # その consumer の PEL に残り、xreadgroup(">") では**誰にも再配信されない**。
+    # ECS はデプロイのたびにタスク（= consumer 名）が変わるため、autoclaim が無いと
+    # 未 ack のメッセージがデプロイを跨いで永久に滞留する（実 AWS の E2E で検出）。
+    CLAIM_IDLE_MS = 60_000
+
     def consume(self, *, count: int = 1, block_ms: int = 1000) -> list[tuple[str, dict[str, Any]]]:
+        out: list[tuple[str, dict[str, Any]]] = []
+
+        try:
+            claimed = self._redis.xautoclaim(
+                self._stream, self._group, self._consumer,
+                min_idle_time=self.CLAIM_IDLE_MS, start_id="0-0", count=count,
+            )
+            # redis-py: (next_start_id, messages) または (next, messages, deleted)
+            messages = claimed[1] if isinstance(claimed, (list, tuple)) and len(claimed) >= 2 else []
+            for msg_id, data in messages:
+                payload = json.loads(data[b"payload"])
+                out.append((msg_id.decode() if isinstance(msg_id, bytes) else msg_id, payload))
+        except Exception:  # noqa: BLE001 - autoclaim 失敗で新規消費まで止めない
+            pass
+
         resp = self._redis.xreadgroup(
             self._group, self._consumer, {self._stream: ">"}, count=count, block=block_ms
         )
-        out: list[tuple[str, dict[str, Any]]] = []
         for _stream, messages in resp or []:
             for msg_id, data in messages:
                 payload = json.loads(data[b"payload"])

@@ -216,9 +216,14 @@ class PgWorkflowRunStore:
             self._rls(c, tenant_id)
             row = c.execute(
                 text(
+                    # FOR **NO KEY** UPDATE であること。FOR UPDATE にすると、ロック保持中の
+                    # workflow_node_runs INSERT（別トランザクション）が FK 検査で参照行の
+                    # FOR KEY SHARE を取れず、自分のロックを待って**永久に固まる**
+                    # （実 AWS で最初の E2E がこれで停止した）。NO KEY UPDATE は
+                    # KEY SHARE と競合せず、runner 同士の相互排他はそのまま保たれる。
                     "SELECT id, workflow_id, workflow_version, document_id, trigger, status"
                     " FROM workflow_runs WHERE tenant_id=:t AND id=:r"
-                    " FOR UPDATE SKIP LOCKED"
+                    " FOR NO KEY UPDATE SKIP LOCKED"
                 ),
                 {"t": tenant_id, "r": workflow_run_id},
             ).mappings().first()

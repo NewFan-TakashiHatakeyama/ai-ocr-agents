@@ -112,10 +112,16 @@ class WorkflowRunner:
         if typ == "start":
             snapshot = app.get_state(config)
             if snapshot.next or (snapshot.values or {}):
-                # start の再配信（ack 前クラッシュ）。invoke し直すと最初から
-                # 走り直してしまうため、現在の checkpoint から射影だけ合わせる。
-                logger.info("[workflow] start 重複を無視（開始済み）: %s", locked.workflow_run_id)
-                return self._result_from_snapshot(snapshot)
+                # start の再配信（ack 前クラッシュ）。invoke し直すと最初から走り直すため、
+                # interrupt 待ちなら射影だけ合わせ、superstep 間で落ちていた場合
+                # （checkpoint あり・interrupt なし・next あり）は checkpoint から続きを走らせる。
+                logger.info("[workflow] start 重複（開始済み）: %s", locked.workflow_run_id)
+                resumed = self._result_from_snapshot(snapshot)
+                if resumed is not None and "__interrupt__" in resumed:
+                    return resumed
+                if snapshot.next:
+                    return app.invoke(None, config)
+                return resumed
             init: dict[str, Any] = {
                 "workflow_run_id": locked.workflow_run_id,
                 "tenant_id": locked.tenant_id,

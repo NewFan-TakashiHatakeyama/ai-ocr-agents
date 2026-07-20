@@ -114,6 +114,56 @@ def test_saverを作り直してもresumeでき再実行境界が保たれる() 
     assert counters["gate_pre_interrupt"] == 2
 
 
+def test_lock_run保持中でもnode_run_startがブロックしない() -> None:
+    """実 AWS で踏んだ自己ブロックの回帰。
+
+    lock_run が FOR UPDATE だと、保持中の workflow_node_runs INSERT（別トランザクション）が
+    FK 検査（参照行の FOR KEY SHARE）で自分のロックを待って永久に固まる。
+    FOR NO KEY UPDATE は KEY SHARE と競合しないため通る。
+    """
+    import threading
+
+    from sqlalchemy import create_engine, text
+
+    from newfan_orchestrator.workflow_store import PgWorkflowRunStore
+
+    owner = create_engine(_DSN, future=True)  # type: ignore[arg-type]
+    tenant = "ten_wf_lock"
+    wf_id = f"workflow_{uuid.uuid4().hex[:12]}"
+    run_id = f"wfrun_{uuid.uuid4().hex[:12]}"
+    with owner.begin() as c:
+        c.execute(text("INSERT INTO tenants (id,name) VALUES (:t,'x') ON CONFLICT DO NOTHING"),
+                  {"t": tenant})
+        c.execute(text(
+            "INSERT INTO workflows (id, tenant_id, name, graph_json) VALUES (:w,:t,'wf','{}')"),
+            {"w": wf_id, "t": tenant})
+        c.execute(text(
+            "INSERT INTO workflow_runs (id, tenant_id, workflow_id, workflow_version, trigger)"
+            " VALUES (:r,:t,:w,1,'{}')"), {"r": run_id, "t": tenant, "w": wf_id})
+
+    store = PgWorkflowRunStore(_DSN, enqueue=lambda s, m: None)  # type: ignore[arg-type]
+    done = threading.Event()
+
+    def insert_node_run() -> None:
+        store.node_run_start(tenant, run_id, "x1", "process.extract")
+        done.set()
+
+    try:
+        with store.lock_run(tenant, run_id) as locked:
+            assert locked is not None
+            t = threading.Thread(target=insert_node_run, daemon=True)
+            t.start()
+            # FOR UPDATE だとここが永久に待つ（10 秒で検知して失敗させる）
+            assert done.wait(timeout=10), "node_run_start が run 行ロックでブロックした"
+            locked.update(status="running", waiting=None)
+    finally:
+        with owner.begin() as c:
+            c.execute(text("DELETE FROM workflow_node_runs WHERE workflow_run_id=:r"), {"r": run_id})
+            c.execute(text("DELETE FROM workflow_runs WHERE id=:r"), {"r": run_id})
+            c.execute(text("DELETE FROM workflows WHERE id=:w"), {"w": wf_id})
+            c.execute(text("DELETE FROM tenants WHERE id=:t"), {"t": tenant})
+
+
 def test_非所有ロールでcheckpointを読み書きできる() -> None:
     # RLS 運用（§7.3）でアプリは newfan_app 相当の非所有ロールになる。
     # CI/ローカルにも同条件のロールを作って PostgresSaver が動くことを固定する。
