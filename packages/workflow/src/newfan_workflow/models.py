@@ -28,13 +28,20 @@ class _Cfg(BaseModel):
 # ---------- トリガー（source.*） ----------
 
 
-class FolderWatchConfig(_Cfg):
+class S3EventConfig(_Cfg):
+    """S3 イベント駆動トリガー（設計 v0.2 §7.2）。
+
+    ポーリングはしない。S3 → EventBridge → SQS（保持 14 日）→ trigger consumer の
+    経路で発火し、環境停止中のイベントは SQS に溜まって up 時に drain される。
+    v0.1 の source.folder_watch（interval_sec ポーリング常駐）は「使う時だけ up」
+    運用と両立しないため廃止した。
+    """
+
     connection_id: str = Field(min_length=1)
-    path: str = Field(min_length=1)
+    prefix: str = Field(min_length=1)
     extensions: list[str] = Field(
         default_factory=lambda: [".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"]
     )
-    interval_sec: int = Field(default=60, ge=10, le=3600)
 
     @field_validator("extensions")
     @classmethod
@@ -193,9 +200,9 @@ class _NodeBase(BaseModel):
     pos: Optional[tuple[float, float]] = None  # UI 専用。実行エンジンは無視する
 
 
-class FolderWatchNode(_NodeBase):
-    type: Literal["source.folder_watch"]
-    config: FolderWatchConfig
+class S3EventNode(_NodeBase):
+    type: Literal["source.s3_event"]
+    config: S3EventConfig
 
 
 class EmailAttachmentNode(_NodeBase):
@@ -260,7 +267,7 @@ class NotifyNode(_NodeBase):
 
 WorkflowNode = Annotated[
     Union[
-        FolderWatchNode,
+        S3EventNode,
         EmailAttachmentNode,
         ManualNode,
         ScheduleNode,
@@ -329,7 +336,7 @@ def is_sink(node: WorkflowNode) -> bool:
 # ノード種別 → config モデル。SCR-07 の設定フォームはこの JSON Schema から
 # 自動生成する（13 種を手書きすると UI の工数がエンジンを超える）。
 NODE_CONFIG_MODELS: dict[str, type[BaseModel]] = {
-    "source.folder_watch": FolderWatchConfig,
+    "source.s3_event": S3EventConfig,
     "source.email_attachment": EmailAttachmentConfig,
     "source.manual": ManualConfig,
     "source.schedule": ScheduleConfig,

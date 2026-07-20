@@ -18,8 +18,8 @@ CLEAN: dict[str, Any] = {
     "nodes": [
         {
             "id": "t1",
-            "type": "source.folder_watch",
-            "config": {"connection_id": "con_s3", "path": "invoices/"},
+            "type": "source.s3_event",
+            "config": {"connection_id": "con_s3", "prefix": "invoices/"},
         },
         {"id": "x1", "type": "process.extract", "config": {"schema_id": "sch_inv"}},
         {

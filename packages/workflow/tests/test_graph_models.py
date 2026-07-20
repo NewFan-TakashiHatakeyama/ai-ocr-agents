@@ -19,8 +19,8 @@ VALID: dict[str, Any] = {
     "nodes": [
         {
             "id": "n1",
-            "type": "source.folder_watch",
-            "config": {"connection_id": "con_s3", "path": "invoices/", "interval_sec": 60},
+            "type": "source.s3_event",
+            "config": {"connection_id": "con_s3", "prefix": "invoices/"},
             "pos": [16, 100],
         },
         {"id": "n3", "type": "process.extract", "config": {"schema_id": "sch_invoice_v4"}},
