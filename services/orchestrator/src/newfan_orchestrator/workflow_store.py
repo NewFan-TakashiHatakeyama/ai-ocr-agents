@@ -333,8 +333,13 @@ class PgWorkflowRunStore:
             job_id = f"job_{uuid.uuid4().hex[:24]}"
             c.execute(
                 text(
+                    # engine_versions は NOT NULL で DEFAULT が無い（DDL）。gateway 経由の
+                    # 抽出は ORM 側の default が埋めるが、直接 INSERT では明示が要る
+                    # （省略すると NotNullViolation。実 AWS の E2E で検出）。実際の版は
+                    # ワーカーが実行時に確定するため、ここでは空で作る。
                     "INSERT INTO extraction_runs (id, tenant_id, document_id, schema_id,"
-                    " status, options) VALUES (:r,:t,:d,:s,'processing', CAST(:o AS jsonb))"
+                    " status, engine_versions, options)"
+                    " VALUES (:r,:t,:d,:s,'processing','{}'::jsonb, CAST(:o AS jsonb))"
                 ),
                 {
                     "r": run_id,

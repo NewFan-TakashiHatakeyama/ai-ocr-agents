@@ -164,6 +164,51 @@ def test_lock_run保持中でもnode_run_startがブロックしない() -> None
             c.execute(text("DELETE FROM tenants WHERE id=:t"), {"t": tenant})
 
 
+def test_ensure_extract_runは実DDLに対して冪等に動く() -> None:
+    """実 DDL への INSERT の回帰。engine_versions が NOT NULL（DEFAULT なし）で、
+    省略すると NotNullViolation になる（実 AWS の E2E で検出）。冪等キーの再利用も固定する。
+    """
+    from sqlalchemy import create_engine, text
+
+    from newfan_orchestrator.workflow_store import PgWorkflowRunStore
+
+    owner = create_engine(_DSN, future=True)  # type: ignore[arg-type]
+    tenant = "ten_wf_ext"
+    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+    with owner.begin() as c:
+        c.execute(text("INSERT INTO tenants (id,name) VALUES (:t,'x') ON CONFLICT DO NOTHING"),
+                  {"t": tenant})
+        c.execute(text(
+            "INSERT INTO documents (id, tenant_id, storage_uri, mime_type, page_count, status)"
+            " VALUES (:d,:t,'s3://x','image/png',1,'uploaded')"), {"d": doc_id, "t": tenant})
+
+    enqueued: list[dict[str, Any]] = []
+    store = PgWorkflowRunStore(  # type: ignore[arg-type]
+        _DSN, enqueue=lambda s, m: enqueued.append({"stream": s, **m})
+    )
+    try:
+        notify = {"stream": "q.workflow", "workflow_run_id": "wfrun_x"}
+        r1 = store.ensure_extract_run(tenant, doc_id, None, {"force_vl": False},
+                                      "wfrun_x:x1", notify)
+        r2 = store.ensure_extract_run(tenant, doc_id, None, {"force_vl": False},
+                                      "wfrun_x:x1", notify)
+        assert r1 == r2, "冪等キーが効いていない（二重 Run）"
+        assert len(enqueued) == 1
+        assert enqueued[0]["notify"] == notify
+        with owner.begin() as c:
+            row = c.execute(text(
+                "SELECT engine_versions, options->>'workflow_idem', status FROM extraction_runs"
+                " WHERE id=:r"), {"r": r1}).first()
+        assert row is not None
+        assert row[1] == "wfrun_x:x1"
+    finally:
+        with owner.begin() as c:
+            c.execute(text("DELETE FROM jobs WHERE tenant_id=:t"), {"t": tenant})
+            c.execute(text("DELETE FROM extraction_runs WHERE tenant_id=:t"), {"t": tenant})
+            c.execute(text("DELETE FROM documents WHERE id=:d"), {"d": doc_id})
+            c.execute(text("DELETE FROM tenants WHERE id=:t"), {"t": tenant})
+
+
 def test_非所有ロールでcheckpointを読み書きできる() -> None:
     # RLS 運用（§7.3）でアプリは newfan_app 相当の非所有ロールになる。
     # CI/ローカルにも同条件のロールを作って PostgresSaver が動くことを固定する。
