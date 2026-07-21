@@ -139,6 +139,9 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}
+      # sink.db_write のローカル用秘密（secret_ref "env:SINK_DB_PASSWORD" が読む。
+      # AWS では Secrets Manager を使うためこの変数は使われない）
+      SINK_DB_PASSWORD: ${SINK_DB_PASSWORD:-}
     volumes:
       - appdata:/data
     depends_on:

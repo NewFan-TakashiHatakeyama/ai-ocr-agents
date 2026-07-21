@@ -203,3 +203,13 @@ def test_mapを迂回した経路ではfieldsにfallbackせず失敗する() -> 
     assert _run_to_end(runner, store) == "failed"
     assert writer.calls == []
     assert "map_fields" in store.runs["wfrun_d"]["error"]["message"]
+
+
+def test_resolverはenvスキームをローカル解決する(monkeypatch: pytest.MonkeyPatch) -> None:
+    from newfan_orchestrator.aws_secrets import SecretsManagerResolver
+
+    monkeypatch.setenv("X_SINK_PW", "pw123")
+    r = SecretsManagerResolver()
+    assert r("env:X_SINK_PW") == "pw123"
+    with pytest.raises(KeyError):
+        r("env:X_MISSING")
