@@ -126,15 +126,37 @@ XAUTOCLAIM で回収され、checkpoint から自動回復して完走した（d
 
 ---
 
-## P5: HITL ゲート
+## P5: HITL ゲート 【実装済み】
 
 - `branch.hitl_gate` ノード実装（needs_review のときのみ `interrupt({kind:"await_hitl"})`、
-  priority_boost をレビューキューへ）
-- 確定フロー完了時の notify は P3 の同一機構（ワーカー完了 notify）で発火するため、
-  **新規配線はノード実装のみ**
-- DoD: 実 AWS で needs_review → SCR-03 で確定 → ワークフローが下流継続
+  confirmed は素通り）。config（priority_boost/assignee_group/sla_hours）は interrupt
+  payload に載り、runner が workflow_runs.state 内の waiting として永続化 →
+  `/review/queue` が priority へ加点する
+- **計画の「新規配線はノード実装のみ」は誤りだった**: gateway confirm の再開ジョブに
+  notify が載っておらず（`extraction_runs.options.workflow_notify` は読み手ゼロの
+  デッドデータ）、confirm_done は一度も発火しない状態だった。confirm →
+  `OrchestratorClient.resume(..., notify=...)` の中継を実装（ports/prod/routers）
+- 敵対的レビューで critical 2 + minor 3 を検出し、critical と回復系を修正:
+  1. **extract_done の再配信 1 回で人手ゲートが素通りする**（waiting_hitl 中の再配信が
+     pending interrupt の戻り値に注入され、未確定値で webhook 発火 → 本物の
+     confirm_done は破棄）→ runner が await_hitl 待ちには confirm_done 以外を破棄
+  2. **`/review/queue` が Pg で常に 500**（存在しない waiting 列を参照。waiting は
+     state JSONB 内）→ `state->'waiting'->>'priority_boost'` へ修正 + 実 PG テスト
+  3. 終端済み run への resume / 完走済み checkpoint への resume が NotReady で
+     永久再配信（poison message）→ ack して破棄 / 射影を終端へ同期
+- 残課題（minor、P8 で扱う）: confirm の Idempotency-Key 必須化 or worker の
+  run 単位ロック（並行 worker での finalize 二重実行）/ ワークフローが待つ run と
+  別 run を confirm した場合の waiting_hitl 残留検知（§12 監視）
 
-規模: 小〜中（P3 の資産に乗る）。
+### DoD（2026-07-21 実 AWS で実測済み・達成）
+
+- S3 `ten_1/hitl/sample2.png` 配置 → 5 秒で run 開始 → 抽出 needs_review →
+  **waiting_hitl で停止**（webhook 発火なし）
+- `/review/queue` で該当帳票が **priority 25.0（boost 加点）で先頭**
+- `POST /documents/{id}/confirm` → **1.8 秒でワークフロー succeeded** →
+  webhook 配信 `{"amount": "7003", "source_system": "ai-ocr-hitl"}`（map_fields 経由の確定値）
+
+規模: 小〜中の想定だったが、notify 配線の欠落とレビュー検出バグで中。
 
 ---
 
