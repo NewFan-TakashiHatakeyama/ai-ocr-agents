@@ -46,6 +46,24 @@ HOURLY_FARGATE="0.5293" # gateway x2 + orchestrator + export + structure(4vCPU) 
 HOURLY_FIXED="0.2363"   # RDS + ElastiCache + NAT + ALB
 HOURLY_TOTAL="0.7656"
 
+# 依存コマンドの事前チェック。無いまま進むと set -e で「127 で無言に落ちる」ため、
+# 何が無いか・どう入れるかを先に言う。WSL の bash で実行した場合もここで検出される
+# （aws/uv は Windows 側にしか無いことが多い）。PowerShell からは scripts/aws_env.ps1 を使う。
+_require() {
+  local missing=()
+  local c
+  for c in "$@"; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "[aws_env] 必要なコマンドが見つかりません: ${missing[*]}" >&2
+    echo "  - Git Bash（Windows）から実行してください（WSL では PATH が異なります）" >&2
+    echo "  - PowerShell の場合: powershell -File scripts/aws_env.ps1 <command>" >&2
+    echo "  - aws: AWS CLI v2 / uv: https://docs.astral.sh/uv/ / terraform, docker も同様" >&2
+    exit 1
+  fi
+}
+
 tf() { (cd "$TF_DIR" && terraform "$@"); }
 
 _prefix() { (cd "$TF_DIR" && terraform output -raw cluster_name 2>/dev/null || echo "ai-ocr-production"); }
@@ -492,6 +510,14 @@ cmd_redrive() {
   aws sqs start-message-move-task --region "$REGION" --source-arn "$dlq_arn" >/dev/null     || { echo "[redrive] 失敗" >&2; return 1; }
   echo "[redrive] 開始しました。数十秒で反映されます（status で確認）。"
 }
+
+# コマンド別の依存（全部に docker を要求すると status すら打てなくなるため分ける）
+case "${1:-}" in
+  up|push) _require aws uv terraform docker ;;
+  down|pause|resume|vl-up|vl-down) _require aws uv terraform ;;
+  migrate|seed-schemas|probe-rls|probe-role|golden|sink-demo) _require aws uv terraform ;;
+  token|status|cost|vl-test|redrive) _require aws uv ;;
+esac
 
 case "${1:-}" in
   up)      cmd_up ;;
