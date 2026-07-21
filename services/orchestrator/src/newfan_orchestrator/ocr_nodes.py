@@ -78,8 +78,29 @@ def _backfill(spans: list[Span], image_bytes: bytes, ocr_client: OcrClient, thre
             s.text = res.rec_texts[bi]
             s.conf = new_conf
         wb = res.rec_word_boxes or res.text_word_boxes
-        if wb and all(isinstance(b, (list, tuple)) and len(b) == 4 for b in wb):
-            s.char_boxes = [[int(b[0]) + ox, int(b[1]) + oy, int(b[2]) + ox, int(b[3]) + oy] for b in wb]
+        rects = [_word_box_rect(b) for b in wb or []]
+        if rects and all(r is not None for r in rects):
+            s.char_boxes = [[r[0] + ox, r[1] + oy, r[2] + ox, r[3] + oy] for r in rects]  # type: ignore[index]
+
+
+def _word_box_rect(b: Any) -> Optional[list[int]]:
+    """word box を矩形 [x1,y1,x2,y2] に正規化する。
+
+    /ocr は矩形 [x1,y1,x2,y2] と 4 点ポリゴン [[x,y],...] の両形で返す。ポリゴン形は
+    len(b)==4 の矩形ガードを素通りして int([x,y]) で TypeError になり、ジョブが
+    ACK されず永久再配信になった（実 AWS の S3 トリガー E2E で検出）。crop 毎に
+    形が変わり得るため、どちらでも受けて外接矩形へ落とす。判別できない形は None。
+    """
+    if not isinstance(b, (list, tuple)) or len(b) != 4:
+        return None
+    if all(isinstance(v, (int, float)) for v in b):
+        return [int(b[0]), int(b[1]), int(b[2]), int(b[3])]
+    if all(isinstance(p, (list, tuple)) and len(p) == 2
+           and all(isinstance(v, (int, float)) for v in p) for p in b):
+        xs = [p[0] for p in b]
+        ys = [p[1] for p in b]
+        return [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
+    return None
 
 
 def file_uri_loader(uri: str) -> bytes:
