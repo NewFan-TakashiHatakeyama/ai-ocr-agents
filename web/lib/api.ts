@@ -1,6 +1,13 @@
 // gateway-api クライアント（§6）。認証トークンは dev では env、本番はログインフローで差し替える。
 
 import type {
+  CatalogDto,
+  DryRunResultDto,
+  LintResultDto,
+  WorkflowDto,
+  WorkflowGraphDto,
+  WorkflowListItemDto,
+  WorkflowRunItemDto,
   ChatConfirmResult,
   CorrectionItem,
   DocumentCreated,
@@ -137,6 +144,34 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ action, params }),
     }),
+
+  // ---------- §16 ワークフロー（SCR-07 / P7） ----------
+  workflowCatalog: () => request<CatalogDto>(`/workflows/catalog`),
+  listWorkflows: () => request<{ items: WorkflowListItemDto[] }>(`/workflows`),
+  getWorkflow: (id: string) => request<WorkflowDto>(`/workflows/${id}`),
+  createWorkflow: (name: string, graph: WorkflowGraphDto) =>
+    request<WorkflowDto>(`/workflows`, {
+      method: "POST",
+      body: JSON.stringify({ name, graph_json: graph }),
+    }),
+  putWorkflow: (id: string, name: string, graph: WorkflowGraphDto) =>
+    request<WorkflowDto>(`/workflows/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ name, graph_json: graph }),
+    }),
+  lintWorkflow: (id: string, graph?: WorkflowGraphDto) =>
+    request<LintResultDto>(`/workflows/${id}/lint`, {
+      method: "POST",
+      body: graph ? JSON.stringify({ graph_json: graph }) : undefined,
+    }),
+  dryRunWorkflow: (id: string) =>
+    request<DryRunResultDto>(`/workflows/${id}/dry-run`, { method: "POST" }),
+  activateWorkflow: (id: string) =>
+    request<WorkflowDto>(`/workflows/${id}/activate`, { method: "POST" }),
+  pauseWorkflow: (id: string) =>
+    request<WorkflowDto>(`/workflows/${id}/pause`, { method: "POST" }),
+  listWorkflowRuns: (id: string) =>
+    request<{ items: WorkflowRunItemDto[] }>(`/workflows/${id}/runs`),
 
   uploadDocument: (file: File, docType?: string) => {
     const fd = new FormData();

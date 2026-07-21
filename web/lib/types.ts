@@ -146,3 +146,80 @@ export interface MetricsResponse {
   field_accuracy_sampled?: number | null;
   llm_cost_jpy_total?: number | null;
 }
+
+// ---------- §16 ワークフロー（SCR-07 / P7） ----------
+
+export interface WorkflowNodeDto {
+  id: string;
+  type: string;
+  config: Record<string, unknown>;
+  pos?: [number, number] | null;
+}
+
+export interface WorkflowGraphDto {
+  version: number;
+  nodes: WorkflowNodeDto[];
+  edges: { from: string; to: string }[];
+}
+
+export interface WorkflowDto {
+  id: string;
+  name: string;
+  status: "draft" | "active" | "paused";
+  version: number;
+  auto_confirm: boolean;
+  updated_at?: string | null;
+  graph_json: WorkflowGraphDto;
+}
+
+export interface WorkflowListItemDto {
+  id: string;
+  name: string;
+  status: string;
+  version: number;
+  updated_at?: string | null;
+}
+
+export interface CatalogDto {
+  types: Record<string, Record<string, unknown>>; // node type -> JSON Schema
+  implemented: string[];
+}
+
+export interface LintFindingDto {
+  rule: string;
+  severity: "error" | "warning";
+  message: string;
+  node_id?: string | null;
+}
+
+export interface LintResultDto {
+  findings: LintFindingDto[];
+  activatable: boolean;
+  unsupported_types: string[];
+}
+
+export interface SinkPreviewDto {
+  node_id: string;
+  node_type: string;
+  ok: boolean;
+  connection_id: string;
+  sql?: string | null;
+  payload?: Record<string, unknown> | null;
+  columns: string[];
+  error?: string | null;
+}
+
+export interface DryRunResultDto {
+  ok: boolean;
+  sinks: SinkPreviewDto[];
+}
+
+export interface WorkflowRunItemDto {
+  id: string;
+  workflow_id: string;
+  workflow_version: number;
+  document_id?: string | null;
+  status: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}

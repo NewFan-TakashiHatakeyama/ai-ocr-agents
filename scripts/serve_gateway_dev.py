@@ -337,11 +337,24 @@ def main() -> None:
     print("DEV ADMIN TOKEN (管理画面 SCR-04/05/06 用):")
     print(admin_tok)
     print("=" * 60)
+    # SCR-07（ワークフローエディタ）用の seed。lint L009/L010 が通り activate まで
+    # ブラウザで確認できる状態にする（sch_inv + webhook/s3/postgres 接続）
+    from newfan_gateway.workflows_repo import InMemoryWorkflowsRepository
+
+    workflows = InMemoryWorkflowsRepository()
+    workflows.seed_schema_id("ten_1", "sch_inv")
+    for cid in ("con_hook", "con_inbox_s3", "con_erp"):
+        workflows.seed_connection("ten_1", cid)
+    admin.create_connection(
+        "ten_1", type="webhook", name="webhook.site",
+        config={"url": "https://example.com/hook"}, secret_ref=None, allowed_tables=[],
+    )
     app = create_app(
         settings=Settings(jwt_secret=SECRET, cors_origins=["*"]),
         repo=repo,
         api_keys=InMemoryApiKeyStore({}),
         admin=admin,
+        workflows=workflows,
     )
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
 

@@ -1585,3 +1585,88 @@ a {
   background: var(--chip, #f3f4f6);
   font-size: 11px;
 }
+
+/* ---------- SCR-07 ワークフロー（§16 P7） ---------- */
+.wf-list { display: flex; flex-direction: column; gap: 10px; padding: 16px; }
+.wf-card {
+  display: block; padding: 14px 16px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--panel); text-decoration: none; color: inherit;
+}
+.wf-card:hover { border-color: var(--accent); }
+.wf-card-head { display: flex; align-items: center; gap: 10px; }
+.wf-name { font-weight: 600; }
+.wf-card-sub { margin-top: 4px; font-size: 12px; color: var(--sub); }
+
+.wf-title-input {
+  font-size: 15px; font-weight: 600; border: 1px solid transparent; border-radius: 6px;
+  padding: 4px 8px; background: transparent; color: inherit; min-width: 220px;
+}
+.wf-title-input:hover, .wf-title-input:focus { border-color: var(--line); background: var(--panel); }
+
+.wf-editor {
+  display: grid; grid-template-columns: 200px 1fr 340px; gap: 0;
+  height: calc(100vh - 56px); min-height: 0;
+}
+.wf-palette { border-right: 1px solid var(--line); padding: 10px; overflow-y: auto; }
+.wf-pane-title { font-size: 12px; font-weight: 700; color: var(--sub); margin: 6px 0; }
+.wf-palette-cat { font-size: 11px; font-weight: 700; margin: 10px 0 4px; }
+.wf-palette-item {
+  display: block; width: 100%; text-align: left; font-size: 12px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+  margin-bottom: 4px; cursor: pointer; color: inherit;
+}
+.wf-palette-item:hover { border-color: var(--accent); }
+.wf-canvas { min-width: 0; }
+.wf-side { border-left: 1px solid var(--line); overflow-y: auto; padding: 10px; }
+.wf-config.empty { color: var(--sub); font-size: 12px; padding: 12px 4px; }
+
+.wfnode {
+  border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: 8px;
+  background: var(--panel); padding: 8px 12px; min-width: 150px; font-size: 12px;
+}
+.wfnode.sel { outline: 2px solid var(--accent); }
+.wfnode.bad { border-color: var(--ng, #d64545); box-shadow: 0 0 0 2px rgba(214, 69, 69, .35); }
+.wfnode-cat { font-size: 10px; font-weight: 700; display: flex; gap: 6px; align-items: center; }
+.wfnode-label { font-weight: 600; margin-top: 2px; }
+.wfnode-id { color: var(--sub); font-size: 10px; }
+.wfnode-todo {
+  font-size: 9px; padding: 1px 4px; border-radius: 4px;
+  background: var(--warn, #d98a1f); color: #fff;
+}
+
+.wf-findings { margin-top: 14px; }
+.wf-finding {
+  display: block; width: 100%; text-align: left; font-size: 12px; padding: 6px 8px;
+  border-radius: 6px; border: 1px solid var(--line); margin-bottom: 4px;
+  background: var(--panel); cursor: pointer; color: inherit;
+}
+.wf-finding.error { border-left: 3px solid var(--ng, #d64545); }
+.wf-finding.warning { border-left: 3px solid var(--warn, #d98a1f); }
+.wf-sql {
+  margin: 6px 0 0; padding: 6px; font-size: 11px; white-space: pre-wrap;
+  word-break: break-all; background: var(--bg); border-radius: 6px;
+}
+
+/* rjsf の素の HTML をデザインシステムへ寄せる */
+.wf-config form { font-size: 12px; }
+.wf-config fieldset { border: none; padding: 0; margin: 0; }
+.wf-config legend { font-weight: 700; font-size: 12px; margin: 8px 0 2px; }
+.wf-config label { display: block; font-size: 12px; margin-top: 8px; color: var(--sub); }
+.wf-config input[type="text"], .wf-config input[type="number"], .wf-config select,
+.wf-config textarea {
+  width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: inherit;
+}
+.wf-config .field-description { font-size: 11px; color: var(--sub); margin: 2px 0; }
+.wf-config .btn-add, .wf-config button[type="button"] {
+  font-size: 11px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); cursor: pointer; color: inherit; margin-top: 4px;
+}
+.wf-config .array-item { border: 1px dashed var(--line); border-radius: 6px; padding: 6px; margin-top: 6px; }
+.wf-config .text-danger, .wf-config .error-detail { color: var(--ng, #d64545); font-size: 11px; }
+
+/* 接続ハンドルは既定 6px で掴みにくい。マウス操作の実用サイズへ */
+.wfnode .react-flow__handle {
+  width: 12px; height: 12px; border-radius: 6px;
+  background: var(--accent, #3b6ef5); border: 2px solid var(--panel);
+}
