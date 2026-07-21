@@ -236,3 +236,173 @@ def test_run_onceはNotReadyをackしない(env) -> None:
 
     consumer.push({"type": "start", "tenant_id": TENANT, "workflow_run_id": "wfrun_1"})
     assert runner.run_once() >= 1  # start は処理され、先の resume も後続で処理できる
+
+
+# ---------- P5: branch.hitl_gate ----------
+
+# hitl_gate 経由の代表グラフ: extract → gate → map → webhook（分岐なし・直列）
+GRAPH_HITL: dict[str, Any] = {
+    "version": 1,
+    "nodes": [
+        {"id": "t1", "type": "source.manual", "config": {}},
+        {"id": "x1", "type": "process.extract", "config": {"schema_id": "sch_inv"}},
+        {"id": "g1", "type": "branch.hitl_gate", "config": {"priority_boost": 25}},
+        {
+            "id": "m1",
+            "type": "transform.map_fields",
+            "config": {"mappings": [{"from": "total_amount", "to": "amount"}]},
+        },
+        {"id": "s1", "type": "sink.webhook", "config": {"connection_id": "con_hook"}},
+    ],
+    "edges": [
+        {"from": "t1", "to": "x1"},
+        {"from": "x1", "to": "g1"},
+        {"from": "g1", "to": "m1"},
+        {"from": "m1", "to": "s1"},
+    ],
+}
+
+
+@pytest.fixture
+def henv() -> tuple[WorkflowRunner, InMemoryWorkflowRunStore, FakeWebhook]:
+    store = InMemoryWorkflowRunStore()
+    store.seed_run("wfrun_h", tenant_id=TENANT, workflow_id="workflow_h", graph_json=GRAPH_HITL)
+    store.seed_webhook(TENANT, "con_hook", "https://example.com/hook", "sec")
+    webhook = FakeWebhook()
+    runner = WorkflowRunner(
+        store,
+        InMemoryQueueConsumer(),
+        RunnerDeps(store=store, send_webhook=webhook.send),
+        checkpointer=MemorySaver(),
+    )
+    return runner, store, webhook
+
+
+def _hstart(runner: WorkflowRunner) -> str:
+    return runner.process({"type": "start", "tenant_id": TENANT, "workflow_run_id": "wfrun_h"})
+
+
+def _hresume(runner: WorkflowRunner, kind: str, status: str) -> str:
+    return runner.process(
+        {
+            "type": "resume",
+            "tenant_id": TENANT,
+            "workflow_run_id": "wfrun_h",
+            "event": {"kind": kind, "run_id": "run_wf_1", "status": status},
+        }
+    )
+
+
+def test_needs_reviewはhitl_gateでwaiting_hitlになる(henv) -> None:
+    runner, store, webhook = henv
+    _hstart(runner)
+    store.seed_extract_result(
+        "run_wf_1",
+        {"doc_type": "invoice", "fields": {"total_amount": {"value": "7003", "confidence": 0.7}}},
+    )
+    assert _hresume(runner, "extract_done", "needs_review") == "waiting_hitl"
+    run = store.runs["wfrun_h"]
+    assert run["status"] == "waiting_hitl"
+    # waiting には kind と config が載る（SCR-03 連携とレビューキュー加点の材料）
+    assert run["waiting"]["kind"] == "await_hitl"
+    assert run["waiting"]["priority_boost"] == 25
+    assert run["waiting"]["run_id"] == "run_wf_1"
+    assert webhook.sent == []  # 人の確定まで下流は動かない
+
+
+def test_confirm_doneで確定値が下流へ流れて完走する(henv) -> None:
+    runner, store, webhook = henv
+    _hstart(runner)
+    store.seed_extract_result(
+        "run_wf_1",
+        {"doc_type": "invoice", "fields": {"total_amount": {"value": "7003", "confidence": 0.7}}},
+    )
+    _hresume(runner, "extract_done", "needs_review")
+    # SCR-03 の確定で final_value が入り、confirm_done の enrich はそれを読む
+    store.seed_extract_result(
+        "run_wf_1",
+        {"doc_type": "invoice", "fields": {"total_amount": {"value": "9999", "confidence": 1.0}}},
+    )
+    assert _hresume(runner, "confirm_done", "confirmed") == "succeeded"
+    assert len(webhook.sent) == 1
+    # 修正後の値（9999）が map を通って届く＝確定断面が下流の正
+    assert webhook.sent[0][2]["data"] == {"amount": "9999"}
+    assert store.node_runs[("wfrun_h", "g1")]["status"] == "succeeded"
+    assert store.runs["wfrun_h"]["status"] == "succeeded"
+
+
+def test_confirmedならhitl_gateは素通りする(henv) -> None:
+    runner, store, webhook = henv
+    _hstart(runner)
+    store.seed_extract_result(
+        "run_wf_1",
+        {"fields": {"total_amount": {"value": "7003", "confidence": 1.0}}},
+    )
+    # 低確信が無く confirmed で返った場合。ゲートは待たずに下流へ
+    assert _hresume(runner, "extract_done", "confirmed") == "succeeded"
+    assert len(webhook.sent) == 1
+    assert store.runs["wfrun_h"]["status"] == "succeeded"
+
+
+def test_終端済みrunへのresumeは破棄してackする(henv) -> None:
+    runner, store, webhook = henv
+    _hstart(runner)
+    store.seed_extract_result(
+        "run_wf_1", {"fields": {"total_amount": {"value": "1", "confidence": 1.0}}}
+    )
+    _hresume(runner, "extract_done", "confirmed")
+    assert store.runs["wfrun_h"]["status"] == "succeeded"
+    # 完走後の confirm_done（hitl の無いグラフへの confirm、at-least-once 再配信）。
+    # NotReady だと永久再配信になる。破棄（ack）し、run と webhook は変わらない
+    assert _hresume(runner, "confirm_done", "confirmed") == "ignored"
+    assert store.runs["wfrun_h"]["status"] == "succeeded"
+    assert len(webhook.sent) == 1
+
+
+def test_extract_doneの再配信でゲートは開かない(henv) -> None:
+    """at-least-once の再配信 1 回で人手確認が素通りするバグの回帰（レビューで検出）。
+
+    waiting_hitl 中に同じ extract_done が再配信されると、従来は pending の
+    await_hitl interrupt の戻り値に extract_done イベントが注入され、ゲートが
+    needs_review のまま開いて未確定値が webhook へ流れていた。
+    """
+    runner, store, webhook = henv
+    _hstart(runner)
+    store.seed_extract_result(
+        "run_wf_1",
+        {"fields": {"total_amount": {"value": "7003", "confidence": 0.7}}},
+    )
+    assert _hresume(runner, "extract_done", "needs_review") == "waiting_hitl"
+    # ack 前クラッシュ → xautoclaim による同一メッセージの再配信
+    assert _hresume(runner, "extract_done", "needs_review") == "waiting_hitl"
+    assert store.runs["wfrun_h"]["status"] == "waiting_hitl"
+    assert webhook.sent == []  # ゲートは開いていない
+
+    # 本物の confirm_done では正しく開く（確定値で）
+    store.seed_extract_result(
+        "run_wf_1",
+        {"fields": {"total_amount": {"value": "9999", "confidence": 1.0}}},
+    )
+    assert _hresume(runner, "confirm_done", "confirmed") == "succeeded"
+    assert webhook.sent[0][2]["data"] == {"amount": "9999"}
+
+
+def test_完走済みcheckpointへのresumeは射影を終端へ同期する(henv) -> None:
+    """最終セグメント完了と射影 commit の間のクラッシュの回復（レビューで検出）。
+
+    checkpoint は完走・射影は waiting_hitl のままの断面で confirm_done が再配信
+    されると、従来は NotReady で永久再配信（poison message）になっていた。
+    """
+    runner, store, webhook = henv
+    _hstart(runner)
+    store.seed_extract_result(
+        "run_wf_1", {"fields": {"total_amount": {"value": "1", "confidence": 0.7}}}
+    )
+    _hresume(runner, "extract_done", "needs_review")
+    _hresume(runner, "confirm_done", "confirmed")
+    assert store.runs["wfrun_h"]["status"] == "succeeded"
+    # 射影だけ巻き戻す＝「checkpoint 完了・射影 commit 前クラッシュ」の断面を作る
+    store.runs["wfrun_h"]["status"] = "waiting_hitl"
+    assert _hresume(runner, "confirm_done", "confirmed") == "succeeded"
+    assert store.runs["wfrun_h"]["status"] == "succeeded"
+    assert len(webhook.sent) == 1  # webhook は再実行されない

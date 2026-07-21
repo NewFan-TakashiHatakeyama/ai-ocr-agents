@@ -74,6 +74,16 @@ class WorkflowRunner:
         with tenant_scope(tenant_id), self._store.lock_run(tenant_id, run_id) as locked:
             if locked is None:
                 raise NotReady(f"run が見つからないかロック中: {run_id}")
+            typ0 = payload.get("type", "start")
+            if typ0 == "resume" and locked.status in ("succeeded", "failed", "skipped"):
+                # 終端済み run への notify（hitl_gate の無いグラフへの confirm_done、
+                # at-least-once の再配信など）。NotReady にすると永久再配信になるため
+                # ack して捨てる。failed の再実行は明示の retry API（§11.2）で行う
+                logger.info(
+                    "[workflow] 終端済み run への resume を破棄: run=%s status=%s",
+                    run_id, locked.status,
+                )
+                return "ignored"
             app = self._app(locked)
             config = {"configurable": {"thread_id": run_id}}
             typ = payload.get("type", "start")
@@ -133,10 +143,34 @@ class WorkflowRunner:
         if typ == "resume":
             snapshot = app.get_state(config)
             if not snapshot.next:
+                if snapshot.values:
+                    # checkpoint は完走済みなのに射影が終端でない（最終セグメント完了と
+                    # 射影 commit の間のクラッシュ）。invoke するものが無いので射影を
+                    # 終端へ合わせて ack する。NotReady にすると永久再配信になる
+                    logger.info(
+                        "[workflow] 完走済み checkpoint への resume（射影を終端へ同期): %s",
+                        locked.workflow_run_id,
+                    )
+                    return self._result_from_snapshot(snapshot)
                 # 抽出完了 notify が start の checkpoint 確定より先に届いた
                 # （ack 前クラッシュのレース）。再配信で解消する。
                 raise NotReady("interrupt 未確定の resume（再配信待ち）")
             event = dict(payload.get("event") or {})
+            pending = self._result_from_snapshot(snapshot) or {}
+            pending_kinds = {
+                (getattr(i, "value", None) or {}).get("kind")
+                for i in pending.get("__interrupt__", ())
+            }
+            if KIND_AWAIT_HITL in pending_kinds and event.get("kind") != "confirm_done":
+                # 人手ゲート待ちの run に extract_done 等が再配信された（at-least-once）。
+                # そのまま resume すると interrupt の戻り値になり、人手確認なしに
+                # ゲートが開いて未確定値が下流へ流れる（レビューで検出）。
+                # 射影だけ合わせて ack し、本物の confirm_done を待つ
+                logger.info(
+                    "[workflow] await_hitl 中の %s を破棄（confirm_done のみ受理): run=%s",
+                    event.get("kind"), locked.workflow_run_id,
+                )
+                return pending
             if event.get("kind") in ("extract_done", "confirm_done") and event.get("run_id"):
                 # fields は worker の notify に載せない（メッセージ肥大とレイヤ越えを避け、
                 # 採点済みの正本 extraction_fields から読む）

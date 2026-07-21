@@ -34,10 +34,21 @@ class QueueOrchestratorClient:
         self._queue = queue
         self._stream = stream
 
-    def resume(self, run_id: str, tenant_id: str, feedback: Optional[dict[str, Any]]) -> None:
-        self._queue.enqueue(
-            self._stream, {"run_id": run_id, "tenant_id": tenant_id, "resume": feedback}
-        )
+    def resume(
+        self,
+        run_id: str,
+        tenant_id: str,
+        feedback: Optional[dict[str, Any]],
+        *,
+        notify: Optional[dict[str, Any]] = None,
+    ) -> None:
+        msg: dict[str, Any] = {"run_id": run_id, "tenant_id": tenant_id, "resume": feedback}
+        if notify:
+            # ワーカーは payload の notify しか見ない（DD-11: DB の workflow 情報は読まない）。
+            # これを載せないと確定フロー完了の confirm_done が q.workflow に届かず、
+            # hitl_gate で waiting_hitl のままの run が永久に再開されない。
+            msg["notify"] = notify
+        self._queue.enqueue(self._stream, msg)
 
 
 class HttpOrchestratorClient:
@@ -47,10 +58,17 @@ class HttpOrchestratorClient:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
-    def resume(self, run_id: str, tenant_id: str, feedback: Optional[dict[str, Any]]) -> None:
+    def resume(
+        self,
+        run_id: str,
+        tenant_id: str,
+        feedback: Optional[dict[str, Any]],
+        *,
+        notify: Optional[dict[str, Any]] = None,
+    ) -> None:
         with httpx.Client(base_url=self._base_url, timeout=self._timeout) as client:
             resp = client.post(
                 f"/internal/runs/{run_id}/resume",
-                json={"tenant_id": tenant_id, "feedback": feedback},
+                json={"tenant_id": tenant_id, "feedback": feedback, "notify": notify},
             )
             resp.raise_for_status()

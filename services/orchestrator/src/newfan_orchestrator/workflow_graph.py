@@ -27,6 +27,7 @@ from newfan_workflow import EvalContext, FieldView, WorkflowGraph, evaluate, is_
 from newfan_workflow.models import (
     ConditionNode,
     ExtractNode,
+    HitlGateNode,
     ManualNode,
     MapFieldsNode,
     WebhookSinkNode,
@@ -198,6 +199,46 @@ def _make_router(node: ConditionNode) -> Callable:
     return route
 
 
+def _make_hitl_gate(node: HitlGateNode) -> Callable:
+    """branch.hitl_gate（§8 / P5）。
+
+    上流 extract の結果が needs_review のときだけ interrupt({kind: "await_hitl"}) して
+    人の確定を待つ（runner が status='waiting_hitl' へ写像する）。confirmed 等は素通り。
+    priority_boost 等の config は interrupt payload に載せ、runner が
+    workflow_runs.waiting へ永続化する → gateway のレビューキューが優先度へ加点する。
+
+    再開は confirm_done notify（worker の確定フロー完了 notify）。event は runner が
+    load_extract_result で enrich 済みなので、確定後の final_value が下流へ流れる。
+    純関数（interrupt 前に副作用なし）＝再実行境界に対して無条件に安全（§6.4）。
+    """
+
+    def run(state: WorkflowState) -> dict[str, Any]:
+        if state.get("run_status") != "needs_review":
+            return {"node_outputs": {node.id: {"status": "passed"}}}
+        payload: dict[str, Any] = {
+            "kind": KIND_AWAIT_HITL,
+            "run_id": state.get("run_id"),
+            "node_id": node.id,
+        }
+        cfg = node.config
+        if cfg.priority_boost:
+            payload["priority_boost"] = cfg.priority_boost
+        if cfg.assignee_group:
+            payload["assignee_group"] = cfg.assignee_group
+        if cfg.sla_hours:
+            payload["sla_hours"] = cfg.sla_hours
+        event = interrupt(payload)
+        return {
+            "run_status": event.get("status") or state.get("run_status", ""),
+            "doc_type": event.get("doc_type", state.get("doc_type")),
+            "run_confidence": event.get("run_confidence", state.get("run_confidence")),
+            "fields": event.get("fields") or state.get("fields", {}),
+            "node_outputs": {node.id: {"status": event.get("status")}},
+        }
+
+    return run
+
+
 def _noop(state: WorkflowState) -> dict[str, Any]:
     return {}
 
@@ -234,6 +275,8 @@ def build_workflow_app(
                 p for p in sorted(preds[node.id]) if isinstance(wf.get(p), MapFieldsNode)
             ]
             fn = _make_webhook(node, deps, map_preds)
+        elif isinstance(node, HitlGateNode):
+            fn = _make_hitl_gate(node)
         elif isinstance(node, (ConditionNode, ManualNode)) or is_trigger(node):
             fn = _noop
         else:

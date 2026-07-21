@@ -464,7 +464,13 @@ def confirm(
         feedback["overrides"] = body.overrides
 
     repo.set_document_status(principal.tenant_id, document_id, "in_review")
-    orchestrator.resume(run.id, principal.tenant_id, feedback)
+    # ワークフロー起点の Run は options に notify 先を持つ（§16 P3 ensure_extract_run）。
+    # 確定フローの再開ジョブへ中継すると、finalize 完了時にワーカーが confirm_done を
+    # q.workflow へ積み、hitl_gate で待つワークフローが下流継続する（§16 §8 / P5）。
+    orchestrator.resume(
+        run.id, principal.tenant_id, feedback,
+        notify=(run.options or {}).get("workflow_notify"),
+    )
     locks.release(principal.tenant_id, document_id, principal.sub)  # 確定で待機者を解放
     _idempotency_store(request, idempotency_key, principal.tenant_id, {"ok": True})
     return dto.ConfirmAccepted()
@@ -476,16 +482,18 @@ def review_queue(
     repo: Repository = Depends(get_repo),
 ) -> dto.ReviewQueue:
     runs = repo.list_review_runs(principal.tenant_id)
+    # hitl_gate の priority_boost（workflow_runs.waiting）を加点する（§16 P5）
+    boosts = repo.list_hitl_boosts(principal.tenant_id)
     items = []
     for run in runs:
         pending = int(run.review_summary.get("pending", 0))
-        # 優先度（§8.5 の簡易版）: pending 件数を主指標
+        # 優先度（§8.5 の簡易版）: pending 件数を主指標 + ワークフローの boost
         items.append(
             dto.ReviewQueueItem(
                 document_id=run.document_id,
                 run_id=run.id,
                 pending=pending,
-                priority=float(pending),
+                priority=float(pending + boosts.get(run.document_id or "", 0)),
             )
         )
     items.sort(key=lambda i: i.priority, reverse=True)

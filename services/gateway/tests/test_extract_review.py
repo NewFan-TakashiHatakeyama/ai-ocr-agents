@@ -140,3 +140,61 @@ def test_review_queue(ctx: SimpleNamespace) -> None:
     assert r.status_code == 200
     items = r.json()["items"]
     assert items and items[0]["pending"] == 2
+
+
+def test_confirm_relays_workflow_notify(ctx: SimpleNamespace) -> None:
+    # ワークフロー起点の Run は options.workflow_notify を持つ（§16 P3）。
+    # confirm はそれを再開ジョブへ中継する。中継しないと確定フロー完了の
+    # confirm_done が q.workflow に届かず、hitl_gate の run が永久に waiting_hitl のまま
+    doc_id = _upload(ctx)
+    notify = {"stream": "q.workflow", "workflow_run_id": "wfrun_9"}
+    run = RunRecord(
+        id="run_wf9",
+        tenant_id="ten_1",
+        document_id=doc_id,
+        status="needs_review",
+        result_version=1,
+        options={"workflow_idem": "wfrun_9:x1", "workflow_notify": notify},
+        fields=[ExtractedField(name="total_amount", value_normalized="1", confidence=0.7)],
+        review_summary={"pending": 1, "auto": 0},
+    )
+    ctx.repo.create_run(run)
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/confirm", headers=auth("reviewer"), json={"run_id": run.id}
+    )
+    assert r.status_code == 202
+    assert ctx.orch.notified[-1] == notify
+
+
+def test_confirm_without_workflow_passes_no_notify(ctx: SimpleNamespace) -> None:
+    # 手動アップロード経路（ワークフロー無関係）の confirm は notify を積まない
+    doc_id = _upload(ctx)
+    run_id = _seed_needs_review_run(ctx, doc_id)
+    ctx.client.post(
+        f"/v1/documents/{doc_id}/confirm", headers=auth("reviewer"), json={"run_id": run_id}
+    )
+    assert ctx.orch.notified[-1] is None
+
+
+def test_review_queue_reflects_hitl_boost(ctx: SimpleNamespace) -> None:
+    # hitl_gate の priority_boost（workflow_runs.waiting 由来）が優先度へ加点される（§16 P5）
+    doc_a = _upload(ctx)
+    doc_b = _upload(ctx)
+    for i, d in enumerate([doc_a, doc_b]):
+        ctx.repo.create_run(
+            RunRecord(
+                id=f"run_q{i}",
+                tenant_id="ten_1",
+                document_id=d,
+                status="needs_review",
+                result_version=1,
+                fields=[ExtractedField(name="total_amount", value_normalized="1", confidence=0.7)],
+                review_summary={"pending": 1, "auto": 0},
+            )
+        )
+    ctx.repo.seed_hitl_boost("ten_1", doc_b, 25)
+    r = ctx.client.get("/v1/review/queue", headers=auth("reviewer"))
+    items = r.json()["items"]
+    assert [i["document_id"] for i in items][0] == doc_b  # boost 側が先頭
+    by_doc = {i["document_id"]: i["priority"] for i in items}
+    assert by_doc[doc_b] == 26.0 and by_doc[doc_a] == 1.0

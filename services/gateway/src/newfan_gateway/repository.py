@@ -38,6 +38,9 @@ class Repository(Protocol):
     def add_corrections(self, corrections: list[CorrectionRecord]) -> None: ...
     def list_corrections(self, tenant_id: str, run_id: str) -> list[CorrectionRecord]: ...
     def list_review_runs(self, tenant_id: str) -> list[RunRecord]: ...
+    def list_hitl_boosts(self, tenant_id: str) -> dict[str, int]:
+        """document_id → hitl_gate の priority_boost（waiting_hitl の workflow_runs 由来, §16 P5）。"""
+        ...
 
 
 class InMemoryRepository:
@@ -47,6 +50,7 @@ class InMemoryRepository:
         self._runs: dict[str, RunRecord] = {}
         self._jobs: dict[str, JobRecord] = {}
         self._corrections: list[CorrectionRecord] = []
+        self._hitl_boosts: dict[tuple[str, str], int] = {}
 
     @staticmethod
     def _owned(rec_tenant: str, tenant_id: str) -> bool:
@@ -147,3 +151,9 @@ class InMemoryRepository:
             for r in self._runs.values()
             if r.tenant_id == tenant_id and r.status == "needs_review"
         ]
+
+    def seed_hitl_boost(self, tenant_id: str, document_id: str, boost: int) -> None:
+        self._hitl_boosts[(tenant_id, document_id)] = boost
+
+    def list_hitl_boosts(self, tenant_id: str) -> dict[str, int]:
+        return {d: b for (t, d), b in self._hitl_boosts.items() if t == tenant_id}

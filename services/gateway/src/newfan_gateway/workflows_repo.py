@@ -25,6 +25,7 @@ IMPLEMENTED_NODE_TYPES: frozenset[str] = frozenset(
     {
         "source.manual",
         "source.s3_event",  # P4: EventBridge→SQS→trigger consumer
+        "branch.hitl_gate",  # P5: needs_review でだけ待つ人手ゲート
         "process.extract",
         "branch.condition",
         "transform.map_fields",

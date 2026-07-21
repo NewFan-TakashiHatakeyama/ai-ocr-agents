@@ -348,6 +348,22 @@ class PgRepository:
             stmt = select(ExtractionRun).where(ExtractionRun.status == "needs_review")
             return [self._synced(s, r) for r in s.scalars(stmt)]
 
+    def list_hitl_boosts(self, tenant_id):
+        # hitl_gate の interrupt payload（priority_boost 含む）は runner が
+        # workflow_runs.state JSONB の "waiting" キーに永続化する（workflow_store._update。
+        # 独立した waiting 列は存在しない）。待機中の run だけが加点対象
+        with self._rls(tenant_id) as s:
+            rows = s.execute(
+                text(
+                    "SELECT document_id,"
+                    " MAX(COALESCE((state->'waiting'->>'priority_boost')::int, 0))"
+                    " FROM workflow_runs"
+                    " WHERE status='waiting_hitl' AND document_id IS NOT NULL"
+                    " GROUP BY document_id"
+                )
+            ).all()
+        return {r[0]: int(r[1] or 0) for r in rows}
+
 
 def _doc_record(row: Document) -> DocumentRecord:
     return DocumentRecord(
