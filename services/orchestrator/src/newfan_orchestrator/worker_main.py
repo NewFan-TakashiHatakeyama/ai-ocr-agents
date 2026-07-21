@@ -154,7 +154,11 @@ def main() -> None:
             context_store=store,
             export_enqueue=export_queue.enqueue,
         )
-        worker = ExtractionWorker(graph, store, consumer, enqueue=export_queue.enqueue)
+        worker = ExtractionWorker(
+            graph, store, consumer,
+            enqueue=export_queue.enqueue,
+            usage_snapshot=adapter.usage_snapshot,
+        )
 
         # workflow-runner（§16 設計 v0.2 §6）。q.workflow を同じプロセスで消費する。
         # 常駐プロセスは増やさない（コスト。設計 §2.1）。

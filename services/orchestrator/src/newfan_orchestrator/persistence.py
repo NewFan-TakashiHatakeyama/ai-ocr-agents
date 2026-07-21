@@ -44,6 +44,10 @@ class ContextStore(Protocol):
         """
         ...
 
+    def add_run_metrics(self, tenant_id: str, run_id: str, patch: dict[str, float]) -> None:
+        """extraction_runs.metrics へ数値を**加算**で追記する（LLM トークン等）。"""
+        ...
+
     def set_job_status(
         self, tenant_id: str, job_id: str, status: str, *, error_code: Optional[str] = None
     ) -> None:
@@ -75,6 +79,7 @@ class InMemoryContextStore:
         self._saved_tables: dict[str, list[TableResult]] = {}
         self._saved_fallback: dict[str, list[int]] = {}
         self._result_version: dict[str, int] = {}
+        self.run_metrics: dict[str, dict[str, float]] = {}
         self._job_status: dict[str, tuple[str, Optional[str]]] = {}
 
     def seed_run(
@@ -129,6 +134,11 @@ class InMemoryContextStore:
         self._run_status[run_id] = status
         self._document_status[seed.document_id] = status
         self._result_version[run_id] = self._result_version.get(run_id, 1)
+
+    def add_run_metrics(self, tenant_id: str, run_id: str, patch: dict[str, float]) -> None:
+        m = self.run_metrics.setdefault(run_id, {})
+        for k, v in patch.items():
+            m[k] = m.get(k, 0) + v
 
     def set_job_status(
         self, tenant_id: str, job_id: str, status: str, *, error_code: Optional[str] = None

@@ -244,3 +244,39 @@ def test_notifyが無ければ何も積まない() -> None:
     worker, notified = _build_with_notify(conf=0.99)
     worker.process({"run_id": "run_1", "tenant_id": "ten_1"})
     assert notified == []
+
+
+def test_llm使用量が差分でrun_metricsへ永続化される() -> None:
+    # SCR-04 の LLM コスト算出（§12.1）の元データ。ジョブ前後の adapter 断面差分を
+    # extraction_runs.metrics へ加算で書く（resume でも積み上がる）
+    store = InMemoryContextStore()
+    store.seed_run(
+        "run_1", tenant_id="ten_1", document_id="doc_1",
+        schema=_SCHEMA, pages=[{"page_no": 1, "image_uri": "x"}],
+    )
+    graph = build_graph(
+        checkpointer=MemorySaver(serde=newfan_serde()),
+        adapter=LLMAdapter(FakeProvider(handler=_llm_handler)),
+        bundle=_BUNDLE,
+        memory=MemoryService(HashingEmbedder(), InMemoryMemoryRepository()),
+        structure_client=_FakeStructure(0.99),
+        image_loader=lambda uri: b"png",
+        context_store=store,
+        export_enqueue=lambda s, m: None,
+    )
+    usage = {"input_tokens": 0, "output_tokens": 0, "cost_jpy": 0.0}
+    worker = ExtractionWorker(
+        graph, store, InMemoryQueueConsumer(), usage_snapshot=lambda: dict(usage)
+    )
+    # ジョブ実行中に LLM が使われた状況を差分で模す
+    orig = worker._process  # noqa: SLF001
+
+    def process_with_usage(payload):  # type: ignore[no-untyped-def]
+        usage.update(input_tokens=1200, output_tokens=340, cost_jpy=1.25)
+        return orig(payload)
+
+    worker._process = process_with_usage  # type: ignore[method-assign]
+    worker.process({"job_id": "job_1", "run_id": "run_1", "tenant_id": "ten_1"})
+    assert store.run_metrics["run_1"] == {
+        "llm_input_tokens": 1200, "llm_output_tokens": 340, "llm_cost_jpy": 1.25,
+    }

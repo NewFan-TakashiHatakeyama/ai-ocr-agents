@@ -40,6 +40,10 @@ DEV_TENANT="${DEV_TENANT:-ten_1}"
 PY_BIN="${PY_BIN:-uv run python}"
 # aws CLI に /aws/... のようなパスを渡すと MSYS が Windows パスへ変換して壊すため無効化する。
 export MSYS_NO_PATHCONV=1
+# Windows の Python は stdout が cp932 になり、$(python -c "print(...)") で捕捉した
+# 日本語が cp932 バイトのまま次のプロセスへ渡って DB に化けて入る
+# （seed-schemas のラベル文字化けとして実際に発生）。全 Python 呼び出しを UTF-8 に固定する。
+export PYTHONUTF8=1
 
 # 起動中の時間単価（AWS Pricing API 実取得値, ap-northeast-1）
 HOURLY_FARGATE="0.5293" # gateway x2 + orchestrator + export + structure(4vCPU) + ocr(2vCPU)

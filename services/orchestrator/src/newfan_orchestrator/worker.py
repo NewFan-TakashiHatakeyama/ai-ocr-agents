@@ -33,10 +33,14 @@ class ExtractionWorker:
         *,
         webhook: Optional[WebhookFn] = None,
         enqueue: Optional[Callable[[str, dict[str, Any]], None]] = None,
+        usage_snapshot: Optional[Callable[[], dict[str, float]]] = None,
     ) -> None:
         self._graph = graph
         self._store = store
         self._consumer = consumer
+        # LLM 使用量の断面（LLMAdapter.usage_snapshot）。run 前後の差分を
+        # extraction_runs.metrics へ永続化する（SCR-04 の LLM コスト, §12.1）
+        self._usage_snapshot = usage_snapshot
         self._webhook = webhook
         self._enqueue = enqueue
 
@@ -88,12 +92,27 @@ class ExtractionWorker:
         # tenant_id を受け取らない低レイヤの計装も正しいラベルを付けられる。
         with tenant_scope(payload.get("tenant_id", "")):
             started = time.monotonic()
+            before = self._usage_snapshot() if self._usage_snapshot else None
             outcome = "failed"
             try:
                 outcome = self._process(payload)
                 return outcome
             finally:
                 run_duration_seconds.labels(outcome=outcome).observe(time.monotonic() - started)
+                if before is not None:
+                    try:
+                        after = self._usage_snapshot()  # type: ignore[misc]
+                        delta = {
+                            "llm_input_tokens": after["input_tokens"] - before["input_tokens"],
+                            "llm_output_tokens": after["output_tokens"] - before["output_tokens"],
+                            "llm_cost_jpy": after["cost_jpy"] - before["cost_jpy"],
+                        }
+                        if any(v > 0 for v in delta.values()):
+                            self._store.add_run_metrics(
+                                payload["tenant_id"], payload["run_id"], delta
+                            )
+                    except Exception:  # noqa: BLE001 - 計測はジョブを落とさない
+                        logger.warning("[worker] LLM 使用量の記録に失敗", exc_info=True)
 
     def _process(self, payload: dict[str, Any]) -> str:
         run_id = payload["run_id"]

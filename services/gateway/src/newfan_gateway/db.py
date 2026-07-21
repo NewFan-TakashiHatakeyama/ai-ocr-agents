@@ -718,6 +718,33 @@ class PgAdminRepository:
             corrections = c.execute(
                 text("SELECT count(*) FROM correction_logs WHERE tenant_id=:t"), {"t": tenant_id}
             ).scalar_one()
+            # フィールド精度: 確定済み Run（直近 30 日）の「修正されなかったフィールド割合」。
+            # 設計 §12 の週次サンプル監査（人手）の代替として、実データから機械算出する
+            acc = c.execute(
+                text(
+                    "SELECT count(*),"
+                    " count(*) FILTER (WHERE ef.correction IS NOT NULL)"
+                    " FROM extraction_fields ef JOIN extraction_runs r ON r.id = ef.run_id"
+                    " WHERE r.tenant_id=:t AND r.status='confirmed'"
+                    " AND r.started_at > now() - interval '30 days'"
+                ),
+                {"t": tenant_id},
+            ).first()
+            field_accuracy = (
+                1.0 - (acc[1] / acc[0]) if acc is not None and acc[0] else None
+            )
+            # LLM コスト: run 単位に永続化した実測トークン × 単価の合計（直近 30 日）。
+            # 計測データを持つ run が 1 件も無ければ None（ダッシュボードは「—」表示）
+            cost_row = c.execute(
+                text(
+                    "SELECT sum((metrics->>'llm_cost_jpy')::numeric),"
+                    " count(*) FILTER (WHERE metrics ? 'llm_cost_jpy')"
+                    " FROM extraction_runs WHERE tenant_id=:t"
+                    " AND started_at > now() - interval '30 days'"
+                ),
+                {"t": tenant_id},
+            ).first()
+            llm_cost = float(cost_row[0]) if cost_row and cost_row[1] else None
             active = c.execute(
                 text("SELECT count(*) FROM tenant_rules WHERE tenant_id=:t AND status='active'"),
                 {"t": tenant_id},
@@ -731,6 +758,8 @@ class PgAdminRepository:
             ).scalar_one()
         denom = (confirmed + review) or 1
         return MetricsSummary(
+            field_accuracy_sampled=field_accuracy,
+            llm_cost_jpy_total=llm_cost,
             total_documents=total_docs,
             status_counts={s: n for s, n in status_rows},
             stp_rate=round(stp_conf / denom, 4),

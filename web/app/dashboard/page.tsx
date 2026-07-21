@@ -62,12 +62,12 @@ export default function DashboardPage() {
             <div className="kpi">
               <div className="k">フィールド精度（サンプル監査）</div>
               <div className="v">{data.field_accuracy_sampled != null ? `${(data.field_accuracy_sampled * 100).toFixed(1)}%` : "—"}</div>
-              <div className="d" style={{ color: "var(--ink3)" }}>週次サンプル監査（未計測）</div>
+              <div className="d" style={{ color: "var(--ink3)" }}>確定フィールドの無修正率（直近30日）</div>
             </div>
             <div className="kpi">
               <div className="k">LLMコスト</div>
-              <div className="v">{data.llm_cost_jpy_total != null ? `¥${data.llm_cost_jpy_total.toLocaleString()}` : "—"}</div>
-              <div className="d" style={{ color: "var(--ink3)" }}>トークン計測（未整備）</div>
+              <div className="v">{data.llm_cost_jpy_total != null ? `¥${data.llm_cost_jpy_total.toLocaleString("ja-JP", { maximumFractionDigits: 2 })}` : "—"}</div>
+              <div className="d" style={{ color: "var(--ink3)" }}>実測トークン × 単価（直近30日）</div>
             </div>
             <div className="kpi">
               <div className="k">総ドキュメント</div>

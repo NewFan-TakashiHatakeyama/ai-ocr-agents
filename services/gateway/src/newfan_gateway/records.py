@@ -217,5 +217,5 @@ class MetricsSummary(BaseModel):
     active_rules: int = 0
     pending_rules: int = 0
     memories_total: int = 0
-    field_accuracy_sampled: Optional[float] = None  # 週次サンプル監査（データ源未整備）
-    llm_cost_jpy_total: Optional[float] = None  # トークン計測未整備
+    field_accuracy_sampled: Optional[float] = None  # 確定 Run の無修正フィールド率（直近30日）
+    llm_cost_jpy_total: Optional[float] = None  # 実測トークン×単価の合計（直近30日）

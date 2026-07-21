@@ -139,6 +139,32 @@ class PgContextStore:
                 {"st": status, "r": run_id},
             )
 
+    def add_run_metrics(self, tenant_id, run_id, patch) -> None:
+        # 加算で追記（resume ジョブでも積み上がる）。metrics 全体の上書きはしない
+        from sqlalchemy import text
+
+        sets = []
+        params: dict = {"t": tenant_id, "r": run_id}
+        for i, (k, v) in enumerate(patch.items()):
+            if not k.replace("_", "").isalnum():
+                continue  # 識別子でないキーは無視（SQL へ埋めるため）
+            sets.append(
+                f"'{k}', COALESCE((metrics->>'{k}')::numeric, 0) + :v{i}"
+            )
+            params[f"v{i}"] = v
+        if not sets:
+            return
+        with self._engine.begin() as c:
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
+            c.execute(
+                text(
+                    "UPDATE extraction_runs SET metrics = metrics ||"
+                    f" jsonb_build_object({', '.join(sets)})"
+                    " WHERE tenant_id=:t AND id=:r"
+                ),
+                params,
+            )
+
     def set_job_status(self, tenant_id, job_id, status, *, error_code=None) -> None:
         # §6.3 の契約はクライアントが GET /jobs/{id} を polling して終了を待つこと。
         # ここを書かないと jobs.status は queued のままで、ジョブが成功しても

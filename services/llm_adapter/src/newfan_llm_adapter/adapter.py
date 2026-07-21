@@ -20,6 +20,9 @@ _RATES = {
     "claude-sonnet-5": (3.0, 15.0),
     "claude-haiku-4-5": (1.0, 5.0),
     "claude-fable-5": (10.0, 50.0),
+    # Gemini（KIE の既定プロバイダ, worker_main._make_provider）
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-pro": (1.25, 10.0),
 }
 
 # ZDR 必須テナントで許可するモデル（構成でホワイトリスト, §11）。
@@ -72,6 +75,15 @@ class LLMAdapter:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cost_usd = 0.0
+
+    def usage_snapshot(self) -> dict[str, float]:
+        """累積使用量の断面。worker が run 前後の差分を extraction_runs.metrics へ
+        永続化する（SCR-04 の LLM コスト算出の元データ, §12.1）。"""
+        return {
+            "input_tokens": self.total_input_tokens,
+            "output_tokens": self.total_output_tokens,
+            "cost_jpy": self.total_cost_usd * USD_JPY,
+        }
 
     def _account(self, resp: LLMResponse, purpose: str) -> None:
         self.total_input_tokens += resp.input_tokens
