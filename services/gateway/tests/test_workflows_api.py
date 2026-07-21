@@ -183,13 +183,13 @@ def test_未実装ノードを含むとactivateできない(client: TestClient) 
     g = copy.deepcopy(GRAPH_OK)
     g["nodes"][0] = {
         "id": "t1",
-        "type": "source.s3_event",
-        "config": {"connection_id": "con_hook", "prefix": "invoices/"},
+        "type": "source.schedule",
+        "config": {"cron": "0 9 * * 1"},
     }
     w = _create(client, graph=g)
     r = client.post(f"/v1/workflows/{w['id']}/activate", headers=_auth())
     assert r.status_code == 422
-    assert r.json()["error"]["details"]["unsupported_types"] == ["source.s3_event"]
+    assert r.json()["error"]["details"]["unsupported_types"] == ["source.schedule"]
 
 
 def test_pauseはactiveのみ(client: TestClient) -> None:
@@ -244,4 +244,5 @@ def test_catalogは13種のJSONSchemaと実装済み一覧を返す(client: Test
     assert len(body["types"]) == 13
     assert "schema_id" in body["types"]["process.extract"]["required"]
     assert "source.manual" in body["implemented"]
-    assert "source.s3_event" not in body["implemented"]  # P4 で追加される
+    assert "source.s3_event" in body["implemented"]  # P4 で実装済み
+    assert "source.schedule" not in body["implemented"]  # P8

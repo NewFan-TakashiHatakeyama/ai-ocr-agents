@@ -88,6 +88,20 @@ cmd_status() {
           --query "services[0].[serviceName,desiredCount,runningCount]" --output text 2>/dev/null
       done || true
   echo
+  # S3 トリガーの滞留（§16 P4）。down 中に inbox へ置かれた分がここに溜まり、
+  # up すると orchestrator-worker が drain する。ecr スタック未適用ならキューが
+  # 無いだけなので黙って飛ばす。
+  local qurl
+  qurl="$(aws sqs get-queue-url --region "$REGION" --queue-name ai-ocr-workflow-trigger \
+    --query QueueUrl --output text 2>/dev/null || true)"
+  if [ -n "$qurl" ] && [ "$qurl" != "None" ]; then
+    echo "== S3 トリガー（SQS 滞留） =="
+    aws sqs get-queue-attributes --region "$REGION" --queue-url "$qurl" \
+      --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+      --query "Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]" \
+      --output text 2>/dev/null | awk '{print "  待機中: "$1"  処理中: "$2}' || true
+    echo
+  fi
   echo "※ Fargate が 0 台でも RDS/ElastiCache/NAT/ALB は課金され続ける（約 \$189/月）。"
   echo "  完全に止めるには down（destroy）が必要。"
 }
@@ -201,6 +215,14 @@ JSON
   echo "[migrate] チェックポイント表を用意します"
   _run_in_migrate scripts/setup_checkpointer.py \
     || { echo "[migrate] チェックポイント表の作成に失敗" >&2; return 1; }
+
+  # S3 イベント駆動トリガー用の s3 接続（§16 P4）。バケット名はアカウント ID を
+  # 含み terraform が決めるため、up のたびにここで seed する（destroy で DB ごと
+  # 消えても復元される）。
+  echo "[migrate] inbox の s3 接続を投入します"
+  _run_in_migrate scripts/seed_s3_connection.py "" \
+    "TENANT_ID=${DEV_TENANT}" "INBOX_BUCKET=ai-ocr-inbox-${ACCOUNT_ID}" \
+    || { echo "[migrate] s3 接続の投入に失敗" >&2; return 1; }
 }
 
 _run_in_migrate() {

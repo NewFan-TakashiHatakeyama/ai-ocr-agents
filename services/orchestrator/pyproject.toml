@@ -14,6 +14,7 @@ dependencies = [
     "newfan-metrics",
     "newfan-workflow",
     "newfan-export",
+    "newfan-ingest",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,7 @@ runtime = [
     "boto3>=1.34",
     "newfan-llm-adapter[anthropic,gemini]",
     "newfan-memory[embeddings]",
+    "newfan-ingest[runtime]",
 ]
 
 [build-system]

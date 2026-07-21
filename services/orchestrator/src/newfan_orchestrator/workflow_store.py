@@ -414,3 +414,167 @@ class PgWorkflowRunStore:
         url = cfg.get("url")
         return (url, cfg.get("secret", "")) if url else None
 
+
+
+class PgTriggerStore:
+    """TriggerStore の PostgreSQL 実装（§16 設計 v0.2 §7.2 / P4）。
+
+    アプリロール接続・RLS 前提。claim（source_cursors）・documents・workflow_runs は
+    **同一トランザクション**で行う。分けると「claim 済みなのに未取込」の孤児ができ、
+    DD-13 が再配信をすべて弾いて取り込まれなくなる。
+    """
+
+    def __init__(self, dsn: str) -> None:
+        from sqlalchemy import create_engine
+
+        self._engine = create_engine(dsn, future=True)
+
+    def _rls(self, c, tenant_id: str) -> None:
+        from sqlalchemy import text
+
+        c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
+
+    def list_active_workflows(self, tenant_id: str):
+        from sqlalchemy import text
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT id, version, graph_json FROM workflows"
+                    " WHERE tenant_id=:t AND status='active'"
+                ),
+                {"t": tenant_id},
+            ).all()
+        return [(r[0], r[1], r[2] or {}) for r in rows]
+
+    def get_s3_connection_bucket(self, tenant_id: str, connection_id: str):
+        from sqlalchemy import text
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            row = c.execute(
+                text(
+                    "SELECT config->>'bucket' FROM connections WHERE tenant_id=:t AND id=:i"
+                    " AND type='s3' AND status IN ('active','tested')"
+                ),
+                {"t": tenant_id, "i": connection_id},
+            ).first()
+        return row[0] if row else None
+
+    def already_claimed(self, tenant_id, connection_id, source_key, content_hash) -> bool:
+        from sqlalchemy import text
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            row = c.execute(
+                text(
+                    "SELECT 1 FROM source_cursors WHERE tenant_id=:t AND connection_id=:c"
+                    " AND source_key=:k AND content_hash=:h"
+                ),
+                {"t": tenant_id, "c": connection_id, "k": source_key, "h": content_hash},
+            ).first()
+        return row is not None
+
+    def register_ingested(
+        self, tenant_id, *, source_key, content_hash, document, pages, matches
+    ):
+        import uuid
+
+        from sqlalchemy import text
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            claimed: set[str] = set()
+            for connection_id in {m.connection_id for m in matches}:
+                r = c.execute(
+                    text(
+                        "INSERT INTO source_cursors"
+                        " (id, tenant_id, connection_id, source_key, content_hash, workflow_id)"
+                        " VALUES (:i,:t,:c,:k,:h,:w)"
+                        " ON CONFLICT (tenant_id, connection_id, source_key, content_hash)"
+                        " DO NOTHING"
+                    ),
+                    {
+                        "i": f"cur_{uuid.uuid4().hex[:24]}",
+                        "t": tenant_id,
+                        "c": connection_id,
+                        "k": source_key,
+                        "h": content_hash,
+                        "w": next(
+                            m.workflow_id for m in matches if m.connection_id == connection_id
+                        ),
+                    },
+                )
+                if r.rowcount:
+                    claimed.add(connection_id)
+            if not claimed:
+                return []  # 他プロセスが取込済み（SQS at-least-once の競合）
+
+            c.execute(
+                text(
+                    "INSERT INTO documents (id, tenant_id, storage_uri, original_name,"
+                    " mime_type, page_count, external_ref, status)"
+                    " VALUES (:i,:t,:u,:n,:m,:p,:e,'uploaded')"
+                ),
+                {
+                    "i": document["id"],
+                    "t": tenant_id,
+                    "u": document["storage_uri"],
+                    "n": document.get("original_name"),
+                    "m": document["mime_type"],
+                    "p": document.get("page_count"),
+                    "e": document.get("external_ref"),
+                },
+            )
+            for p in pages:
+                c.execute(
+                    text(
+                        "INSERT INTO pages (id, tenant_id, document_id, page_no, width,"
+                        " height, image_uri, preproc)"
+                        " VALUES (:i,:t,:d,:n,:w,:h,:u, CAST(:pp AS jsonb))"
+                    ),
+                    {
+                        "i": f"{document['id']}:{p['page_no']}",
+                        "t": tenant_id,
+                        "d": document["id"],
+                        "n": p["page_no"],
+                        "w": p.get("width"),
+                        "h": p.get("height"),
+                        "u": p["image_uri"],
+                        "pp": json.dumps(p.get("preproc") or {}, ensure_ascii=False),
+                    },
+                )
+
+            run_ids: list[str] = []
+            for m in matches:
+                if m.connection_id not in claimed:
+                    continue
+                run_id = f"wfrun_{uuid.uuid4().hex[:24]}"
+                c.execute(
+                    text(
+                        "INSERT INTO workflow_runs (id, tenant_id, workflow_id,"
+                        " workflow_version, trigger, document_id, state, status)"
+                        " VALUES (:i,:t,:w,:v, CAST(:tr AS jsonb), :d, '{}'::jsonb, 'running')"
+                    ),
+                    {
+                        "i": run_id,
+                        "t": tenant_id,
+                        "w": m.workflow_id,
+                        "v": m.workflow_version,
+                        "tr": json.dumps(
+                            {
+                                "type": "s3_event",
+                                "source_key": source_key,
+                                "etag": content_hash,
+                                "node_id": m.node_id,
+                                # 版の固定（§11.1）。手動実行と同じくスナップショットを持つ
+                                "graph_json": m.graph_json,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        "d": document["id"],
+                    },
+                )
+                run_ids.append(run_id)
+        return run_ids

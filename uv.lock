@@ -1414,6 +1414,7 @@ version = "0.1.0"
 source = { editable = "services/orchestrator" }
 dependencies = [
     { name = "newfan-export" },
+    { name = "newfan-ingest" },
     { name = "newfan-llm-adapter" },
     { name = "newfan-memory" },
     { name = "newfan-metrics" },
@@ -1434,6 +1435,7 @@ runtime = [
     { name = "boto3" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-postgres" },
+    { name = "newfan-ingest", extra = ["runtime"] },
     { name = "newfan-llm-adapter", extra = ["anthropic", "gemini"] },
     { name = "newfan-memory", extra = ["embeddings"] },
     { name = "psycopg", extra = ["binary"] },
@@ -1449,6 +1451,8 @@ requires-dist = [
     { name = "langgraph-checkpoint-postgres", marker = "extra == 'graph'", specifier = ">=2.0" },
     { name = "langgraph-checkpoint-postgres", marker = "extra == 'runtime'", specifier = ">=2.0" },
     { name = "newfan-export", editable = "services/export" },
+    { name = "newfan-ingest", editable = "services/ingest" },
+    { name = "newfan-ingest", extras = ["runtime"], marker = "extra == 'runtime'", editable = "services/ingest" },
     { name = "newfan-llm-adapter", editable = "services/llm_adapter" },
     { name = "newfan-llm-adapter", extras = ["anthropic", "gemini"], marker = "extra == 'runtime'", editable = "services/llm_adapter" },
     { name = "newfan-memory", editable = "services/memory" },

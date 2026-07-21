@@ -32,7 +32,8 @@ from newfan_orchestrator.serde import newfan_serde
 from newfan_orchestrator.worker import ExtractionWorker
 from newfan_orchestrator.workflow_graph import RunnerDeps
 from newfan_orchestrator.workflow_runner import WorkflowRunner
-from newfan_orchestrator.workflow_store import PgWorkflowRunStore
+from newfan_orchestrator.workflow_store import PgTriggerStore, PgWorkflowRunStore
+from newfan_orchestrator.workflow_trigger import S3TriggerConsumer
 
 _STOP = False
 
@@ -174,10 +175,40 @@ def main() -> None:
             RunnerDeps(store=wf_store, send_webhook=WebhookSender().send),
             checkpointer=wf_checkpointer,
         )
+        # S3 イベント駆動トリガー（§16 設計 v0.2 §7.2）。TRIGGER_SQS_URL 未設定なら無効
+        #（compose/ローカルは手動実行のみ）。
+        trigger = None
+        if os.environ.get("TRIGGER_SQS_URL"):
+            import boto3
+
+            from newfan_ingest import IngestService
+            from newfan_ingest.rasterize import AutoRasterizer
+            from newfan_ingest.storage import S3ObjectStore
+
+            s3 = boto3.client("s3")
+            ingest = IngestService(
+                S3ObjectStore(
+                    os.environ["S3_BUCKET"],
+                    kms_key_id=os.environ.get("S3_KMS_KEY_ID") or None,
+                ),
+                AutoRasterizer(),
+            )
+            trigger = S3TriggerConsumer(
+                sqs=boto3.client("sqs"),
+                queue_url=os.environ["TRIGGER_SQS_URL"],
+                store=PgTriggerStore(os.environ["DATABASE_URL"]),
+                fetch=lambda b, k: s3.get_object(Bucket=b, Key=k)["Body"].read(),
+                ingest=ingest.ingest,
+                enqueue=export_queue.enqueue,
+            )
+            print("[worker] trigger consumer 有効: " + os.environ["TRIGGER_SQS_URL"])
+
         print("[worker] orchestrator-svc 起動: q.extract / q.workflow を消費します")
         while not _STOP:
             worker.run_once()  # consume は block_ms 待機するため busy-loop にならない
             runner.run_once(count=10)
+            if trigger is not None:
+                trigger.run_once()  # 5 秒間隔で SQS をポーリング（内部で間引く）
     print("[worker] SIGTERM 受信: 停止しました")
 
 

@@ -24,6 +24,7 @@ from newfan_gateway.records import WorkflowNodeRunRecord, WorkflowRecord, Workfl
 IMPLEMENTED_NODE_TYPES: frozenset[str] = frozenset(
     {
         "source.manual",
+        "source.s3_event",  # P4: EventBridge→SQS→trigger consumer
         "process.extract",
         "branch.condition",
         "transform.map_fields",

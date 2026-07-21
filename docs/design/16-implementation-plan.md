@@ -92,22 +92,35 @@
 
 ---
 
-## P4: S3 イベント駆動トリガー + DD-13
+## P4: S3 イベント駆動トリガー + DD-13 【実装済み】
 
-### 変更ファイル
+### 変更ファイル（実装実体）
 
 | ファイル | 内容 |
 |---|---|
-| `deploy/terraform/workflow_trigger.tf`（新規） | S3 EventBridge 通知 ON / EventBridge ルール（bucket+prefix）/ SQS + DLQ（保持 14 日）/ IAM（consumer の sqs:ReceiveMessage 等）。**SQS と EventBridge ルールは ECR 同様 down で消さない別スタック**に置くか要判断 → 消えるとイベントを取りこぼすため **ecr/ と同じ長命スタックへ** |
-| `services/orchestrator/src/newfan_orchestrator/trigger_consumer.py`（新規） | SQS 購読（up 中のみ）。ETag で source_cursors INSERT ON CONFLICT → skip or ingest→documents→workflow_runs→q.workflow |
-| `services/ingest` | 取込関数の流用（S3 オブジェクト取得 → ingest → ページ登録） |
-| `scripts/aws_env.sh` | `up` の最後に SQS 滞留数を表示（drain の見える化） |
+| `deploy/terraform/ecr/trigger.tf`（新規） | **長命スタック側**: inbox バケット `ai-ocr-inbox-<account>` + EventBridge 通知/ルール + SQS `ai-ocr-workflow-trigger`（保持 14 日）+ DLQ（maxReceiveCount=5）。down（destroy）で消えるとイベントを取りこぼすため ecr/ と同居。inbox が長命であることが「down 中も顧客が置ける」前提そのもの |
+| `deploy/terraform/workflow_trigger.tf`（新規） | 本体スタック側: SQS/inbox の data 参照 + タスクロールへ sqs:ReceiveMessage 等と inbox s3:GetObject |
+| `deploy/terraform/ecs.tf` | orchestrator env に S3_BUCKET / S3_KMS_KEY_ID / TRIGGER_SQS_URL |
+| `services/orchestrator/.../workflow_trigger.py`（新規） | S3TriggerConsumer（5 秒間隔ゲートで SQS ポーリング）+ match_s3_event 純関数 + TriggerStore Protocol。キー規約「最上位フォルダ=テナント ID」で RLS 文脈を決定。prefix/extensions はテナントフォルダを除いた相対キーで照合。失敗メッセージは delete しない（再配信→DLQ） |
+| `services/orchestrator/.../workflow_store.py` | PgTriggerStore 追加。claim（source_cursors ON CONFLICT）+ documents + pages + workflow_runs を**同一 TX**。ingest は TX 前（再配信時の S3 上書きは無害）、start enqueue はコミット後 |
+| `services/orchestrator/.../worker_main.py` | TRIGGER_SQS_URL 設定時のみ consumer を配線（boto3 + IngestService）。同一プロセスの run ループに追加 |
+| `services/gateway/.../workflows_repo.py` | IMPLEMENTED_NODE_TYPES に source.s3_event 追加（activate 可能に） |
+| `scripts/aws_env.sh` | `status` に SQS 滞留数表示（drain の見える化。ecr スタック未適用なら黙って省略） |
+| `scripts/seed_s3_connection.py`（新規） | connections(type='s3', config.bucket=inbox) の seed（migrate run-task 内で実行） |
 
-### DoD
+### DoD（2026-07-21 実 AWS で実測済み・全達成）
 
-- 実 AWS: S3 に帳票を置く → 自動で抽出される（稼働中、数秒〜）
-- 同一ファイル再配置 → skip（source_cursors）
-- **down 中に置く → up → 自動 drain されて処理される**（運用の核心。実測）
+- 稼働中: inbox `ten_1/invoices/sample2.png` 配置 → **2 秒で自動取込** → 抽出 →
+  webhook 配信（wfrun_77c6d4bc…, total_amount=7003）
+- 同一ファイル再配置 → skip（`取込済みのため skip (etag=8dbc5f49…)`。run は増えない）
+- **down 中に配置 → SQS 滞留（status コマンドで「待機中: 1」）→ up → 86 秒で drain**
+  → run 生成 → 55 秒で succeeded → webhook 配信（wfrun_3195e04c…, total_amount=136998）
+
+E2E 中に DD-02 char_backfill の latent bug を検出・修正した: /ocr の word box が
+4 点ポリゴン形式 `[[x,y],…]` で返ると `len(b)==4` ガードを素通りして
+`int([x,y])` が TypeError → ジョブが ACK されず永久再配信。矩形/ポリゴン両形を
+外接矩形へ正規化して解消（`_word_box_rect`）。滞留していたジョブは修正版デプロイ後に
+XAUTOCLAIM で回収され、checkpoint から自動回復して完走した（durable execution の実証）。
 
 規模: 中。
 

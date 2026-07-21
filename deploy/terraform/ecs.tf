@@ -100,6 +100,10 @@ resource "aws_ecs_task_definition" "orchestrator_worker" {
       { name = "STRUCTURE_URL", value = local.structure_url },
       { name = "OCR_URL", value = local.ocr_url },
       { name = "LLM_PROVIDER", value = var.llm_provider },
+      # S3 イベント駆動トリガー（§16 P4）。ingest の書込み先と SQS 購読先
+      { name = "S3_BUCKET", value = aws_s3_bucket.this.id },
+      { name = "S3_KMS_KEY_ID", value = var.s3_kms_key_id },
+      { name = "TRIGGER_SQS_URL", value = data.aws_sqs_queue.workflow_trigger.url },
       ], var.vl_enabled ? [
       { name = "VL_URL", value = local.vl_url },
     ] : [])
