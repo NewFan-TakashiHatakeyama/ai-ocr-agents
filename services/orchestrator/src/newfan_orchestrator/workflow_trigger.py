@@ -23,11 +23,14 @@ import logging
 import posixpath
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
 
+from newfan_metrics import watch_lag_seconds
 from newfan_workflow import WorkflowGraph
-from newfan_workflow.models import S3EventNode
+from newfan_workflow.cron import JST, CronError, cron_matches
+from newfan_workflow.models import S3EventNode, ScheduleNode
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,17 @@ class TriggerStore(Protocol):
         pages: list[dict[str, Any]],
         matches: list[TriggerMatch],
     ) -> list[str]: ...
+    def list_tenant_ids(self) -> list[str]: ...
+    def register_scheduled_run(
+        self,
+        tenant_id: str,
+        *,
+        workflow_id: str,
+        workflow_version: int,
+        graph_json: dict[str, Any],
+        node_id: str,
+        fire_minute: str,
+    ) -> Optional[str]: ...
 
 
 def match_s3_event(
@@ -129,12 +143,27 @@ class S3TriggerConsumer:
         self._enqueue = enqueue
         self._interval = poll_interval_sec
         self._last_poll = 0.0
+        self._polls = 0
 
     def run_once(self) -> int:
         now = time.monotonic()
         if now - self._last_poll < self._interval:
             return 0
         self._last_poll = now
+
+        # watch_lag_seconds（§16.8）: SQS の最古メッセージ滞留時間。毎回だと API が
+        # 無駄なので 12 回に 1 回（約 1 分毎）だけ測る
+        self._polls += 1
+        if self._polls % 12 == 1:
+            try:
+                attrs = self._sqs.get_queue_attributes(
+                    QueueUrl=self._queue_url,
+                    AttributeNames=["ApproximateAgeOfOldestMessage"],
+                )
+                age = float(attrs.get("Attributes", {}).get("ApproximateAgeOfOldestMessage", 0))
+                watch_lag_seconds.labels(connection="workflow-trigger").set(age)
+            except Exception:  # noqa: BLE001 - 計測失敗で本処理を止めない
+                logger.debug("[trigger] watch_lag の取得に失敗", exc_info=True)
 
         resp = self._sqs.receive_message(
             QueueUrl=self._queue_url, MaxNumberOfMessages=10, WaitTimeSeconds=0
@@ -292,6 +321,30 @@ class InMemoryTriggerStore:
     def already_claimed(self, tenant_id, connection_id, source_key, content_hash) -> bool:
         return (tenant_id, connection_id, source_key, content_hash) in self.claims
 
+    def list_tenant_ids(self) -> list[str]:
+        return sorted(self.workflows.keys())
+
+    def register_scheduled_run(
+        self, tenant_id, *, workflow_id, workflow_version, graph_json, node_id, fire_minute
+    ):
+        key = (tenant_id, node_id, f"schedule:{workflow_id}", fire_minute)
+        if key in self.claims:
+            return None
+        self.claims.add(key)
+        self._seq += 1
+        run_id = f"wfrun_sched_{self._seq}"
+        self.runs.append(
+            {
+                "id": run_id,
+                "tenant_id": tenant_id,
+                "workflow_id": workflow_id,
+                "document_id": None,
+                "source_key": f"schedule:{workflow_id}",
+                "fired_at": fire_minute,
+            }
+        )
+        return run_id
+
     def register_ingested(
         self, tenant_id, *, source_key, content_hash, document, pages, matches
     ) -> list[str]:
@@ -322,3 +375,87 @@ class InMemoryTriggerStore:
             )
             run_ids.append(run_id)
         return run_ids
+
+
+class ScheduleTicker:
+    """source.schedule の分ティック評価（§16 P8）。
+
+    設計 v0.2 §7.3 は「EventBridge Scheduler → SQS」としていたが、cron の
+    Scheduler 同期（activate/pause/版更新のたびに AWS リソースを増減）は
+    down（destroy）運用と噛み合わないため、**consumer 内の分ティック**に変更した
+    （設計書に反映済み）。up の間だけ評価し、down 中の発火はしない
+    （§1.3: 即時処理の保証はスコープ外。s3_event と違い「置かれたファイル」が
+    無いので、過ぎた時刻の遡り発火はしない）。
+
+    dedup は source_cursors の UNIQUE（workflow+node+分時刻）。consumer が
+    複数居ても 1 分につき 1 run になる。直近 5 分まで遡って評価する
+    （ループが数十秒詰まった程度で日次ジョブを落とさないため）。
+    """
+
+    LOOKBACK_MINUTES = 5
+
+    def __init__(
+        self,
+        *,
+        store: TriggerStore,
+        enqueue: Callable[[str, dict[str, Any]], None],
+    ) -> None:
+        self._store = store
+        self._enqueue = enqueue
+        self._last_minute: Optional[datetime] = None
+
+    def run_once(self, now: Optional[datetime] = None) -> int:
+        now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        minute = now.replace(second=0, microsecond=0)
+        if self._last_minute is not None and minute <= self._last_minute:
+            return 0
+        start = self._last_minute or (minute - timedelta(minutes=1))
+        start = max(start, minute - timedelta(minutes=self.LOOKBACK_MINUTES))
+        fired = 0
+        m = start + timedelta(minutes=1)
+        while m <= minute:
+            fired += self._fire_minute(m)
+            m += timedelta(minutes=1)
+        self._last_minute = minute
+        return fired
+
+    def _fire_minute(self, minute: datetime) -> int:
+        fired = 0
+        for tenant_id in self._store.list_tenant_ids():
+            for wf_id, version, graph_json in self._store.list_active_workflows(tenant_id):
+                try:
+                    wf = WorkflowGraph.model_validate(graph_json)
+                except Exception:  # noqa: BLE001 - 壊れた定義で他を止めない
+                    continue
+                for node in wf.nodes:
+                    if not isinstance(node, ScheduleNode):
+                        continue
+                    try:
+                        if not cron_matches(node.config.cron, minute):
+                            continue
+                    except CronError:
+                        logger.warning(
+                            "[schedule] cron 式が不正のため skip: workflow=%s node=%s",
+                            wf_id, node.id,
+                        )
+                        continue
+                    run_id = self._store.register_scheduled_run(
+                        tenant_id,
+                        workflow_id=wf_id,
+                        workflow_version=version,
+                        graph_json=graph_json,
+                        node_id=node.id,
+                        fire_minute=minute.astimezone(JST).strftime("%Y-%m-%dT%H:%M%z"),
+                    )
+                    if run_id is None:
+                        continue  # 別 consumer が発火済み（dedup）
+                    self._enqueue(
+                        "q.workflow",
+                        {"type": "start", "tenant_id": tenant_id, "workflow_run_id": run_id},
+                    )
+                    logger.info(
+                        "[schedule] 発火: tenant=%s workflow=%s node=%s run=%s",
+                        tenant_id, wf_id, node.id, run_id,
+                    )
+                    fired += 1
+        return fired

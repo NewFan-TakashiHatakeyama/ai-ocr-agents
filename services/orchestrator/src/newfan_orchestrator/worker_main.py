@@ -161,7 +161,7 @@ def main() -> None:
         from newfan_export.webhook import WebhookSender
 
         from newfan_orchestrator.aws_secrets import SecretsManagerResolver
-        from newfan_orchestrator.workflow_sinks import PgDbWriter
+        from newfan_orchestrator.workflow_sinks import NotifySender, PgDbWriter, S3FileWriter
 
         resolve_secret = SecretsManagerResolver()
         wf_store = PgWorkflowRunStore(
@@ -183,9 +183,19 @@ def main() -> None:
                 send_webhook=WebhookSender().send,
                 write_db=PgDbWriter().write,
                 resolve_secret=resolve_secret,
+                write_file=S3FileWriter(
+                    kms_key_id=os.environ.get("S3_KMS_KEY_ID") or None
+                ).write,
+                send_notify=NotifySender().send,
             ),
             checkpointer=wf_checkpointer,
         )
+        # source.schedule の分ティック（§16 P8）。トリガー store と共用
+        from newfan_orchestrator.workflow_trigger import ScheduleTicker
+
+        trigger_store = PgTriggerStore(os.environ["DATABASE_URL"])
+        ticker = ScheduleTicker(store=trigger_store, enqueue=export_queue.enqueue)
+
         # S3 イベント駆動トリガー（§16 設計 v0.2 §7.2）。TRIGGER_SQS_URL 未設定なら無効
         #（compose/ローカルは手動実行のみ）。
         trigger = None
@@ -207,7 +217,7 @@ def main() -> None:
             trigger = S3TriggerConsumer(
                 sqs=boto3.client("sqs"),
                 queue_url=os.environ["TRIGGER_SQS_URL"],
-                store=PgTriggerStore(os.environ["DATABASE_URL"]),
+                store=trigger_store,
                 fetch=lambda b, k: s3.get_object(Bucket=b, Key=k)["Body"].read(),
                 ingest=ingest.ingest,
                 enqueue=export_queue.enqueue,
@@ -220,6 +230,7 @@ def main() -> None:
             runner.run_once(count=10)
             if trigger is not None:
                 trigger.run_once()  # 5 秒間隔で SQS をポーリング（内部で間引く）
+            ticker.run_once()  # source.schedule の分ティック（分が変わった時だけ動く）
     print("[worker] SIGTERM 受信: 停止しました")
 
 

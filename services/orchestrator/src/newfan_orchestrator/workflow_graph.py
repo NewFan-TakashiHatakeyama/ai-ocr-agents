@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -32,12 +33,15 @@ from newfan_workflow.dbsink import (
     check_row_limit,
 )
 from newfan_workflow.models import (
+    ClassifyNode,
     ConditionNode,
     DbWriteNode,
     ExtractNode,
+    FileSinkNode,
     HitlGateNode,
     ManualNode,
     MapFieldsNode,
+    NotifyNode,
     WebhookSinkNode,
 )
 
@@ -74,6 +78,8 @@ class WorkflowState(TypedDict, total=False):
 
 WriteDbFn = Callable[[str, str, list[dict[str, Any]]], int]  # (dsn, sql, rows) -> 行数
 ResolveSecretFn = Callable[[str], str]  # secret_ref -> 秘密（Secrets Manager 解決）
+WriteFileFn = Callable[[str, str, bytes, str], None]  # (bucket, key, body, content_type)
+SendNotifyFn = Callable[[str, str], bool]  # (url, text) -> 成否
 
 
 @dataclass
@@ -83,6 +89,9 @@ class RunnerDeps:
     # P6: sink.db_write。未配線のグラフで db_write ノードに達したら明示的に落とす
     write_db: Optional[WriteDbFn] = None
     resolve_secret: Optional[ResolveSecretFn] = None
+    # P8: sink.file / sink.notify
+    write_file: Optional[WriteFileFn] = None
+    send_notify: Optional[SendNotifyFn] = None
 
 
 def _wrap(node_id: str, node_type: str, fn: Callable, store: WorkflowRunStore) -> Callable:
@@ -288,6 +297,121 @@ def _make_db_write(node: DbWriteNode, deps: RunnerDeps, map_preds: list[str]) ->
     return run
 
 
+def _make_classify(node: ClassifyNode) -> Callable:
+    """process.classify（P8）。抽出結果の doc_type を許可リストと照合する。
+
+    分類そのものは抽出グラフ（§4）が行い doc_type を返す（DD-11: ここで再分類しない）。
+    on_unknown=halt は対象外帳票で run を止める。default_route は素通り
+    （下流の branch.condition が doc.doc_type で経路を分ける前提）。
+    """
+
+    def run(state: WorkflowState) -> dict[str, Any]:
+        dt = state.get("doc_type")
+        known = dt in node.config.doc_types
+        if not known and node.config.on_unknown == "halt":
+            raise RuntimeError(
+                f"doc_type が分類対象外です: {dt!r}（対象: {node.config.doc_types}）"
+            )
+        return {"node_outputs": {node.id: {"doc_type": dt, "known": known}}}
+
+    return run
+
+
+def _render_path(template: str, state: WorkflowState, node_id: str) -> str:
+    """sink.file のパス。プレースホルダのみ許可（任意式は入れない）。"""
+    values = {
+        "workflow_run_id": state.get("workflow_run_id", ""),
+        "document_id": state.get("document_id", ""),
+        "node_id": node_id,
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+    }
+    out = template
+    for k, v in values.items():
+        out = out.replace("{" + k + "}", str(v))
+    return out.lstrip("/")
+
+
+def _make_file(node: FileSinkNode, deps: RunnerDeps, map_preds: list[str]) -> Callable:
+    """sink.file（P8）。canonical な断面を S3（type='s3' 接続のバケット）へ書く。
+
+    冪等: キーは run 単位で決定的（既定でパスに workflow_run_id を含める運用）。
+    再実行は同一キーへの上書きで無害（§6.4）。
+    """
+
+    def run(state: WorkflowState) -> dict[str, Any]:
+        if deps.write_file is None:
+            raise RuntimeError("file sink が配線されていません（RunnerDeps.write_file）")
+        bucket = deps.store.get_s3_connection(state["tenant_id"], node.config.connection_id)
+        if bucket is None:
+            raise RuntimeError(
+                f"s3 接続が見つからないか疎通未確認です: {node.config.connection_id}"
+            )
+        data = _sink_data(state, map_preds)
+        key = _render_path(node.config.path, state, node.id)
+        if node.config.format == "csv":
+            import csv
+            import io as _io
+
+            buf = _io.StringIO()
+            w = csv.DictWriter(buf, fieldnames=list(data.keys()))
+            w.writeheader()
+            w.writerow(data)
+            body, ctype = buf.getvalue().encode("utf-8-sig"), "text/csv"  # Excel 互換 BOM
+        else:
+            body = json.dumps(data, ensure_ascii=False, indent=1).encode("utf-8")
+            ctype = "application/json"
+        deps.write_file(bucket, key, body, ctype)
+        return {"node_outputs": {node.id: {"bucket": bucket, "key": key, "bytes": len(body)}}}
+
+    return run
+
+
+class _SafeMap(dict):
+    def __missing__(self, key: str) -> str:  # 未定義プレースホルダは空文字（通知を止めない）
+        return ""
+
+
+def _make_notify(node: NotifyNode, deps: RunnerDeps) -> Callable:
+    """sink.notify（P8）。Slack incoming webhook（connections type='webhook'）へ
+    {"text": テンプレート展開} を POST する。when 式が偽なら送らない。"""
+
+    def run(state: WorkflowState) -> dict[str, Any]:
+        if deps.send_notify is None:
+            raise RuntimeError("notify が配線されていません（RunnerDeps.send_notify）")
+        if node.config.when:
+            ctx = EvalContext(
+                run_status=state.get("run_status") or None,
+                run_confidence=state.get("run_confidence"),
+                doc_type=state.get("doc_type"),
+                fields={
+                    name: FieldView(value=f.get("value"), confidence=f.get("confidence"))
+                    for name, f in (state.get("fields") or {}).items()
+                },
+            )
+            if not evaluate(parse_expr(node.config.when), ctx):
+                return {"node_outputs": {node.id: {"sent": False, "reason": "when=false"}}}
+        conn = deps.store.get_webhook_connection(state["tenant_id"], node.config.connection_id)
+        if conn is None:
+            raise RuntimeError(
+                f"webhook 接続が見つからないか疎通未確認です: {node.config.connection_id}"
+            )
+        url, _secret = conn  # Slack incoming webhook は URL 自体が秘密。署名は使わない
+        values = _SafeMap(
+            workflow_run_id=state.get("workflow_run_id", ""),
+            document_id=state.get("document_id", ""),
+            run_status=state.get("run_status", ""),
+            doc_type=state.get("doc_type") or "",
+        )
+        for name, f in (state.get("fields") or {}).items():
+            values[name] = f.get("value") or ""
+        text = node.config.template.format_map(values)
+        if not deps.send_notify(url, text):
+            raise RuntimeError(f"notify 送信に失敗しました: node={node.id}")
+        return {"node_outputs": {node.id: {"sent": True}}}
+
+    return run
+
+
 def _make_hitl_gate(node: HitlGateNode) -> Callable:
     """branch.hitl_gate（§8 / P5）。
 
@@ -369,6 +493,15 @@ def build_workflow_app(
                 p for p in sorted(preds[node.id]) if isinstance(wf.get(p), MapFieldsNode)
             ]
             fn = _make_db_write(node, deps, map_preds)
+        elif isinstance(node, FileSinkNode):
+            map_preds = [
+                p for p in sorted(preds[node.id]) if isinstance(wf.get(p), MapFieldsNode)
+            ]
+            fn = _make_file(node, deps, map_preds)
+        elif isinstance(node, NotifyNode):
+            fn = _make_notify(node, deps)
+        elif isinstance(node, ClassifyNode):
+            fn = _make_classify(node)
         elif isinstance(node, HitlGateNode):
             fn = _make_hitl_gate(node)
         elif isinstance(node, (ConditionNode, ManualNode)) or is_trigger(node):

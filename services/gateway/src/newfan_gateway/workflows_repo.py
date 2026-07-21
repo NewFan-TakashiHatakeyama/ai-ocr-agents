@@ -31,6 +31,11 @@ IMPLEMENTED_NODE_TYPES: frozenset[str] = frozenset(
         "transform.map_fields",
         "sink.webhook",
         "sink.db_write",  # P6: DD-12（プリペアド INSERT/UPSERT + allowed_tables + dry-run）
+        "source.schedule",  # P8: consumer 内の分ティック + source_cursors dedup
+        "process.classify",  # P8: 抽出結果 doc_type の許可リスト照合
+        "sink.file",  # P8: S3 へ canonical JSON/CSV
+        "sink.notify",  # P8: Slack incoming webhook 互換
+        # source.email_attachment は post-MVP（SES 受信→S3 保存で s3_event が代替）
     }
 )
 

@@ -26,6 +26,7 @@ from newfan_metrics.registry import (
     stp_rate,
     webhook_delivery_failures_total,
     sink_write_rows_total,
+    watch_lag_seconds,
     workflow_node_duration_seconds,
     workflow_runs_total,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "review_time_seconds",
     "webhook_delivery_failures_total",
     "sink_write_rows_total",
+    "watch_lag_seconds",
     "workflow_node_duration_seconds",
     "workflow_runs_total",
 ]

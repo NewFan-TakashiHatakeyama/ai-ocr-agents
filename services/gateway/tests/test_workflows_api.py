@@ -183,13 +183,13 @@ def test_未実装ノードを含むとactivateできない(client: TestClient) 
     g = copy.deepcopy(GRAPH_OK)
     g["nodes"][0] = {
         "id": "t1",
-        "type": "source.schedule",
-        "config": {"cron": "0 9 * * 1"},
+        "type": "source.email_attachment",
+        "config": {"connection_id": "con_hook"},
     }
     w = _create(client, graph=g)
     r = client.post(f"/v1/workflows/{w['id']}/activate", headers=_auth())
     assert r.status_code == 422
-    assert r.json()["error"]["details"]["unsupported_types"] == ["source.schedule"]
+    assert r.json()["error"]["details"]["unsupported_types"] == ["source.email_attachment"]
 
 
 def test_pauseはactiveのみ(client: TestClient) -> None:
@@ -247,4 +247,7 @@ def test_catalogは13種のJSONSchemaと実装済み一覧を返す(client: Test
     assert "source.s3_event" in body["implemented"]  # P4 で実装済み
     assert "branch.hitl_gate" in body["implemented"]  # P5 で実装済み
     assert "sink.db_write" in body["implemented"]  # P6 で実装済み
-    assert "source.schedule" not in body["implemented"]  # P8
+    assert "source.schedule" in body["implemented"]  # P8 で実装済み
+    assert "sink.notify" in body["implemented"]  # P8 で実装済み
+    # email_attachment は post-MVP（SES 受信→S3 で s3_event が代替）
+    assert "source.email_attachment" not in body["implemented"]

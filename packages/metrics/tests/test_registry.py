@@ -41,6 +41,7 @@ EXPECTED_TYPES = {
     "workflow_runs_total": "counter",
     "workflow_node_duration_seconds": "histogram",
     "sink_write_rows_total": "counter",
+    "watch_lag_seconds": "gauge",
 }
 
 # prometheus_client が自動で足す付随メトリクス。設計書の表には無いが実装都合で出る。

@@ -86,6 +86,11 @@ sink_write_rows_total = Counter(
     "sink_write_rows_total", "sink.db_write の書込み行数（§16.8 / P6）",
     ["connection"], registry=REGISTRY,
 )
+watch_lag_seconds = Gauge(
+    "watch_lag_seconds",
+    "トリガー SQS の最古メッセージ滞留秒（ApproximateAgeOfOldestMessage, §16.8 / P8）",
+    ["connection"], registry=REGISTRY,
+)
 
 
 def render_latest() -> bytes:

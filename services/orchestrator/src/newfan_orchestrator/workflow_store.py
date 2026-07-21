@@ -99,6 +99,7 @@ class WorkflowRunStore(Protocol):
     def get_db_connection(
         self, tenant_id: str, connection_id: str
     ) -> Optional["DbConnectionInfo"]: ...
+    def get_s3_connection(self, tenant_id: str, connection_id: str) -> Optional[str]: ...
 
 
 class InMemoryWorkflowRunStore:
@@ -111,6 +112,7 @@ class InMemoryWorkflowRunStore:
         self.enqueued: list[dict[str, Any]] = []
         self.webhooks: dict[str, tuple[str, str]] = {}
         self.db_connections: dict[str, DbConnectionInfo] = {}
+        self.s3_connections: dict[str, str] = {}
         self.extract_results: dict[str, dict[str, Any]] = {}  # run_id → result
         self._locked: set[str] = set()
         self._seq = 0
@@ -220,6 +222,12 @@ class InMemoryWorkflowRunStore:
 
     def get_db_connection(self, tenant_id, connection_id):
         return self.db_connections.get(f"{tenant_id}:{connection_id}")
+
+    def seed_s3_connection(self, tenant_id, connection_id, bucket) -> None:
+        self.s3_connections[f"{tenant_id}:{connection_id}"] = bucket
+
+    def get_s3_connection(self, tenant_id, connection_id):
+        return self.s3_connections.get(f"{tenant_id}:{connection_id}")
 
 
 class PgWorkflowRunStore:
@@ -480,6 +488,20 @@ class PgWorkflowRunStore:
             config=row[0] or {}, secret_ref=row[1], allowed_tables=list(row[2] or []),
         )
 
+    def get_s3_connection(self, tenant_id, connection_id):
+        from sqlalchemy import text
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            row = c.execute(
+                text(
+                    "SELECT config->>'bucket' FROM connections WHERE tenant_id=:t AND id=:i"
+                    " AND type='s3' AND status IN ('active','tested')"
+                ),
+                {"t": tenant_id, "i": connection_id},
+            ).first()
+        return row[0] if row else None
+
 
 
 class PgTriggerStore:
@@ -541,6 +563,71 @@ class PgTriggerStore:
                 {"t": tenant_id, "c": connection_id, "k": source_key, "h": content_hash},
             ).first()
         return row is not None
+
+    def list_tenant_ids(self):
+        from sqlalchemy import text
+
+        # tenants は RLS 対象外（tenant_id 列を持たない台帳）。schedule はテナント横断で
+        # 評価する必要があり、ここだけが横断的に読む
+        with self._engine.begin() as c:
+            rows = c.execute(text("SELECT id FROM tenants")).all()
+        return [r[0] for r in rows]
+
+    def register_scheduled_run(
+        self, tenant_id, *, workflow_id, workflow_version, graph_json, node_id, fire_minute
+    ):
+        """schedule 発火の run を作る。分単位の dedup は source_cursors の UNIQUE
+        （connection_id=node_id / source_key=schedule:workflow / content_hash=分時刻）。
+        claim と run INSERT は同一 TX（片方だけ残ると発火漏れ/二重になる）。"""
+        import uuid
+
+        from sqlalchemy import text
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "INSERT INTO source_cursors"
+                    " (id, tenant_id, connection_id, source_key, content_hash, workflow_id)"
+                    " VALUES (:i,:t,:c,:k,:h,:w)"
+                    " ON CONFLICT (tenant_id, connection_id, source_key, content_hash)"
+                    " DO NOTHING"
+                ),
+                {
+                    "i": f"cur_{uuid.uuid4().hex[:24]}",
+                    "t": tenant_id,
+                    "c": node_id,
+                    "k": f"schedule:{workflow_id}",
+                    "h": fire_minute,
+                    "w": workflow_id,
+                },
+            )
+            if not r.rowcount:
+                return None  # 既に発火済み（別 consumer / 再評価）
+            run_id = f"wfrun_{uuid.uuid4().hex[:24]}"
+            c.execute(
+                text(
+                    "INSERT INTO workflow_runs (id, tenant_id, workflow_id,"
+                    " workflow_version, trigger, document_id, state, status)"
+                    " VALUES (:i,:t,:w,:v, CAST(:tr AS jsonb), NULL, '{}'::jsonb, 'running')"
+                ),
+                {
+                    "i": run_id,
+                    "t": tenant_id,
+                    "w": workflow_id,
+                    "v": workflow_version,
+                    "tr": json.dumps(
+                        {
+                            "type": "schedule",
+                            "node_id": node_id,
+                            "fired_at": fire_minute,
+                            "graph_json": graph_json,
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+        return run_id
 
     def register_ingested(
         self, tenant_id, *, source_key, content_hash, document, pages, matches
