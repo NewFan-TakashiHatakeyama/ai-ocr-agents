@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
+import uuid
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, UploadFile
@@ -21,6 +23,7 @@ from newfan_gateway.config import Settings
 from newfan_gateway.admin import AdminRepository, is_activatable
 from newfan_gateway.deps import (
     get_admin,
+    get_secret_store,
     get_chat_agent,
     get_ingestor,
     get_lock_store,
@@ -829,11 +832,51 @@ def lint_workflow(
     )
 
 
+def _sink_previews(graph: Any, tenant_id: str, admin: AdminRepository) -> list[dto.SinkPreviewDto]:
+    from newfan_gateway.dryrun import preview_sinks
+
+    previews = preview_sinks(graph, lambda cid: admin.get_connection(tenant_id, cid))
+    return [
+        dto.SinkPreviewDto(
+            node_id=p.node_id, node_type=p.node_type, ok=p.ok,
+            connection_id=p.connection_id, sql=p.sql, payload=p.payload,
+            columns=p.columns, error=p.error,
+        )
+        for p in previews
+    ]
+
+
+@router.post("/workflows/{workflow_id}/dry-run", response_model=dto.DryRunResult)
+def dry_run_workflow(
+    workflow_id: str,
+    principal: Principal = Depends(require_role("admin")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.DryRunResult:
+    """dry-run（sink プレビュー, §9 / P6）。
+
+    sink は実行しない。db_write の SQL は実行側と同一実装（dbsink）で生成するため
+    「プレビュー = 実 SQL」。db_write を含むワークフローの有効化はこれの成功が前提。
+    """
+    rec = wf.get_workflow(principal.tenant_id, workflow_id)
+    if rec is None:
+        raise ApiError("E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id})
+    graph = _validate_graph(rec.graph_json)
+    sinks = _sink_previews(graph, principal.tenant_id, admin)
+    ok = all(p.ok for p in sinks)
+    wf.record_audit(
+        principal.tenant_id, actor_id=principal.sub, action="workflow.dry_run",
+        target_id=workflow_id, detail={"ok": ok},
+    )
+    return dto.DryRunResult(ok=ok, sinks=sinks)
+
+
 @router.post("/workflows/{workflow_id}/activate", response_model=dto.WorkflowDto)
 def activate_workflow(
     workflow_id: str,
     principal: Principal = Depends(require_role("admin")),
     wf: WorkflowsRepository = Depends(get_workflows),
+    admin: AdminRepository = Depends(get_admin),
 ) -> dto.WorkflowDto:
     """有効化＝版の固定（§11.1）。lint error ゼロ + 実装済みノードのみが条件。"""
     rec = wf.get_workflow(principal.tenant_id, workflow_id)
@@ -857,6 +900,20 @@ def activate_workflow(
             "構成 lint にエラーがあります（有効化できません）",
             details={"findings": [f.__dict__ for f in errors]},
         )
+
+    # P6: db_write を含むグラフは dry-run 成功が有効化の前提（§8 / DD-12）。
+    # webhook のみのグラフには課さない（接続実在は L010 が担保）
+    from newfan_workflow.models import DbWriteNode
+
+    if any(isinstance(n, DbWriteNode) for n in graph.nodes):
+        sinks = _sink_previews(graph, principal.tenant_id, admin)
+        bad = [p for p in sinks if p.node_type == "sink.db_write" and not p.ok]
+        if bad:
+            raise ApiError(
+                "E4001",
+                "dry-run が失敗しました（有効化できません）",
+                details={"dry_run": [p.model_dump() for p in bad]},
+            )
 
     updated = wf.set_status(principal.tenant_id, workflow_id, "active")
     assert updated is not None  # 直前に取得済み
@@ -896,11 +953,171 @@ def pause_workflow(
     return _workflow_dto(updated)
 
 
+_CONNECTION_TYPES = {"postgres", "webhook", "s3"}
+# 秘密らしいキーの部分一致判定に使う（完全一致だと passwd/secret_access_key 等が抜ける）
+_SECRETY_SUBSTRINGS = ("secret", "password", "passwd", "pwd", "token", "api_key", "apikey",
+                       "credential")
+
+
+def _find_secrety_keys(obj: Any, path: str = "") -> list[str]:
+    """config 内の秘密らしいキーを**再帰的に**探す（ネスト 1 段で回避されないように）。"""
+    found: list[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            kp = f"{path}.{k}" if path else str(k)
+            if any(sub in str(k).lower() for sub in _SECRETY_SUBSTRINGS):
+                found.append(kp)
+            found.extend(_find_secrety_keys(v, kp))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            found.extend(_find_secrety_keys(v, f"{path}[{i}]"))
+    return found
+
+
+def _redact_config(obj: Any) -> Any:
+    """API 応答用の再帰マスク。旧 webhook 行など既存の平文秘密を外に出さない。"""
+    if isinstance(obj, dict):
+        return {
+            k: ("***" if any(sub in str(k).lower() for sub in _SECRETY_SUBSTRINGS)
+                else _redact_config(v))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_redact_config(v) for v in obj]
+    return obj
+
+
+@router.get("/connections", response_model=dto.ConnectionList)
+def list_connections(
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.ConnectionList:
+    rows = admin.list_connections(principal.tenant_id)
+    return dto.ConnectionList(
+        items=[
+            dto.ConnectionDto(
+                id=r.id, type=r.type, name=r.name,
+                # 旧 webhook 行の config.secret（平文）を API に出さない（再帰マスク）
+                config=_redact_config(r.config or {}),
+                secret_ref=r.secret_ref, allowed_tables=r.allowed_tables,
+                status=r.status, created_at=r.created_at,
+            )
+            for r in rows
+        ]
+    )
+
+
+@router.post("/connections", status_code=201, response_model=dto.ConnectionDto)
+def create_connection(
+    body: dto.ConnectionCreateRequest,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.ConnectionDto:
+    """接続の登録（§16.5 / P6）。
+
+    秘密は受け取らない。利用者が Secrets Manager（ai-ocr/<env>/conn/ 配下）に登録し、
+    secret_ref（ARN）だけを渡す（LLM キーと同じ運用）。config に秘密が紛れたら断る。
+    """
+    if body.type not in _CONNECTION_TYPES:
+        raise ApiError(
+            "E4001", "未対応の接続種別です",
+            details={"type": body.type, "supported": sorted(_CONNECTION_TYPES)},
+        )
+    leaked = _find_secrety_keys(body.config)
+    if leaked:
+        raise ApiError(
+            "E4001",
+            "config に秘密を入れてはいけません（Secrets Manager に置いて secret_ref を渡す, §16.5）",
+            details={"keys": leaked},
+        )
+    # secret_ref はテナントの名前空間（.../conn/<tenant_id>/...）内だけを許す。
+    # これが無いと他テナントの秘密名/ARN を自分の接続に張り、自分の config.host へ
+    # パスワードとして送出させられる（クロステナント窃取。レビューで実証）
+    if body.secret_ref and f"/conn/{principal.tenant_id}/" not in body.secret_ref:
+        raise ApiError(
+            "E4001",
+            "secret_ref は自テナントの名前空間にある必要があります"
+            f"（ai-ocr/<env>/conn/{principal.tenant_id}/<名前> で登録して ARN か名前を渡す）",
+            details={"secret_ref": body.secret_ref},
+        )
+    table_re = r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$"
+    bad_tables = [t for t in body.allowed_tables if not re.match(table_re, t)]
+    if bad_tables:
+        raise ApiError("E4001", "allowed_tables が識別子ではありません", details={"tables": bad_tables})
+    rec = admin.create_connection(
+        principal.tenant_id, type=body.type, name=body.name, config=body.config,
+        secret_ref=body.secret_ref, allowed_tables=body.allowed_tables,
+    )
+    wf.record_audit(
+        principal.tenant_id, actor_id=principal.sub, action="connection.create",
+        target_id=rec.id, detail={"type": body.type, "allowed_tables": body.allowed_tables},
+    )
+    return dto.ConnectionDto(
+        id=rec.id, type=rec.type, name=rec.name, config=rec.config,
+        secret_ref=rec.secret_ref, allowed_tables=rec.allowed_tables,
+        status=rec.status, created_at=rec.created_at,
+    )
+
+
+@router.post("/connections/{connection_id}/test", response_model=dto.ConnectionTestResult)
+def test_connection(
+    connection_id: str,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+    wf: WorkflowsRepository = Depends(get_workflows),
+    secret_store: Any = Depends(get_secret_store),
+) -> dto.ConnectionTestResult:
+    """疎通テスト（DB は SELECT 1 のみ, §16.5 / P6）。成功で status='tested' になる。
+
+    sink/トリガーは tested/active の接続しか使わないため、これを通すまで実行に乗らない。
+    """
+    rec = admin.get_connection(principal.tenant_id, connection_id)
+    if rec is None:
+        raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
+    if rec.type != "postgres":
+        raise ApiError(
+            "E1005", "疎通テストは type=postgres のみ対応です", details={"type": rec.type}
+        )
+
+    from newfan_workflow.dbsink import DbSinkError, build_dsn
+
+    try:
+        secret = None
+        if rec.secret_ref:
+            if secret_store is None:
+                raise DbSinkError("secret_ref があるのに秘密の保管先が未配線です")
+            secret = secret_store.get(rec.secret_ref)
+        dsn = build_dsn(rec.config, secret)
+        import psycopg
+
+        with psycopg.connect(dsn, connect_timeout=5) as conn:
+            conn.execute("SELECT 1")
+    except Exception as exc:  # noqa: BLE001 - 失敗理由を利用者へ返す
+        # DSN パースエラー等の例外文言には秘密の断片が混ざり得るため必ずマスクする
+        msg = str(exc)
+        if secret:
+            msg = msg.replace(secret, "***")
+        wf.record_audit(
+            principal.tenant_id, actor_id=principal.sub, action="connection.test",
+            target_id=connection_id, detail={"ok": False},
+        )
+        return dto.ConnectionTestResult(ok=False, status=rec.status, message=msg[:500])
+
+    admin.set_connection_status(principal.tenant_id, connection_id, "tested")
+    wf.record_audit(
+        principal.tenant_id, actor_id=principal.sub, action="connection.test",
+        target_id=connection_id, detail={"ok": True},
+    )
+    return dto.ConnectionTestResult(ok=True, status="tested")
+
+
 @router.post("/webhooks/endpoints", status_code=201, response_model=dto.WebhookEndpointDto)
 def add_webhook_endpoint(
     body: dto.WebhookEndpointRequest,
     principal: Principal = Depends(require_role("admin")),
     admin: AdminRepository = Depends(get_admin),
+    secret_store: Any = Depends(get_secret_store),
 ) -> dto.WebhookEndpointDto:
     """Webhook 配信先の登録（§6.2 / §6.4）。
 
@@ -913,8 +1130,16 @@ def add_webhook_endpoint(
 
     # 署名鍵を利用者に選ばせない。弱い鍵を使われると署名検証（§6.4）が意味を失う。
     secret = body.secret or secrets.token_urlsafe(32)
+    # P6: 鍵は Secrets Manager に置き、DB には secret_ref（ARN）だけを残す（§16.5）。
+    # 保管先が未配線（ローカル）の場合のみ旧方式（config.secret）に fallback
+    secret_ref = None
+    if secret_store is not None:
+        secret_ref = secret_store.create(
+            f"{principal.tenant_id}/webhook-{uuid.uuid4().hex[:12]}", secret
+        )
     rec = admin.add_webhook_endpoint(
-        principal.tenant_id, url=body.url, secret=secret, name=body.name
+        principal.tenant_id, url=body.url,
+        secret=None if secret_ref else secret, name=body.name, secret_ref=secret_ref,
     )
     return dto.WebhookEndpointDto(
         id=rec.id,

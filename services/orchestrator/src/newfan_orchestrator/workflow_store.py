@@ -51,6 +51,19 @@ class LockedRun:
         self._update(status=status, waiting=waiting, error=error, finished=finished)
 
 
+@dataclass(frozen=True)
+class DbConnectionInfo:
+    """sink.db_write の接続情報（§16.5 / P6）。
+
+    秘密は DB に置かない。secret_ref（Secrets Manager の参照）だけを持ち、
+    解決（GetSecretValue）は runner 側の resolver が行う。
+    """
+
+    config: dict[str, Any]
+    secret_ref: Optional[str]
+    allowed_tables: list[str]
+
+
 class WorkflowRunStore(Protocol):
     def lock_run(
         self, tenant_id: str, workflow_run_id: str
@@ -83,6 +96,9 @@ class WorkflowRunStore(Protocol):
     def get_webhook_connection(
         self, tenant_id: str, connection_id: str
     ) -> Optional[tuple[str, str]]: ...
+    def get_db_connection(
+        self, tenant_id: str, connection_id: str
+    ) -> Optional["DbConnectionInfo"]: ...
 
 
 class InMemoryWorkflowRunStore:
@@ -94,6 +110,7 @@ class InMemoryWorkflowRunStore:
         self.extract_runs: dict[str, dict[str, Any]] = {}  # idem_key → run
         self.enqueued: list[dict[str, Any]] = []
         self.webhooks: dict[str, tuple[str, str]] = {}
+        self.db_connections: dict[str, DbConnectionInfo] = {}
         self.extract_results: dict[str, dict[str, Any]] = {}  # run_id → result
         self._locked: set[str] = set()
         self._seq = 0
@@ -193,15 +210,34 @@ class InMemoryWorkflowRunStore:
     def get_webhook_connection(self, tenant_id, connection_id):
         return self.webhooks.get(f"{tenant_id}:{connection_id}")
 
+    def seed_db_connection(
+        self, tenant_id, connection_id, *, config=None, secret_ref=None, allowed_tables=()
+    ) -> None:
+        self.db_connections[f"{tenant_id}:{connection_id}"] = DbConnectionInfo(
+            config=dict(config or {}), secret_ref=secret_ref,
+            allowed_tables=list(allowed_tables),
+        )
+
+    def get_db_connection(self, tenant_id, connection_id):
+        return self.db_connections.get(f"{tenant_id}:{connection_id}")
+
 
 class PgWorkflowRunStore:
     """本番実装（runtime 依存: sqlalchemy + psycopg）。"""
 
-    def __init__(self, dsn: str, *, enqueue: EnqueueFn) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        enqueue: EnqueueFn,
+        resolve_secret: Optional[Callable[[str], str]] = None,
+    ) -> None:
         from sqlalchemy import create_engine
 
         self._engine = create_engine(dsn, future=True)
         self._enqueue = enqueue
+        # secret_ref（Secrets Manager 参照）の解決。未配線なら旧 config.secret のみ使える
+        self._resolve_secret = resolve_secret
 
     def _rls(self, c, tenant_id: str) -> None:
         from sqlalchemy import text
@@ -403,7 +439,7 @@ class PgWorkflowRunStore:
             self._rls(c, tenant_id)
             row = c.execute(
                 text(
-                    "SELECT config FROM connections WHERE tenant_id=:t AND id=:i"
+                    "SELECT config, secret_ref FROM connections WHERE tenant_id=:t AND id=:i"
                     " AND type='webhook' AND status IN ('active','tested')"
                 ),
                 {"t": tenant_id, "i": connection_id},
@@ -412,7 +448,37 @@ class PgWorkflowRunStore:
             return None
         cfg = row[0] or {}
         url = cfg.get("url")
-        return (url, cfg.get("secret", "")) if url else None
+        if not url:
+            return None
+        # P6 以降の登録は secret_ref（Secrets Manager）。旧行は config.secret に平文が
+        # 残っているため fallback で読む（移行期間の互換。§16.5 / 旧 Q5）。
+        # secret_ref があるのに resolver 未配線は設定ミス＝黙って空鍵にしない
+        if row[1]:
+            if self._resolve_secret is None:
+                raise RuntimeError(
+                    f"secret_ref があるのに resolver が配線されていません: {row[1]}"
+                )
+            return (url, self._resolve_secret(row[1]))
+        return (url, cfg.get("secret", ""))
+
+    def get_db_connection(self, tenant_id, connection_id):
+        from sqlalchemy import text
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            row = c.execute(
+                text(
+                    "SELECT config, secret_ref, allowed_tables FROM connections"
+                    " WHERE tenant_id=:t AND id=:i"
+                    " AND type='postgres' AND status IN ('active','tested')"
+                ),
+                {"t": tenant_id, "i": connection_id},
+            ).first()
+        if row is None:
+            return None
+        return DbConnectionInfo(
+            config=row[0] or {}, secret_ref=row[1], allowed_tables=list(row[2] or []),
+        )
 
 
 

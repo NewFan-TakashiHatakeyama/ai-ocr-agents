@@ -72,3 +72,34 @@ class HttpOrchestratorClient:
                 json={"tenant_id": tenant_id, "feedback": feedback, "notify": notify},
             )
             resp.raise_for_status()
+
+
+class BotoSecretStore:
+    """Secrets Manager 実装（§16.5 / P6）。
+
+    名前は ai-ocr/<env>/conn/ 配下に限定する（task ロールの IAM がこのプレフィクスに
+    スコープされている。terraform main.tf）。
+    """
+
+    def __init__(self, prefix: str) -> None:
+        self._prefix = prefix.rstrip("/")
+        self._client = None
+
+    def _cli(self):  # noqa: ANN202
+        if self._client is None:
+            import boto3
+
+            self._client = boto3.client("secretsmanager")
+        return self._client
+
+    def create(self, name: str, value: str) -> str:
+        full = f"{self._prefix}/{name}"
+        try:
+            resp = self._cli().create_secret(Name=full, SecretString=value)
+            return resp["ARN"]
+        except self._cli().exceptions.ResourceExistsException:
+            self._cli().put_secret_value(SecretId=full, SecretString=value)
+            return self._cli().describe_secret(SecretId=full)["ARN"]
+
+    def get(self, ref: str) -> str:
+        return self._cli().get_secret_value(SecretId=ref)["SecretString"]

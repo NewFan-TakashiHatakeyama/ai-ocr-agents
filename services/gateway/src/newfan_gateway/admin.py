@@ -57,11 +57,35 @@ class AdminRepository(Protocol):
         limit: int = 50,
     ) -> list[MemoryRecord]: ...
 
-    # Webhook 配信先（§6.4）。connections(type='webhook') 行として持つ
+    # Webhook 配信先（§6.4）。connections(type='webhook') 行として持つ。
+    # secret_ref があれば署名鍵は Secrets Manager 参照（P6。secret は保存しない）
     def add_webhook_endpoint(
-        self, tenant_id: str, *, url: str, secret: str, name: str
+        self,
+        tenant_id: str,
+        *,
+        url: str,
+        secret: Optional[str],
+        name: str,
+        secret_ref: Optional[str] = None,
     ) -> ConnectionRecord: ...
     def list_webhook_endpoints(self, tenant_id: str) -> list[ConnectionRecord]: ...
+
+    # 接続管理（§16.5 / P6）
+    def create_connection(
+        self,
+        tenant_id: str,
+        *,
+        type: str,
+        name: str,
+        config: dict[str, Any],
+        secret_ref: Optional[str],
+        allowed_tables: list[str],
+    ) -> ConnectionRecord: ...
+    def list_connections(self, tenant_id: str) -> list[ConnectionRecord]: ...
+    def get_connection(self, tenant_id: str, connection_id: str) -> Optional[ConnectionRecord]: ...
+    def set_connection_status(
+        self, tenant_id: str, connection_id: str, status: str
+    ) -> Optional[ConnectionRecord]: ...
 
     # KPI（§12.1）
     def metrics_summary(self, tenant_id: str) -> MetricsSummary: ...
@@ -158,20 +182,72 @@ class InMemoryAdminRepository:
 
     # --- webhook 配信先（§6.4） ---
     def add_webhook_endpoint(
-        self, tenant_id: str, *, url: str, secret: str, name: str
+        self,
+        tenant_id: str,
+        *,
+        url: str,
+        secret: Optional[str],
+        name: str,
+        secret_ref: Optional[str] = None,
     ) -> ConnectionRecord:
+        # secret_ref があれば config に秘密を入れない（§16.5）。無ければ旧方式（平文）
+        config = {"url": url} if secret_ref else {"url": url, "secret": secret}
         rec = ConnectionRecord(
             id=new_id("connection"),
             tenant_id=tenant_id,
             type="webhook",
             name=name,
-            config={"url": url, "secret": secret},
+            config=config,
+            secret_ref=secret_ref,
             # 疎通確認前は untested。export の list_webhook_endpoints は
             # active/tested しか拾わないため、登録しただけでは配信されない（§16.5 の安全策）。
             status="untested",
         )
         self._connections.append(rec)
         return rec
+
+    # --- 接続管理（§16.5 / P6） ---
+    def create_connection(
+        self,
+        tenant_id: str,
+        *,
+        type: str,
+        name: str,
+        config: dict[str, Any],
+        secret_ref: Optional[str],
+        allowed_tables: list[str],
+    ) -> ConnectionRecord:
+        rec = ConnectionRecord(
+            id=new_id("connection"),
+            tenant_id=tenant_id,
+            type=type,
+            name=name,
+            config=dict(config),
+            secret_ref=secret_ref,
+            allowed_tables=list(allowed_tables),
+            status="untested",
+        )
+        self._connections.append(rec)
+        return rec
+
+    def list_connections(self, tenant_id: str) -> list[ConnectionRecord]:
+        return [c for c in self._connections if c.tenant_id == tenant_id]
+
+    def get_connection(self, tenant_id: str, connection_id: str) -> Optional[ConnectionRecord]:
+        for c in self._connections:
+            if c.tenant_id == tenant_id and c.id == connection_id:
+                return c
+        return None
+
+    def set_connection_status(
+        self, tenant_id: str, connection_id: str, status: str
+    ) -> Optional[ConnectionRecord]:
+        rec = self.get_connection(tenant_id, connection_id)
+        if rec is None:
+            return None
+        updated = rec.model_copy(update={"status": status})
+        self._connections[self._connections.index(rec)] = updated
+        return updated
 
     def list_webhook_endpoints(self, tenant_id: str) -> list[ConnectionRecord]:
         return [c for c in self._connections if c.tenant_id == tenant_id and c.type == "webhook"]

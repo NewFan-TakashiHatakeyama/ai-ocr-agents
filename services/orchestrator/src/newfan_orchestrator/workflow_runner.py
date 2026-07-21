@@ -75,13 +75,16 @@ class WorkflowRunner:
             if locked is None:
                 raise NotReady(f"run が見つからないかロック中: {run_id}")
             typ0 = payload.get("type", "start")
-            if typ0 == "resume" and locked.status in ("succeeded", "failed", "skipped"):
-                # 終端済み run への notify（hitl_gate の無いグラフへの confirm_done、
-                # at-least-once の再配信など）。NotReady にすると永久再配信になるため
-                # ack して捨てる。failed の再実行は明示の retry API（§11.2）で行う
+            # 終端済み run への再配信は ack して捨てる（NotReady だと永久再配信、
+            # 通すと射影とメトリクスが二重計上される）。retry だけは failed からの
+            # 再実行が正規経路なので failed を除外する（§11.2）
+            terminal = ("succeeded", "skipped") if typ0 == "retry" else (
+                "succeeded", "failed", "skipped"
+            )
+            if typ0 in ("start", "resume", "retry") and locked.status in terminal:
                 logger.info(
-                    "[workflow] 終端済み run への resume を破棄: run=%s status=%s",
-                    run_id, locked.status,
+                    "[workflow] 終端済み run への %s を破棄: run=%s status=%s",
+                    typ0, run_id, locked.status,
                 )
                 return "ignored"
             app = self._app(locked)

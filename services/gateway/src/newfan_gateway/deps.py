@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import Depends, Header, Request
 
@@ -35,6 +35,11 @@ def get_ingestor(request: Request) -> Ingestor:
 
 def get_orchestrator(request: Request) -> OrchestratorClient:
     return request.app.state.orchestrator  # type: ignore[no-any-return]
+
+
+def get_secret_store(request: Request) -> Any:
+    """Secrets Manager（§16.5 / P6）。未配線（ローカル）なら None → 旧方式に fallback。"""
+    return getattr(request.app.state, "secret_store", None)
 
 
 def get_admin(request: Request) -> AdminRepository:

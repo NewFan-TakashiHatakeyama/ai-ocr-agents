@@ -45,7 +45,18 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
 
-    source = PgExportSource(os.environ["DATABASE_URL"])
+    # webhook の署名鍵は secret_ref（Secrets Manager）参照が正。移行期間の旧行のみ
+    # config.secret に fallback する（§16.5 / P6）。
+    def _resolve_secret(secret_ref: str, _cache: dict = {}) -> str:  # noqa: B006 - プロセス内キャッシュ
+        if secret_ref not in _cache:
+            import boto3
+
+            _cache[secret_ref] = boto3.client("secretsmanager").get_secret_value(
+                SecretId=secret_ref
+            )["SecretString"]
+        return _cache[secret_ref]
+
+    source = PgExportSource(os.environ["DATABASE_URL"], resolve_secret=_resolve_secret)
     service = ExportService(_store(), WebhookSender())
     consumer = RedisStreamConsumer(
         os.environ["REDIS_URL"],

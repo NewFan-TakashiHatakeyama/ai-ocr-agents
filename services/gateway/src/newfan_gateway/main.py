@@ -85,6 +85,15 @@ def build_app(settings: Settings | None = None) -> FastAPI:
 
         chat_agent = LlmChatAgent(model=os.environ.get("LLM_MODEL", "claude-opus-4-8"))
 
+    # 秘密の保管先（§16.5 / P6）。AWS 上（DATABASE_URL あり）でのみ配線し、
+    # ローカルは旧方式（config.secret）に fallback する
+    secret_store = None
+    if settings.database_url and os.environ.get("AWS_REGION"):
+        from newfan_gateway.prod import BotoSecretStore
+
+        env = os.environ.get("APP_ENV", "production")
+        secret_store = BotoSecretStore(f"ai-ocr/{env}/conn")
+
     return create_app(
         settings=settings,
         repo=repo,
@@ -94,6 +103,7 @@ def build_app(settings: Settings | None = None) -> FastAPI:
         admin=admin,
         chat_agent=chat_agent,
         workflows=workflows,
+        secret_store=secret_store,
     )
 
 

@@ -279,6 +279,55 @@ class WorkflowRunList(BaseModel):
     items: list[WorkflowRunSummaryDto]
 
 
+class ConnectionCreateRequest(BaseModel):
+    """接続の登録（§16.5 / P6）。秘密は Secrets Manager に置き secret_ref（ARN）だけ渡す。"""
+
+    type: str  # postgres / webhook / s3
+    name: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_ref: Optional[str] = None
+    allowed_tables: list[str] = Field(default_factory=list)
+
+
+class ConnectionDto(BaseModel):
+    id: str
+    type: str
+    name: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_ref: Optional[str] = None
+    allowed_tables: list[str] = Field(default_factory=list)
+    status: str
+    created_at: Optional[str] = None
+
+
+class ConnectionList(BaseModel):
+    items: list[ConnectionDto]
+
+
+class ConnectionTestResult(BaseModel):
+    ok: bool
+    status: str
+    message: Optional[str] = None
+
+
+class SinkPreviewDto(BaseModel):
+    """dry-run の sink プレビュー（§9 / P6）。sql は実行側と同一実装で生成される。"""
+
+    node_id: str
+    node_type: str
+    ok: bool
+    connection_id: str
+    sql: Optional[str] = None
+    payload: Optional[dict[str, Any]] = None
+    columns: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class DryRunResult(BaseModel):
+    ok: bool
+    sinks: list[SinkPreviewDto]
+
+
 class WebhookEndpointRequest(BaseModel):
     url: str
     # 署名鍵（§6.4 X-NF-Signature）。省略時はサーバが生成して 1 度だけ返す。

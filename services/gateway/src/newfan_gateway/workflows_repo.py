@@ -30,6 +30,7 @@ IMPLEMENTED_NODE_TYPES: frozenset[str] = frozenset(
         "branch.condition",
         "transform.map_fields",
         "sink.webhook",
+        "sink.db_write",  # P6: DD-12（プリペアド INSERT/UPSERT + allowed_tables + dry-run）
     }
 )
 

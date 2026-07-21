@@ -16,8 +16,10 @@ from newfan_schemas import ExtractedField, TableResult
 
 
 class PgExportSource:
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, resolve_secret=None) -> None:
         self._engine = create_engine(dsn, future=True)
+        # webhook 署名鍵の secret_ref（Secrets Manager）解決。未配線なら旧 config.secret のみ
+        self._resolve_secret = resolve_secret
 
     def _rls(self, c, tenant_id: str) -> None:
         c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
@@ -98,14 +100,27 @@ class PgExportSource:
             self._rls(c, tenant_id)
             rows = c.execute(
                 text(
-                    "SELECT config FROM connections WHERE tenant_id=:t AND type='webhook' "
+                    "SELECT config, secret_ref FROM connections"
+                    " WHERE tenant_id=:t AND type='webhook' "
                     "AND status IN ('active','tested')"
                 ),
                 {"t": tenant_id},
             ).all()
         endpoints: list[WebhookEndpoint] = []
-        for (config,) in rows:
+        for config, secret_ref in rows:
             url = (config or {}).get("url")
-            if url:
-                endpoints.append(WebhookEndpoint(url=url, secret=(config or {}).get("secret", "")))
+            if not url:
+                continue
+            # P6 以降の登録は secret_ref（Secrets Manager）。旧行は config.secret（平文）
+            # の fallback（移行互換, §16.5）。secret_ref があるのに resolver 未配線なら
+            # 例外にする（黙って空鍵で署名すると受信側で検証不能な配信が成功扱いになる）
+            if secret_ref:
+                if self._resolve_secret is None:
+                    raise RuntimeError(
+                        f"secret_ref があるのに resolver が配線されていません: {secret_ref}"
+                    )
+                secret = self._resolve_secret(secret_ref)
+            else:
+                secret = (config or {}).get("secret", "")
+            endpoints.append(WebhookEndpoint(url=url, secret=secret))
         return endpoints

@@ -160,8 +160,14 @@ def main() -> None:
         # 常駐プロセスは増やさない（コスト。設計 §2.1）。
         from newfan_export.webhook import WebhookSender
 
+        from newfan_orchestrator.aws_secrets import SecretsManagerResolver
+        from newfan_orchestrator.workflow_sinks import PgDbWriter
+
+        resolve_secret = SecretsManagerResolver()
         wf_store = PgWorkflowRunStore(
-            os.environ["DATABASE_URL"], enqueue=export_queue.enqueue
+            os.environ["DATABASE_URL"],
+            enqueue=export_queue.enqueue,
+            resolve_secret=resolve_secret,
         )
         wf_consumer = RedisStreamConsumer(
             os.environ["REDIS_URL"],
@@ -172,7 +178,12 @@ def main() -> None:
         runner = WorkflowRunner(
             wf_store,
             wf_consumer,
-            RunnerDeps(store=wf_store, send_webhook=WebhookSender().send),
+            RunnerDeps(
+                store=wf_store,
+                send_webhook=WebhookSender().send,
+                write_db=PgDbWriter().write,
+                resolve_secret=resolve_secret,
+            ),
             checkpointer=wf_checkpointer,
         )
         # S3 イベント駆動トリガー（§16 設計 v0.2 §7.2）。TRIGGER_SQS_URL 未設定なら無効

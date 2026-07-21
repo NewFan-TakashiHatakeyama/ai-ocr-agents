@@ -560,7 +560,39 @@ class PgAdminRepository:
                 for r in rows
             ]
 
-    def add_webhook_endpoint(self, tenant_id: str, *, url: str, secret: str, name: str):
+    def add_webhook_endpoint(
+        self, tenant_id: str, *, url: str, secret, name: str, secret_ref=None
+    ):
+        from newfan_gateway.records import ConnectionRecord
+
+        rec_id = new_id("connection")
+        # secret_ref があれば署名鍵は Secrets Manager 参照のみ（§16.5 / P6）。
+        # 無ければ旧方式（config.secret 平文）に fallback（ローカル・移行期間）
+        config = {"url": url} if secret_ref else {"url": url, "secret": secret}
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            c.execute(
+                text(
+                    "INSERT INTO connections (id, tenant_id, type, name, config,"
+                    " secret_ref, status)"
+                    " VALUES (:i,:t,'webhook',:n, CAST(:c AS jsonb), :sr, 'untested')"
+                ),
+                {
+                    "i": rec_id,
+                    "t": tenant_id,
+                    "n": name,
+                    "c": json.dumps(config),
+                    "sr": secret_ref,
+                },
+            )
+        return ConnectionRecord(
+            id=rec_id, tenant_id=tenant_id, type="webhook", name=name,
+            config={"url": url}, secret_ref=secret_ref, status="untested",
+        )
+
+    def create_connection(
+        self, tenant_id, *, type, name, config, secret_ref, allowed_tables
+    ):
         from newfan_gateway.records import ConnectionRecord
 
         rec_id = new_id("connection")
@@ -568,20 +600,67 @@ class PgAdminRepository:
             self._rls(c, tenant_id)
             c.execute(
                 text(
-                    "INSERT INTO connections (id, tenant_id, type, name, config, status)"
-                    " VALUES (:i,:t,'webhook',:n, CAST(:c AS jsonb), 'untested')"
+                    "INSERT INTO connections (id, tenant_id, type, name, config,"
+                    " secret_ref, allowed_tables, status)"
+                    " VALUES (:i,:t,:ty,:n, CAST(:c AS jsonb), :sr, CAST(:at AS jsonb),"
+                    " 'untested')"
                 ),
                 {
-                    "i": rec_id,
-                    "t": tenant_id,
-                    "n": name,
-                    "c": json.dumps({"url": url, "secret": secret}),
+                    "i": rec_id, "t": tenant_id, "ty": type, "n": name,
+                    "c": json.dumps(config, ensure_ascii=False),
+                    "sr": secret_ref,
+                    "at": json.dumps(list(allowed_tables)),
                 },
             )
         return ConnectionRecord(
-            id=rec_id, tenant_id=tenant_id, type="webhook", name=name,
-            config={"url": url}, status="untested",
+            id=rec_id, tenant_id=tenant_id, type=type, name=name, config=dict(config),
+            secret_ref=secret_ref, allowed_tables=list(allowed_tables), status="untested",
         )
+
+    def _connection_record(self, r):
+        from newfan_gateway.records import ConnectionRecord
+
+        return ConnectionRecord(
+            id=r["id"], tenant_id=r["tenant_id"], type=r["type"], name=r["name"],
+            config=r["config"] or {}, secret_ref=r["secret_ref"],
+            allowed_tables=list(r["allowed_tables"] or []), status=r["status"],
+            created_at=r["created_at"].isoformat() if r["created_at"] else None,
+        )
+
+    def list_connections(self, tenant_id):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT id, tenant_id, type, name, config, secret_ref,"
+                    " allowed_tables, status, created_at"
+                    " FROM connections WHERE tenant_id=:t ORDER BY created_at DESC"
+                ),
+                {"t": tenant_id},
+            ).mappings().all()
+        return [self._connection_record(r) for r in rows]
+
+    def get_connection(self, tenant_id, connection_id):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "SELECT id, tenant_id, type, name, config, secret_ref,"
+                    " allowed_tables, status, created_at"
+                    " FROM connections WHERE tenant_id=:t AND id=:i"
+                ),
+                {"t": tenant_id, "i": connection_id},
+            ).mappings().first()
+        return self._connection_record(r) if r else None
+
+    def set_connection_status(self, tenant_id, connection_id, status):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            c.execute(
+                text("UPDATE connections SET status=:s WHERE tenant_id=:t AND id=:i"),
+                {"s": status, "t": tenant_id, "i": connection_id},
+            )
+        return self.get_connection(tenant_id, connection_id)
 
     def list_webhook_endpoints(self, tenant_id: str):
         from newfan_gateway.records import ConnectionRecord

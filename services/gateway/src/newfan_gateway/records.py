@@ -162,6 +162,9 @@ class ConnectionRecord(BaseModel):
     type: str
     name: str
     config: dict[str, Any] = Field(default_factory=dict)
+    # 秘密は Secrets Manager 参照のみ（§16.5 / P6）。値そのものは持たない
+    secret_ref: Optional[str] = None
+    allowed_tables: list[str] = Field(default_factory=list)
     status: str = "untested"
     created_at: Optional[str] = None
 

@@ -22,10 +22,18 @@ from typing import Annotated, Any, Callable, Optional, TypedDict
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
-from newfan_metrics import workflow_node_duration_seconds
+from newfan_metrics import sink_write_rows_total, workflow_node_duration_seconds
 from newfan_workflow import EvalContext, FieldView, WorkflowGraph, evaluate, is_trigger, parse_expr
+from newfan_workflow.dbsink import (
+    LEDGER_COLUMN,
+    build_db_write_sql,
+    build_dsn,
+    check_allowed_table,
+    check_row_limit,
+)
 from newfan_workflow.models import (
     ConditionNode,
+    DbWriteNode,
     ExtractNode,
     HitlGateNode,
     ManualNode,
@@ -64,10 +72,17 @@ class WorkflowState(TypedDict, total=False):
     node_outputs: Annotated[dict[str, Any], _merge_dicts]
 
 
+WriteDbFn = Callable[[str, str, list[dict[str, Any]]], int]  # (dsn, sql, rows) -> 行数
+ResolveSecretFn = Callable[[str], str]  # secret_ref -> 秘密（Secrets Manager 解決）
+
+
 @dataclass
 class RunnerDeps:
     store: WorkflowRunStore
     send_webhook: SendWebhookFn
+    # P6: sink.db_write。未配線のグラフで db_write ノードに達したら明示的に落とす
+    write_db: Optional[WriteDbFn] = None
+    resolve_secret: Optional[ResolveSecretFn] = None
 
 
 def _wrap(node_id: str, node_type: str, fn: Callable, store: WorkflowRunStore) -> Callable:
@@ -152,13 +167,7 @@ def _make_webhook(
             )
         url, secret = conn
 
-        outputs = state.get("node_outputs") or {}
-        mapped: dict[str, Any] = {}
-        for p in map_preds:
-            mapped.update((outputs.get(p) or {}).get("mapped") or {})
-        data = mapped or {
-            k: v.get("value") for k, v in (state.get("fields") or {}).items()
-        }
+        data = _sink_data(state, map_preds)
         event = {
             "event": "workflow.webhook",
             # 受信側の dedupe 用（at-least-once 配信, §6.4）
@@ -197,6 +206,86 @@ def _make_router(node: ConditionNode) -> Callable:
         return default
 
     return route
+
+
+def _sink_data(state: WorkflowState, map_preds: list[str]) -> dict[str, Any]:
+    """sink の入力行。直前の map_fields の出力を優先し、無ければ fields の生値。"""
+    outputs = state.get("node_outputs") or {}
+    mapped: dict[str, Any] = {}
+    for p in map_preds:
+        mapped.update((outputs.get(p) or {}).get("mapped") or {})
+    return mapped or {k: v.get("value") for k, v in (state.get("fields") or {}).items()}
+
+
+def _make_db_write(node: DbWriteNode, deps: RunnerDeps, map_preds: list[str]) -> Callable:
+    """sink.db_write（DD-12 / P6）。
+
+    安全策の順序（§9）: allowed_tables 完全一致 → 識別子検証つき SQL 生成
+    （dry-run と同一の dbsink.build_db_write_sql）→ プリペアド実行 → 行数上限。
+    冪等（§6.4）: upsert は自然冪等。insert は台帳キー nf_write_key を付与し
+    ON CONFLICT DO NOTHING（対象テーブルに UNIQUE があれば正確に 1 回）。
+    """
+
+    def run(state: WorkflowState) -> dict[str, Any]:
+        cfg = node.config
+        try:
+            if deps.write_db is None:
+                raise RuntimeError("db_write が配線されていません（RunnerDeps.write_db）")
+            info = deps.store.get_db_connection(state["tenant_id"], cfg.connection_id)
+            if info is None:
+                raise RuntimeError(
+                    f"postgres 接続が見つからないか疎通未確認です: {cfg.connection_id}"
+                )
+            check_allowed_table(cfg.table, info.allowed_tables)
+
+            # webhook と違い fields の生値へは fallback **しない**。fallback すると
+            # dry-run で一度もプレビューされていない列（抽出フィールド名・mask 迂回）が
+            # 顧客 DB に書かれ得る（レビューで検出）。map_fields の出力だけが書込み対象
+            outputs = state.get("node_outputs") or {}
+            row: dict[str, Any] = {}
+            for pred in map_preds:
+                row.update((outputs.get(pred) or {}).get("mapped") or {})
+            if not row:
+                raise RuntimeError(
+                    "直前の map_fields の出力がありません（分岐が map_fields を迂回して"
+                    " db_write に到達した可能性。dry-run 済みの列以外は書きません）"
+                )
+            if cfg.mode == "insert":
+                # 書込み台帳キー（workflow_run_id:node_id:行番号）。§6.4
+                row[LEDGER_COLUMN] = f"{state['workflow_run_id']}:{node.id}:0"
+            rows = [row]
+            check_row_limit(len(rows))
+            sql = build_db_write_sql(cfg, list(row.keys()))
+
+            secret = None
+            if info.secret_ref:
+                if deps.resolve_secret is None:
+                    raise RuntimeError("secret_ref があるのに resolver が配線されていません")
+                secret = deps.resolve_secret(info.secret_ref)
+            dsn = build_dsn(info.config, secret)
+
+            written = deps.write_db(dsn, sql, rows)
+        except GraphInterrupt:  # pragma: no cover - db_write は interrupt しない
+            raise
+        except Exception:
+            if cfg.on_failure == "skip_and_notify":
+                # 下流を止めない選択（§9 on_failure）。通知は §12 の監視（P8）が拾えるよう
+                # 警告ログ + 射影に skipped を残す
+                logger.warning(
+                    "[workflow] db_write 失敗を skip（on_failure=skip_and_notify）: node=%s",
+                    node.id, exc_info=True,
+                )
+                return {"node_outputs": {node.id: {"skipped": True}}}
+            # retry / halt_notify は失敗として伝播（retry は §11.2 の retry API で再実行）
+            raise
+        sink_write_rows_total.labels(connection=cfg.connection_id).inc(written)
+        return {
+            "node_outputs": {
+                node.id: {"written": written, "table": cfg.table, "mode": cfg.mode}
+            }
+        }
+
+    return run
 
 
 def _make_hitl_gate(node: HitlGateNode) -> Callable:
@@ -275,6 +364,11 @@ def build_workflow_app(
                 p for p in sorted(preds[node.id]) if isinstance(wf.get(p), MapFieldsNode)
             ]
             fn = _make_webhook(node, deps, map_preds)
+        elif isinstance(node, DbWriteNode):
+            map_preds = [
+                p for p in sorted(preds[node.id]) if isinstance(wf.get(p), MapFieldsNode)
+            ]
+            fn = _make_db_write(node, deps, map_preds)
         elif isinstance(node, HitlGateNode):
             fn = _make_hitl_gate(node)
         elif isinstance(node, (ConditionNode, ManualNode)) or is_trigger(node):

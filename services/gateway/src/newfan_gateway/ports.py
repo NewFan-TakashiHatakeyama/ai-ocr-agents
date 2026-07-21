@@ -45,3 +45,26 @@ class FakeOrchestratorClient:
     ) -> None:
         self.resumed.append((run_id, tenant_id, feedback))
         self.notified.append(notify)
+
+
+class SecretStore(Protocol):
+    """秘密の保管（Secrets Manager, §16.5 / P6）。DB には参照（ARN）だけを置く。"""
+
+    def create(self, name: str, value: str) -> str:
+        """保存して参照（ARN）を返す。同名が既にあれば新しい値で更新する。"""
+        ...
+
+    def get(self, ref: str) -> str: ...
+
+
+class FakeSecretStore:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def create(self, name: str, value: str) -> str:
+        ref = f"arn:fake:{name}"
+        self.values[ref] = value
+        return ref
+
+    def get(self, ref: str) -> str:
+        return self.values[ref]

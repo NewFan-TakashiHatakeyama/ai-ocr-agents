@@ -246,4 +246,5 @@ def test_catalogは13種のJSONSchemaと実装済み一覧を返す(client: Test
     assert "source.manual" in body["implemented"]
     assert "source.s3_event" in body["implemented"]  # P4 で実装済み
     assert "branch.hitl_gate" in body["implemented"]  # P5 で実装済み
+    assert "sink.db_write" in body["implemented"]  # P6 で実装済み
     assert "source.schedule" not in body["implemented"]  # P8

@@ -40,6 +40,7 @@ def create_app(
     admin: Optional[AdminRepository] = None,
     chat_agent: Optional[ChatAgent] = None,
     workflows: Optional[WorkflowsRepository] = None,
+    secret_store: Any = None,
 ) -> FastAPI:
     app = FastAPI(title="NewFan AI-OCR Gateway", version="0.1.0")
 
@@ -60,6 +61,8 @@ def create_app(
     app.state.admin = admin or InMemoryAdminRepository()
     app.state.chat_agent = chat_agent or RuleBasedChatAgent()
     app.state.workflows = workflows or InMemoryWorkflowsRepository()
+    # 秘密の保管先（Secrets Manager, P6）。未注入なら旧方式（config.secret）に fallback
+    app.state.secret_store = secret_store
     app.state.api_keys = api_keys or InMemoryApiKeyStore({})
     app.state.lock_store = InMemoryLockStore()
     app.state.idempotency = {}

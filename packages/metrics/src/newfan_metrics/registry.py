@@ -82,6 +82,10 @@ workflow_node_duration_seconds = Histogram(
     buckets=_LATENCY_BUCKETS,
     registry=REGISTRY,
 )
+sink_write_rows_total = Counter(
+    "sink_write_rows_total", "sink.db_write の書込み行数（§16.8 / P6）",
+    ["connection"], registry=REGISTRY,
+)
 
 
 def render_latest() -> bytes:
