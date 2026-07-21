@@ -160,18 +160,34 @@ XAUTOCLAIM で回収され、checkpoint から自動回復して完走した（d
 
 ---
 
-## P6: sink.db_write（DD-12）+ dry-run + connections
+## P6: sink.db_write（DD-12）+ dry-run + connections 【実装済み】
 
-- `workflow_sinks.py`: allowed_tables 完全一致 → `psycopg.sql.Identifier` → プリペアド
-  INSERT/UPSERT → 行数上限 1,000 → 書込み台帳（冪等）
-- `POST /workflows/{id}/dry-run`: sink を実行せず SQL/ペイロードのプレビュー返却。
-  activate の前提条件に組み込み
-- `POST /connections` + `/connections/{id}/test`（DB 疎通・SELECT 1 のみ）+
-  webhook secret → secret_ref 移行
-- DoD: 実 PG（顧客 DB 想定のローカル別 DB）で dry-run プレビュー = 実 SQL、
-  allowed_tables 外の拒否・行数超過の拒否がテストで固定
+### 実装実体
 
-規模: 中〜大（安全策が厚い）。
+| ファイル | 内容 |
+|---|---|
+| `packages/workflow/dbsink.py`（新規） | プリペアド INSERT/UPSERT 生成の**単一実装**（dry-run と実行が同じ関数 = 「プレビュー = 実 SQL」を構造で保証）。allowed_tables 完全一致 → 識別子検証 → 生成。行数上限 1,000。insert は台帳キー `nf_write_key` + **`ON CONFLICT (nf_write_key) DO NOTHING`**（対象限定。無指定だと業務キー重複まで黙殺され無音データ欠落 — レビューで実 PG 再現）。build_dsn は user/password を percent-encode（記号入りパスワードで実測） |
+| `services/orchestrator/workflow_sinks.py`（新規） | PgDbWriter（全行 1 TX・都度接続） |
+| `services/orchestrator/workflow_graph.py` | _make_db_write。**map_fields の出力のみ書く（fields への fallback 禁止**＝dry-run 未プレビュー列・mask 迂回値を顧客 DB に書かない）。on_failure: halt_notify（既定・失敗）/ skip_and_notify（下流継続）/ retry |
+| `services/orchestrator/aws_secrets.py`（新規） | SecretsManagerResolver（キャッシュ付き実行時 GetSecretValue） |
+| `services/gateway/dryrun.py`（新規）+ routers | POST /workflows/{id}/dry-run。**db_write 直前の map_fields はちょうど 1 つ**（分岐合流で列が実行時に変わる乖離をレビューで実証→制限）。db_write を含むグラフの activate は dry-run 成功が前提 |
+| gateway 接続管理 | GET/POST /v1/connections + POST /v1/connections/{id}/test（SELECT 1。成功で status='tested'）。config の秘密は**再帰スキャン+部分一致**で拒否、GET は再帰マスク。**secret_ref は `.../conn/<tenant_id>/` 名前空間を強制**（クロステナント秘密窃取をレビューで実証→遮断） |
+| webhook secret_ref 移行 | 署名鍵を Secrets Manager（`ai-ocr/<env>/conn/<tenant>/webhook-*`）に保存し DB は secret_ref のみ。旧 config.secret 行は読み出し fallback（resolver 未配線で secret_ref 行を読むと**明示エラー**＝空鍵署名の無音配信を防ぐ） |
+| `deploy/terraform/main.tf` | task ロールへ `ai-ocr/<env>/conn/*` 限定の Secrets Manager 権限（従来は実行時 GetSecretValue 不可だった） |
+| `scripts/aws_env.sh sink-demo` + `scripts/setup_sink_demo.py` | 「顧客基幹 DB」役（erp_demo スキーマ + INSERT/UPDATE 限定ロール erp_sink）を migrate タスクで用意 |
+
+### DoD（2026-07-21 実 AWS で実測済み・達成）
+
+- POST /connections（secret_ref=`ai-ocr/production/conn/ten_1/erp-demo`、**記号入りパスワード `@ % /`**）→ /test で **SELECT 1 成功 → tested**（実 Secrets Manager 解決 + percent-encode を本番実証）
+- dry-run が実 SQL（`INSERT ... ON CONFLICT ("invoice_no") DO UPDATE ...`）をプレビュー → activate 通過
+- S3 `ten_1/db/sample2.png` → 7 秒で waiting_hitl → confirm → **1 秒未満で erp_demo.invoices へ UPSERT**: `('GS0001', 'わくわく物産…', '7003', 'ai-ocr')`
+- allowed_tables 外の拒否・行数超過の拒否・業務キー重複の可視エラー・台帳キー冪等は実 PG テストで固定
+
+敵対的レビュー（find 4 観点 → 反証 verify）で **major 5 件を出荷前に検出・修正**（全て回帰テスト化）:
+無指定 ON CONFLICT の黙殺 / dry-run と実行の列乖離 / secret_ref クロステナント /
+config 秘密のネスト回避 / DSN percent-encode 欠如（+エラー応答の秘密断片漏れ）。
+
+規模: 大（安全策が厚い。想定どおり）。
 
 ---
 

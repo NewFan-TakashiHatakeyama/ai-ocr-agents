@@ -24,6 +24,8 @@
 #   golden  ゴールデンセット回帰（§14.2）を実系に流して測り、リリースゲートを判定
 #   redrive S3 トリガーの DLQ を主キューへ戻す（down→up 後にワークフロー定義を
 #           復元してから実行。§16 P4）
+#   sink-demo P6 デモ用の書込み先（erp_demo スキーマ + erp_sink ロール）を用意
+#           （SINK_PASSWORD 必須。§16 P6）
 #
 # 使い方: scripts/aws_env.sh up|down|pause|resume|status|cost|vl-up|vl-down|vl-test|token|golden|redrive
 set -euo pipefail
@@ -464,6 +466,15 @@ cmd_vl_test() {
   echo "    scripts/vl_smoke.sh <画像パス>"
 }
 
+cmd_sink_demo() {
+  # P6 デモ/E2E: 「顧客基幹 DB」役の erp_demo スキーマ + erp_sink ロールを用意する。
+  # パスワードは env SINK_PASSWORD（Secrets Manager ai-ocr/<env>/conn/<tenant>/... に
+  # 登録した値と同じものを渡す）。冪等。
+  [ -z "${SINK_PASSWORD:-}" ] && { echo "[sink-demo] SINK_PASSWORD を設定してください" >&2; return 1; }
+  echo "[sink-demo] erp_demo スキーマと erp_sink ロールを用意します"
+  _run_in_migrate scripts/setup_sink_demo.py "" "SINK_PASSWORD=${SINK_PASSWORD}"     || { echo "[sink-demo] 失敗" >&2; return 1; }
+}
+
 cmd_redrive() {
   # DLQ に退避した S3 トリガーイベントを主キューへ戻す（§16 P4）。
   # 想定シナリオ: down（DB destroy）→ up 直後は active なワークフローが無く、
@@ -500,5 +511,6 @@ case "${1:-}" in
   vl-down) cmd_vl_down ;;
   vl-test) cmd_vl_test ;;
   redrive) cmd_redrive ;;
+  sink-demo) cmd_sink_demo ;;
   *) sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 1 ;;
 esac
