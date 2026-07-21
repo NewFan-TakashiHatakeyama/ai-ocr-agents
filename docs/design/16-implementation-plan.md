@@ -191,26 +191,56 @@ config 秘密のネスト回避 / DSN percent-encode 欠如（+エラー応答�
 
 ---
 
-## P7: SCR-07 ノードエディタ
+## P7: SCR-07 ノードエディタ 【実装済み】
 
-1. **PoC 先行**（1〜2 日で判断）: React Flow + rjsf + `GET /workflows/catalog` で
-   ノード配置 → config フォーム自動生成 → graph_json 生成 → `/workflows/{id}/lint` 往復。
-   rjsf の from/const 排他（anyOf）が素で通るかをここで確認
-2. 本実装: SCR-07 ページ（web/app/workflows/）。custom node は memo 化。
-   lint 指摘の node_id ハイライト、activate ボタンは error=0 で活性
-- DoD: catalog 由来フォームで 13 種すべての config を編集 → 保存 → activate
+- `web/app/workflows/`: 一覧（作成→遷移）+ エディタ。@xyflow/react（キャンバス・
+  カテゴリ色カスタムノード・ドラッグ接続・pos 永続化）+ @rjsf（catalog の JSON Schema
+  から 13 種の config フォームを自動生成。配列・ネスト・enum・anyOf を実機確認）
+- branch.condition の分岐は config が正（破線ラベル表示のみ。辺として編集させない, §4.1）
+- 保存（常に可）→ 自動 lint → 指摘の node_id ハイライト → activatable で有効化活性 →
+  dry-run プレビュー表示。未実装ノードはパレットにバッジ
+- rjsf の from/const 排他（model_validator）は JSON Schema に現れないため UI では両方
+  表示され、保存時にサーバ側で検証される（PoC 論点の結論。custom widget は post-MVP）
+
+### DoD（2026-07-21 実機確認・達成）
+
+- 実 Chrome: ノード追加 → ドラッグ接続 3 本 → map_fields（rjsf 配列）編集 →
+  webhook connection_id 入力 → 保存 v2・lint 0 件 → **有効化（active）** まで実操作
+- 実 AWS（v0.5.8）: デプロイ済み web の SCR-07 で active ワークフローのグラフ描画・
+  catalog 取得・パレット表示を確認
+- 注意（自動テスト環境の知見）: プレビューペインの合成ドラッグは d3-drag に届かない。
+  ドラッグ系の UI 検証は実 Chrome（Claude in Chrome）で行うこと
 
 規模: 大（UI）。
 
----
+## P8: 残り 【実装済み】
 
-## P8: 残り
+- **source.schedule**: consumer 内の分ティック + source_cursors dedup
+  （workflow+node+分時刻の UNIQUE）。**設計 §7.3 の「EventBridge Scheduler 同期」から
+  方式変更**（activate/pause ごとの AWS リソース増減は down 運用と噛み合わない。
+  設計書に反映済み）。cron は自前実装（packages/workflow/cron.py。Vixie 規則）、
+  **JST 固定評価**。down 中は発火しない（§1.3）。直近 5 分の遡り評価あり
+- **process.classify**: 抽出結果 doc_type の許可リスト照合（DD-11: 再分類しない）。
+  on_unknown=halt / default_route
+- **sink.file**: S3（type='s3' 接続）へ JSON / CSV（BOM 付き）。パスはプレースホルダのみ。
+  同一キー上書き＝冪等
+- **sink.notify**: Slack incoming webhook 互換（{"text"} POST・SSRF ガード・when 式・
+  テンプレート変数）。接続は connections(type='webhook') を流用
+- **watch_lag_seconds{connection}**: SQS ApproximateAgeOfOldestMessage（1 分毎）
+- **checkpoint 掃除（§6.6）**: 終端 30 日超の lg_wf thread を migrate（up 時）で削除
+  （scripts/cleanup_checkpoints.py。常時稼働に移行したら週次を追加）
+- **post-MVP へ明示送り**: source.email_attachment（SES 受信→S3 保存で s3_event が代替）、
+  Langfuse 紐付け（キー運用未定）、アラート 3 種（Prometheus サーバ未導入のため。
+  /metrics は公開済みで、導入時に §12 の式をそのまま張れる）
 
-schedule（EventBridge Scheduler → SQS）/ classify / notify(Slack) / email /
-checkpoint 掃除（up 時 + 週次）/ `sink_write_rows_total` `watch_lag_seconds` /
-Langfuse 紐付け。
+### DoD（2026-07-21 実 AWS で実測・達成）
 
----
+- schedule: cron `*/2 * * * *` を activate → **07:24:00.2 に分ちょうどで発火**
+  （document 無し run）→ 1.4 秒で succeeded
+- notify: webhook.site が 07:24:02 に Slack 互換 `{"text": "⏰ 定期実行: run=wfrun_e0f6…"}`
+  を受信（テンプレート展開込み）
+- classify / file は InMemory + 実 PG テストで固定（graph 配線・halt/継続・BOM CSV・
+  パス展開・接続不在失敗）
 
 ## リスクと手当て
 

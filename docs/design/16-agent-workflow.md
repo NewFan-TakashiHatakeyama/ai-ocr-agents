@@ -1,6 +1,6 @@
 # §16 エージェントワークフロー（自動化層）詳細設計 v0.2
 
-- 状態: **Approved for implementation**（P1〜P6 実装済み・実 AWS で DoD 実測済み。次は P7: SCR-07 ノードエディタ）
+- 状態: **Implemented**（P1〜P8 実装済み・実 AWS で DoD 実測済み。email_attachment / Langfuse / アラート基盤は post-MVP）
 - 日付: 2026-07-21（v0.1: 2026-07-16）
 - 親: `NewFan_AI-OCRエージェント詳細設計書_v1.2.md` §16
 - 調査: [16-research-report.md](16-research-report.md)（技術検証報告書）/ [16-research-brief.md](16-research-brief.md)（調査依頼書）
