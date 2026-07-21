@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: lint / type / test
+    runs-on: ubuntu-latest
+    # gateway のテストは InMemoryRepository しか通しておらず、ORM と §7 DDL の乖離を
+    # 検出できなかった（本番で correction_logs への INSERT が 500 になり学習ループが
+    # 壊れていた）。実 PostgreSQL に migration を当てて PgRepository を検証する。
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: newfan
+          POSTGRES_PASSWORD: newfan
+          POSTGRES_DB: newfan
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL_TEST: postgresql+psycopg://newfan:newfan@localhost:5432/newfan
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.8"
+          enable-cache: true
+      # --package で同期すると環境がそのパッケージだけに絞られ、他のメンバー
+      # （newfan_orchestrator 等）が消えて pytest が収集エラーになる。実 PG に当てる
+      # 結合テストには extras（sqlalchemy/psycopg）も要るので、全メンバー＋全 extras を
+      # 1 つの環境に入れる。--no-sync は uv run が環境を張り替えて extras を落とすのを防ぐ。
+      - name: Sync workspace (全メンバー＋extras)
+        run: uv sync --frozen --all-packages --all-extras
+      - name: Apply migrations
+        run: uv run --no-sync alembic -c db/alembic.ini upgrade head
+        env:
+          DATABASE_URL: postgresql+psycopg://newfan:newfan@localhost:5432/newfan
+      - name: ruff
+        run: uv run --no-sync ruff check .
+      - name: mypy (strict, src のみ)
+        run: uv run --no-sync mypy $(ls -d packages/*/src services/*/src golden/src)
+      - name: pytest
+        run: uv run --no-sync pytest
+      - name: 実 PG の結合テストが skip されていないことを確認
+        # DATABASE_URL_TEST や psycopg が落ちると importorskip/skipif で静かに
+        # 全部 skip され、「緑だが何も検証していない」状態になる。明示的に呼んで確かめる。
+        run: |
+          uv run --no-sync pytest -q \
+            services/gateway/tests/test_pg_repository_integration.py \
+            services/orchestrator/tests/test_pg_jobs_integration.py \
+            db/tests/test_rls_isolation.py \
+            -o addopts="" --no-header -rN | tee /tmp/pg.txt
+          grep -qE '[0-9]+ passed' /tmp/pg.txt
+          if grep -qE 'skipped' /tmp/pg.txt; then
+            echo '[FATAL] 実 PostgreSQL の結合テストが skip されました（DB に繋がっていません）' >&2
+            exit 1
+          fi
+
+  golden:
+    name: ゴールデンセット回帰（§14.2 / DD-03）
+    runs-on: ubuntu-latest
+    # 採点ロジックそのものの検証。「本番昇格の条件」を測る実測は AWS の実系が要るため
+    # scripts/aws_env.sh golden で回す（CI には推論も LLM も無く、Fake で測っても意味が無い）。
+    # ここが守るのは「指標定義とゲート判定が壊れていないこと」＋「ゴールデンデータが読めること」。
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.8"
+          enable-cache: true
+      - name: Sync workspace
+        run: uv sync --frozen --all-packages
+      - name: 採点ロジックのテスト
+        run: uv run --no-sync pytest golden -q
+      - name: ゴールデンデータが読めることを確認
+        # 壊れた JSONL を気づかず merge すると、次の実測でいきなり収集が落ちる。
+        run: |
+          uv run --no-sync python -c "
+          from pathlib import Path
+          from newfan_golden.dataset import load_jsonl
+          docs = load_jsonl(Path('golden/data/dev.jsonl'))
+          n = sum(len(d.fields) for d in docs)
+          print(f'[golden] {len(docs)} 文書 / {n} 項目 を読み込みました')
+          "
+      - name: スキーマとゴールデンの critical 整合
+        # critical は片方だけ直すと critical_exact_match が実態とずれる。機械で突き合わせる。
+        run: uv run --no-sync python golden/scripts/check_critical.py
+
+  images:
+    name: docker build (軽量イメージ)
+    runs-on: ubuntu-latest
+    # torch を含む orchestrator-worker は重いため CD(タグ)側で build。ここは workspace/extras の検証。
+    strategy:
+      matrix:
+        image: [gateway, export-worker, migrate]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.image }} image
+        run: docker build -f deploy/docker/${{ matrix.image }}.Dockerfile -t newfan-${{ matrix.image }}:ci .

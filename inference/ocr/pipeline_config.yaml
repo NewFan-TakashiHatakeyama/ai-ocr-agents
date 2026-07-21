@@ -1,36 +1,63 @@
-# ocr-svc: PP-OCRv6 単体 OCR サービング設定（詳細設計 §5.3.2, DD-02 / 付録C-3）
+# ocr-svc: PP-OCRv6 単体 OCR サービング設定（詳細設計 §5.3.2, DD-01 / DD-03 / 付録C-3）
 #
-# 用途: crop 再認識・単文字/単語座標補完・two-model 照合。
-#   paddlex --serve --pipeline inference/ocr/pipeline_config.yaml
+# 用途: crop 再認識・two-model 照合（DD-02 char_backfill）。
+#   paddlex --serve --pipeline inference/ocr/pipeline_config.yaml #           --host 0.0.0.0 --port 8080 --engine onnxruntime
 #
-# 付録C-3: サービング POST /ocr のリクエストボディに returnWordBox は無いため、
-# ここで return_word_box を常時有効化して単語/単文字座標を得る（無改造イメージ）。
-# 応答フィールド名は実測で newfan_paddle_client.schema.OverallOcrRes に確定する。
-
-pipeline_name: OCR
-
-# DD-01/ADR-0002: 前処理は ingest 側。ここでは無効化。
-use_doc_preprocessor: False
-use_textline_orientation: True
+# ★ 本ファイルは「完全な authoritative config」。paddleocr 3.7.0 / paddlex 3.7.2 で
+#   inference/scripts/export_base_config.py ocr が生成した完全 base に、設計の固定値と
+#   Serving 設定をマージしたもの。部分 pin のままだと paddlex --serve が起動できない。
+#   paddleocr のバージョンを上げる際は export_base_config.py で再生成すること。
+#
+# 固定している設計値:
+#   - DD-01/ADR-0002: use_doc_preprocessor=False（前処理は ingest 側で実施済み）
+#   - DD-03: 検出/認識を PP-OCRv6_medium に明示固定（3.7 既定の PP-OCRv5_server に依存しない）
+#   - 付録C-3: return_word_box=True を常時有効（サービングのリクエストボディでは指定できない）
+#       ※実測では本フラグを立てても単語/単文字座標は返らない（行レベル rec_polys/rec_boxes のみ）。
+#         文字単位グラウンディングが要る場合は DD-02 の crop→/ocr 再問合せで補う。
+#   - Serving.visualize=False（可視化画像を返さずペイロード削減）
 
 SubModules:
   TextDetection:
-    module_name: text_detection
+    box_thresh: 0.6
+    limit_side_len: 64
+    limit_type: min
+    max_side_limit: 4000
+    model_dir: null
     model_name: PP-OCRv6_medium_det
-    model_dir: null
+    module_name: text_detection
+    thresh: 0.3
+    unclip_ratio: 1.5
   TextLineOrientation:
-    module_name: textline_orientation
+    batch_size: 6
+    model_dir: null
     model_name: PP-LCNet_x1_0_textline_ori
-    model_dir: null
+    module_name: textline_orientation
   TextRecognition:
-    module_name: text_recognition
-    model_name: PP-OCRv6_medium_rec
+    batch_size: 6
     model_dir: null
+    model_name: PP-OCRv6_medium_rec
+    module_name: text_recognition
+    return_word_box: true
     score_thresh: 0.0
-    # 単文字/単語座標を常時返す（付録C-3）
-    return_word_box: True
-
+SubPipelines:
+  DocPreprocessor:
+    SubModules:
+      DocOrientationClassify:
+        model_dir: null
+        model_name: PP-LCNet_x1_0_doc_ori
+        module_name: doc_text_orientation
+      DocUnwarping:
+        model_dir: null
+        model_name: UVDoc
+        module_name: image_unwarping
+    pipeline_name: doc_preprocessor
+    use_doc_orientation_classify: false
+    use_doc_unwarping: false
+pipeline_name: OCR
+text_type: general
+use_doc_preprocessor: false
+use_textline_orientation: true
 Serving:
-  visualize: False
+  visualize: false
   extra:
     max_num_input_imgs: null

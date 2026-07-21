@@ -1,0 +1,30 @@
+{
+  "family": "newfan-migrate",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${TASK_ROLE_ARN}",
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "containerDefinitions": [
+    {
+      "name": "migrate",
+      "image": "${ECR_REPO_MIGRATE}:${IMAGE_TAG}",
+      "essential": true,
+      "command": ["alembic", "-c", "db/alembic.ini", "upgrade", "head"],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "${DB_SECRET_ARN}" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/newfan-migrate",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ],
+  "//": "デプロイ前に aws ecs run-task で単発実行する one-off タスク。DATABASE_URL は postgresql+psycopg://... 形式（migrations/env.py が読む）。"
+}

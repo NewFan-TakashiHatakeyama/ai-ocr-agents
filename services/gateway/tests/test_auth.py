@@ -40,3 +40,12 @@ def test_wrong_secret_rejected(ctx: SimpleNamespace) -> None:
     bad = jwt.encode({"sub": "u", "tenant_id": "ten_1", "role": "viewer"}, "wrong", algorithm="HS256")
     r = ctx.client.get("/v1/documents", headers={"Authorization": f"Bearer {bad}"})
     assert r.status_code == 403
+
+
+def test_env_api_key_store_resolves_by_hash() -> None:
+    from newfan_gateway.auth import EnvApiKeyStore
+
+    store = EnvApiKeyStore.from_env('[{"key":"sk-live-abc","tenant_id":"ten_9","role":"reviewer"}]')
+    p = store.resolve("sk-live-abc")
+    assert p is not None and p.tenant_id == "ten_9" and p.role == "reviewer" and p.sub == "m2m"
+    assert store.resolve("wrong-key") is None

@@ -53,6 +53,24 @@ def test_add_and_search_retrieves_similar() -> None:
     assert results[0]["to"] == "128,000"
 
 
+def test_index_rehydrated_from_shared_repo() -> None:
+    """別プロセス相当（新 index）でも正本(repo)から index を再構築し検索できる（§5.8.3）。"""
+    repo = InMemoryMemoryRepository()
+    MemoryService(HashingEmbedder(), repo).add(_correction(1, frm="128,OOO", to="128,000"))
+
+    # 新しい MemoryService（index は空）。search 時に _rehydrate で repo から復元される。
+    fresh = MemoryService(HashingEmbedder(), repo)
+    results = fresh.search(
+        tenant_id="ten_1",
+        doc_type="invoice",
+        supplier="A社",
+        field_name="total_amount",
+        value_raw="256,OOO",
+        context="御請求金額",
+    )
+    assert results and results[0]["to"] == "128,000"
+
+
 def test_search_filters_below_threshold() -> None:
     svc = _service()
     svc.add(_correction(1, frm="128,OOO", to="128,000"))

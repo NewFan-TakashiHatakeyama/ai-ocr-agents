@@ -12,8 +12,10 @@ from newfan_llm_adapter import LLMAdapter, PromptBundle
 from newfan_memory import MemoryService
 from newfan_schemas import ExtractionState
 
-from newfan_orchestrator import llm_nodes, memory_nodes, nodes, ocr_nodes
+from newfan_orchestrator import db_nodes, llm_nodes, memory_nodes, nodes, ocr_nodes
+from newfan_orchestrator.db_nodes import EnqueueFn
 from newfan_orchestrator.ocr_nodes import ImageLoader, StructureClient, file_uri_loader
+from newfan_orchestrator.persistence import ContextStore
 
 
 def build_graph(
@@ -23,7 +25,11 @@ def build_graph(
     bundle: Optional[PromptBundle] = None,
     memory: Optional[MemoryService] = None,
     structure_client: Optional[StructureClient] = None,
+    vl_client: Optional[StructureClient] = None,
+    ocr_client: Optional[Any] = None,
     image_loader: ImageLoader = file_uri_loader,
+    context_store: Optional[ContextStore] = None,
+    export_enqueue: Optional[EnqueueFn] = None,
 ) -> Any:
     """§4.1 のグラフを構築して compile 済みグラフを返す。
 
@@ -38,9 +44,18 @@ def build_graph(
     memory_lookup_node = memory_nodes.make_memory_lookup(memory) if memory else nodes.memory_lookup
     learn_node = memory_nodes.make_learn(memory) if memory else nodes.learn
     structure_node = (
-        ocr_nodes.make_structure_ocr(structure_client, image_loader)
+        ocr_nodes.make_structure_ocr(structure_client, image_loader, ocr_client=ocr_client)
         if structure_client
         else nodes.structure_ocr
+    )
+    vl_node = (
+        ocr_nodes.make_vl_fallback(vl_client, image_loader) if vl_client else nodes.vl_fallback
+    )
+    load_context_node = (
+        db_nodes.make_load_context(context_store) if context_store else nodes.load_context
+    )
+    finalize_node = (
+        db_nodes.make_finalize(context_store, export_enqueue) if context_store else nodes.finalize
     )
     try:
         from langgraph.graph import END, START, StateGraph
@@ -51,10 +66,10 @@ def build_graph(
 
     g: Any = StateGraph(ExtractionState)
 
-    g.add_node("load_context", nodes.load_context)
+    g.add_node("load_context", load_context_node)
     g.add_node("structure_ocr", structure_node)
     g.add_node("quality_gate", nodes.quality_gate)
-    g.add_node("vl_fallback", nodes.vl_fallback)
+    g.add_node("vl_fallback", vl_node)
     g.add_node("memory_lookup", memory_lookup_node)
     g.add_node("kie_extract", kie_node)
     g.add_node("deterministic_normalize", nodes.deterministic_normalize)
@@ -65,7 +80,7 @@ def build_graph(
     g.add_node("hitl_review", nodes.hitl_review)
     g.add_node("apply_feedback", nodes.apply_feedback)
     g.add_node("learn", learn_node)
-    g.add_node("finalize", nodes.finalize)
+    g.add_node("finalize", finalize_node)
 
     g.add_edge(START, "load_context")
     g.add_edge("load_context", "structure_ocr")

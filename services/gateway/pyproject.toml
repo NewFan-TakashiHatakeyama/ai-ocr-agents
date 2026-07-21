@@ -11,15 +11,29 @@ dependencies = [
     "httpx>=0.27",
     "newfan-schemas",
     "newfan-ingest",
+    "newfan-metrics",
+    "newfan-netguard",
+    "newfan-workflow",
 ]
 
 [project.optional-dependencies]
 # 本番の DB / キュー / サーバ（テストは InMemory 実装で代替）
+# PgRepository は同期 SQLAlchemy(create_engine) + psycopg ドライバ（postgresql+psycopg://）。
+# asyncpg は非同期専用で同期エンジンに使えないため psycopg を採用。
 runtime = [
     "uvicorn>=0.30",
     "sqlalchemy>=2.0",
-    "asyncpg>=0.29",
+    "psycopg[binary]>=3.1",
     "redis>=5.0",
+    # チャットグラフ（Supervisor, §4.5）。抽出グラフとは別グラフだが gateway 内で動く。
+    "langgraph>=0.2",
+    # gateway は in-process で ingest を実行するため取込 runtime（pypdfium2/pillow/boto3）が必要。
+    "newfan-ingest[runtime]",
+    # SCR-01 チャット: chat.py が anthropic / google.genai を遅延 import する
+    # （main.py が API キーの有無で LlmChatAgent / GeminiChatAgent を選ぶ）。
+    # 両方入れないとキー設定時に ModuleNotFoundError で起動できない。
+    # 版は llm-adapter の extras に集約する。
+    "newfan-llm-adapter[anthropic,gemini]",
 ]
 
 [build-system]

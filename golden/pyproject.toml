@@ -1,0 +1,19 @@
+[project]
+name = "newfan-golden"
+version = "0.1.0"
+description = "ゴールデンセット精度回帰（§14.2 / DD-03）"
+requires-python = ">=3.12"
+# 採点（metrics/dataset/cli）は標準ライブラリだけで動かす。CI ゲートは PR ごとに走るため、
+# ここで重い依存を引くとゲートが遅くなり、いずれ外される。
+dependencies = []
+
+[project.optional-dependencies]
+# collect（実系に流して予測を採る）だけが HTTP を使う。CI の採点側には要らない。
+collect = ["httpx>=0.27"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/newfan_golden"]

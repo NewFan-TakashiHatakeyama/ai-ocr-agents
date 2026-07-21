@@ -35,6 +35,40 @@ def test_layout_parsing_call(layout_parsing_raw: dict[str, Any]) -> None:
     assert len(resp.layout_parsing_results) == 1
 
 
+def test_seal_flag_is_not_sent_by_default(layout_parsing_raw: dict[str, Any]) -> None:
+    """印章はデプロイ単位のオプション。既定デプロイ（印章モデル未初期化）へ True を送ると 500。
+
+    フラグを送らなければサーバの pipeline_config が正になり、structure-svc（false）/
+    structure-svc-seal（true）を同一クライアントで切り替えられる（DD-03）。
+    """
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=layout_parsing_raw)
+
+    _mock_client(handler).layout_parsing(encode_image(b"fake-png"), file_type=1)
+    assert "useSealRecognition" not in captured["body"]
+
+
+def test_seal_flag_is_sent_when_explicit(layout_parsing_raw: dict[str, Any]) -> None:
+    """印章デプロイ向けに明示指定は可能（None のときだけ省略）。"""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=layout_parsing_raw)
+
+    _mock_client(handler).layout_parsing(
+        encode_image(b"fake-png"), file_type=1, use_seal_recognition=True
+    )
+    assert captured["body"]["useSealRecognition"] is True
+
+
 def test_envelope_error_raises() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

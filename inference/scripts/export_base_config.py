@@ -17,28 +17,58 @@ import sys
 from pathlib import Path
 
 
-def _build_structure():  # type: ignore[no-untyped-def]
+def _structure(*, seal: bool):  # type: ignore[no-untyped-def]
     from paddleocr import PPStructureV3
 
+    # 設計で固定する値をすべて渡す（出力がそのまま authoritative config になる）。
+    # DD-03: OCR は PP-OCRv6_medium 固定。layout は PP-DocLayout_plus-L（PP-DocLayoutV3 は実在しない）。
+    # DD-01/ADR-0002: 前処理は ingest 側で実施済みのため向き補正・歪み補正を無効化。
+    # 印章 OCR: 認識も v6 に固定（既定は PP-OCRv5_server_rec で DD-03 違反になる）。
+    # 検出は paddlex 3.7.2 に v6 版が存在せず PP-OCRv4_server_seal_det のみ（DD-03 の既知例外）。
     return PPStructureV3(
         text_detection_model_name="PP-OCRv6_medium_det",
         text_recognition_model_name="PP-OCRv6_medium_rec",
+        layout_detection_model_name="PP-DocLayout_plus-L",
+        seal_text_recognition_model_name="PP-OCRv6_medium_rec",
+        use_seal_recognition=seal,
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
         use_formula_recognition=False,
         use_chart_recognition=False,
     )
 
 
+def _build_structure():  # type: ignore[no-untyped-def]
+    """既定: 印章 OFF。印章検出モデルに onnx が無く onnxruntime（2.5倍速）と両立しないため。"""
+    return _structure(seal=False)
+
+
+def _build_structure_seal():  # type: ignore[no-untyped-def]
+    """オプション: 印章 ON。onnx 非対応のため engine=paddle 前提（約2.5倍遅い）。"""
+    return _structure(seal=True)
+
+
 def _build_ocr():  # type: ignore[no-untyped-def]
     from paddleocr import PaddleOCR
 
+    # DD-03: OCR は PP-OCRv6_medium 固定。DD-01/ADR-0002: 前処理は ingest 側で実施済み。
+    # 付録C-3: return_word_box は常時有効（サービングのリクエストボディでは指定できないため）。
+    #   ※実測では本フラグを立てても単語/単文字座標は返らない（行レベルのみ）。設計どおり維持する。
     return PaddleOCR(
         text_detection_model_name="PP-OCRv6_medium_det",
         text_recognition_model_name="PP-OCRv6_medium_rec",
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=True,
         return_word_box=True,
     )
 
 
-BUILDERS = {"structure": _build_structure, "ocr": _build_ocr}
+BUILDERS = {
+    "structure": _build_structure,
+    "structure-seal": _build_structure_seal,
+    "ocr": _build_ocr,
+}
 
 
 def main() -> int:

@@ -1,67 +1,258 @@
-# structure-svc: PP-StructureV3 サービング設定（詳細設計 §2.2 / §5.3, DD-02 / DD-03）
+# structure-svc: PP-StructureV3 サービング設定（詳細設計 §2.2 / §5.3, DD-01 / DD-03）
 #
-# 用途: paddlex --serve --pipeline inference/structure/pipeline_config.yaml
-#   （または高安定性サービング SDK の server/pipeline_config.yaml）
+# 用途:
+#   paddlex --serve --pipeline inference/structure/pipeline_config.yaml \
+#           --host 0.0.0.0 --port 8080 --engine onnxruntime
 #
-# 本ファイルは「設計で固定すべき上書き値 + Serving 設定」を持つ。各 SubModule の
-# 既定値・モデルメタは paddleocr のバージョンに依存するため、本番投入前に
-# inference/scripts/export_base_config.py で当該バージョンの完全 base config を生成し、
-# 本ファイルの値をマージした authoritative config を作ること（付録C-1/C-2）。
-
-pipeline_name: PP-StructureV3
-
-# DD-01/ADR-0002: 前処理は ingest 側で実施済み。二重前処理を避けるため無効化する。
-use_doc_preprocessor: False
-# 帳票用途では数式・チャート解析は不要（高速化, DD-03）
-use_formula_recognition: False
-use_chart_recognition: False
-use_seal_recognition: True
-use_table_recognition: True
-use_region_detection: True
+# ★ 本ファイルは「完全な authoritative config」。paddleocr 3.7.0 / paddlex 3.7.2 で
+#   inference/scripts/export_base_config.py structure が生成した完全 base に、設計の
+#   固定値（下記）と Serving 設定をマージしたもの。以前は部分 pin のみだったため
+#   paddlex --serve が "config error for doc_preprocessor_pipeline!" で起動できなかった。
+#   paddleocr のバージョンを上げる際は export_base_config.py で再生成すること。
+#
+# 固定している設計値:
+#   - DD-01/ADR-0002: use_doc_preprocessor=False（前処理は ingest 側で実施済み）
+#   - DD-03: 汎用 OCR / 表内 OCR / 印章 OCR の認識・検出を PP-OCRv6_medium に明示固定
+#            （3.7 既定の PP-OCRv5_server に依存しない）
+#   - DD-03 既知例外: 印章"検出"は paddlex 3.7.2 に v6 版が無く PP-OCRv4_server_seal_det のみ
+#   - layout: PP-DocLayout_plus-L（PP-DocLayoutV3 は実在しない。V2 は表を分断するため不採用）
+#   - 帳票用途のため formula / chart は無効（高速化）
+#   - Serving.visualize=False（可視化画像を返さずペイロード削減）
+#
+# 推論バックエンド: --engine onnxruntime を付けること（Linux 実測 20.1s→7.9s = 2.5×、精度同一）。
+#   OpenVINO は PP-OCRv6_medium_rec が ultra-infer 1.2.0 で読み込めず不可（inference/README.md 参照）。
 
 SubModules:
-  LayoutDetection:
-    module_name: layout_detection
-    model_name: PP-DocLayoutV3
+  ChartRecognition:
+    batch_size: 1
     model_dir: null
-    threshold: 0.3
-    layout_nms: True
-
+    model_name: PP-Chart2Table
+    module_name: chart_recognition
+  LayoutDetection:
+    batch_size: 8
+    layout_merge_bboxes_mode:
+      0: large
+      1: large
+      2: union
+      3: union
+      4: union
+      5: union
+      6: union
+      7: large
+      8: union
+      9: union
+      10: union
+      11: union
+      12: union
+      13: union
+      14: union
+      15: union
+      16: large
+      17: union
+      18: union
+      19: union
+    layout_nms: true
+    layout_unclip_ratio:
+    - 1.0
+    - 1.0
+    model_dir: null
+    model_name: PP-DocLayout_plus-L
+    module_name: layout_detection
+    threshold:
+      0: 0.3
+      1: 0.5
+      2: 0.4
+      3: 0.5
+      4: 0.5
+      5: 0.5
+      6: 0.5
+      7: 0.3
+      8: 0.5
+      9: 0.5
+      10: 0.5
+      11: 0.5
+      12: 0.5
+      13: 0.5
+      14: 0.5
+      15: 0.45
+      16: 0.5
+      17: 0.5
+      18: 0.5
+      19: 0.5
+  RegionDetection:
+    layout_merge_bboxes_mode: small
+    layout_nms: true
+    model_dir: null
+    model_name: PP-DocBlockLayout
+    module_name: layout_detection
 SubPipelines:
-  # DD-03: 汎用 OCR サブモジュールを PP-OCRv6_medium に明示固定（3.7 既定に依存しない）。
+  DocPreprocessor:
+    SubModules:
+      DocOrientationClassify:
+        batch_size: 8
+        model_dir: null
+        model_name: PP-LCNet_x1_0_doc_ori
+        module_name: doc_text_orientation
+      DocUnwarping:
+        model_dir: null
+        model_name: UVDoc
+        module_name: image_unwarping
+    batch_size: 8
+    pipeline_name: doc_preprocessor
+    use_doc_orientation_classify: false
+    use_doc_unwarping: false
+  FormulaRecognition:
+    SubModules:
+      FormulaRecognition:
+        batch_size: 8
+        model_dir: null
+        model_name: PP-FormulaNet_plus-L
+        module_name: formula_recognition
+    batch_size: 8
+    pipeline_name: formula_recognition
+    use_doc_preprocessor: false
+    use_layout_detection: false
   GeneralOCR:
-    pipeline_name: OCR
-    use_textline_orientation: True
     SubModules:
       TextDetection:
-        module_name: text_detection
+        box_thresh: 0.6
+        limit_side_len: 736
+        limit_type: min
+        max_side_limit: 4000
+        model_dir: null
         model_name: PP-OCRv6_medium_det
+        module_name: text_detection
+        thresh: 0.3
+        unclip_ratio: 1.5
+      TextLineOrientation:
+        batch_size: 8
         model_dir: null
+        model_name: PP-LCNet_x1_0_textline_ori
+        module_name: textline_orientation
       TextRecognition:
-        module_name: text_recognition
-        model_name: PP-OCRv6_medium_rec
+        batch_size: 8
         model_dir: null
+        model_name: PP-OCRv6_medium_rec
+        module_name: text_recognition
         score_thresh: 0.0
-
-  # 表内 OCR も v6_medium に固定（pp_structurev3.py の TableRecognition.GeneralOCR 経路）
-  TableRecognition:
-    pipeline_name: table_recognition_v2
+    batch_size: 8
+    pipeline_name: OCR
+    text_type: general
+    use_doc_preprocessor: false
+    use_textline_orientation: true
+  SealRecognition:
     SubPipelines:
-      GeneralOCR:
-        pipeline_name: OCR
+      SealOCR:
         SubModules:
           TextDetection:
-            module_name: text_detection
-            model_name: PP-OCRv6_medium_det
+            box_thresh: 0.6
+            limit_side_len: 736
+            limit_type: min
+            max_side_limit: 4000
             model_dir: null
+            model_name: PP-OCRv4_server_seal_det
+            module_name: seal_text_detection
+            thresh: 0.2
+            unclip_ratio: 0.5
           TextRecognition:
-            module_name: text_recognition
-            model_name: PP-OCRv6_medium_rec
+            batch_size: 8
             model_dir: null
-
+            model_name: PP-OCRv6_medium_rec
+            module_name: text_recognition
+            score_thresh: 0
+        batch_size: 8
+        pipeline_name: OCR
+        text_type: seal
+        use_doc_preprocessor: false
+        use_textline_orientation: false
+    batch_size: 8
+    pipeline_name: seal_recognition
+    use_doc_preprocessor: false
+    use_layout_detection: false
+  TableRecognition:
+    SubModules:
+      TableClassification:
+        model_dir: null
+        model_name: PP-LCNet_x1_0_table_cls
+        module_name: table_classification
+      TableOrientationClassify:
+        model_dir: null
+        model_name: PP-LCNet_x1_0_doc_ori
+        module_name: doc_text_orientation
+      WiredTableCellsDetection:
+        model_dir: null
+        model_name: RT-DETR-L_wired_table_cell_det
+        module_name: table_cells_detection
+      WiredTableStructureRecognition:
+        model_dir: null
+        model_name: SLANeXt_wired
+        module_name: table_structure_recognition
+      WirelessTableCellsDetection:
+        model_dir: null
+        model_name: RT-DETR-L_wireless_table_cell_det
+        module_name: table_cells_detection
+      WirelessTableStructureRecognition:
+        model_dir: null
+        model_name: SLANet_plus
+        module_name: table_structure_recognition
+    SubPipelines:
+      GeneralOCR:
+        SubModules:
+          TextDetection:
+            box_thresh: 0.4
+            limit_side_len: 736
+            limit_type: min
+            max_side_limit: 4000
+            model_dir: null
+            model_name: PP-OCRv6_medium_det
+            module_name: text_detection
+            thresh: 0.3
+            unclip_ratio: 1.5
+          TextLineOrientation:
+            batch_size: 8
+            model_dir: null
+            model_name: PP-LCNet_x1_0_textline_ori
+            module_name: textline_orientation
+          TextRecognition:
+            batch_size: 8
+            model_dir: null
+            model_name: PP-OCRv6_medium_rec
+            module_name: text_recognition
+        pipeline_name: OCR
+        score_thresh: 0.0
+        text_type: general
+        use_doc_preprocessor: false
+        use_textline_orientation: true
+    pipeline_name: table_recognition_v2
+    use_doc_preprocessor: false
+    use_layout_detection: false
+    use_ocr_model: false
+batch_size: 8
+format_block_content: false
+markdown_ignore_labels:
+- number
+- footnote
+- header
+- header_image
+- footer
+- footer_image
+- aside_text
+pipeline_name: PP-StructureV3
+use_chart_recognition: false
+use_doc_preprocessor: false
+use_formula_recognition: false
+use_region_detection: true
+# 印章認識は無効。理由（実測）: 有効だと印章"検出" PP-OCRv4_server_seal_det が必要になるが、
+# 公式に onnx パッケージが提供されておらず `--engine onnxruntime` 起動時に
+#   ValueError: Official model source does not provide a 'onnx' package for model
+#               'PP-OCRv4_server_seal_det'
+# で落ちる（v6 版の印章検出モデルは paddlex 3.7.2 に存在しない）。
+# 帳票の項目抽出では印章の文字（社名）はヘッダ本文と重複し KIE 上の価値が低い一方、
+# 有効化すると onnxruntime による 2.5× 高速化を丸ごと失う（20.1s→7.9s, inference/README.md）。
+# → 速度を取り無効化する。印章の文字が必要になったら `--engine onnxruntime` を外して true にする。
+use_seal_recognition: false
+use_table_recognition: true
 Serving:
-  # ペイロード削減: 可視化画像を返さない（span/layout/markdown のみ利用, 報告 §5）
-  visualize: False
+  visualize: false
   extra:
-    # ingest がページ分割して 1 枚ずつ送るため 10 ページ制限は実害なしだが明示解除
     max_num_input_imgs: null

@@ -70,7 +70,28 @@ class MemoryService:
         if idx is None:
             idx = self._index_factory()
             self._indices[tenant_id] = idx
+            self._rehydrate(tenant_id, idx)  # 正本(Pg)から index を再構築（プロセス跨ぎ共有）
         return idx
+
+    def _rehydrate(self, tenant_id: str, idx: VectorIndex) -> None:
+        """永続化済みメモリを再埋め込みして index を復元する（§5.8.3 正本=PostgreSQL）。
+
+        FAISS ベクトルは永続化しない設計のため、決定論的 embedder で passage を
+        再埋め込みし faiss_vector_id を保って再投入する。新プロセスでも過去の修正
+        メモリを検索できる。
+        """
+        for mem in self._repo.list_memories(tenant_id):
+            c = self._repo.get_correction(tenant_id, mem.correction_log_id)
+            if c is None:
+                continue
+            key = embedding_key(
+                doc_type=c.doc_type or "",
+                supplier=c.supplier_key or "",
+                field=c.field_name,
+                value_raw=c.original_value or "",
+                context=c.context or "",
+            )
+            idx.add(mem.faiss_vector_id, self._embedder.embed(passage_text(key)))
 
     # --- 検索（§5.8.1 /internal/memory/search） ---
     def search(

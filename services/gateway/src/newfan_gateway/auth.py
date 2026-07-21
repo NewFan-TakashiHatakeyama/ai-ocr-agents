@@ -43,6 +43,36 @@ class InMemoryApiKeyStore:
         return self._keys.get(api_key)
 
 
+class EnvApiKeyStore:
+    """環境変数 API_KEYS(JSON) 由来の API キーストア（本番: Secrets Manager 注入, §11）。
+
+    各要素は {"key","tenant_id","role"?,"sub"?}。キーは SHA-256 ハッシュで保持し、
+    平文をメモリに残さず照合する（role 既定 api / sub 既定 m2m）。
+    """
+
+    def __init__(self, entries: list[dict[str, str]]) -> None:
+        import hashlib
+
+        self._by_hash: dict[str, Principal] = {}
+        for e in entries:
+            digest = hashlib.sha256(e["key"].encode("utf-8")).hexdigest()
+            self._by_hash[digest] = Principal(
+                sub=e.get("sub", "m2m"), tenant_id=e["tenant_id"], role=e.get("role", "api")
+            )
+
+    def resolve(self, api_key: str) -> Optional[Principal]:
+        import hashlib
+
+        return self._by_hash.get(hashlib.sha256(api_key.encode("utf-8")).hexdigest())
+
+    @classmethod
+    def from_env(cls, raw: Optional[str] = None) -> "EnvApiKeyStore":
+        import json
+        import os
+
+        return cls(json.loads(raw if raw is not None else os.environ.get("API_KEYS", "[]")))
+
+
 def decode_principal(
     *,
     authorization: Optional[str],

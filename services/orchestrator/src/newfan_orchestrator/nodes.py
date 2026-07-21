@@ -12,8 +12,9 @@ from datetime import date
 from typing import Any
 
 from newfan_memory import TenantRule, apply_rule
+from newfan_metrics import current_tenant, rule_auto_apply_total
 from newfan_normalizers import NormContext, normalize
-from newfan_schemas import ExtractedField, ExtractionState, FieldSchema, FieldType
+from newfan_schemas import ExtractedField, ExtractionState, FieldSchema, FieldType, ReviewStatus
 from newfan_validators import run_validations
 
 from newfan_orchestrator.confidence import (
@@ -111,7 +112,15 @@ def _apply_tenant_rules(value: str, field_name: str, active_rules: list[dict[str
             rule = TenantRule.model_validate(rule_dict)
         except (ValueError, KeyError):
             continue  # 不正ルールは skip（WARN 相当）
-        value = apply_rule(rule, value)
+        applied = apply_rule(rule, value)
+        # §12.1 rule_auto_apply_total{tenant,rule_type}。値が変わった時だけ数える。
+        # 「マッチしたルール数」ではなく「実際に効いたルール数」を測る指標のため
+        # （全フィールドに対してループするので、前者だと数字が意味を持たない）。
+        if applied != value:
+            rule_auto_apply_total.labels(
+                tenant=current_tenant(), rule_type=rule.rule_type.value
+            ).inc()
+        value = applied
     return value
 
 
@@ -205,13 +214,39 @@ def confidence_gate_node(state: ExtractionState) -> dict[str, Any]:
 
 
 def hitl_review(state: ExtractionState) -> dict[str, Any]:
-    """interrupt() でチェックポイント保存し停止（§4.4）。graph.py 側で interrupt を発火。"""
-    return {}
+    """interrupt() でチェックポイント保存し停止し、resume 時に human_feedback を受ける（§4.4）。
+
+    UI が必要とする最小情報（review_items）のみを interrupt ペイロードに載せる。
+    checkpointer 付きで実行された場合のみ意味を持つ（langgraph は遅延 import）。
+    """
+    from langgraph.types import interrupt  # 遅延 import（graph 実行時のみ必要）
+
+    feedback = interrupt(
+        {
+            "type": "review_request",
+            "run_id": state.get("run_id", ""),
+            "items": [ri.model_dump() for ri in state.get("review_items", [])],
+        }
+    )
+    return {"human_feedback": feedback}
 
 
 def apply_feedback(state: ExtractionState) -> dict[str, Any]:
-    """human_feedback を fields へマージ、review_status 更新（§4.3）。"""
-    return {}
+    """human_feedback（resume 値）を fields へマージし review_status を更新する（§4.3）。"""
+    feedback = state.get("human_feedback") or {}
+    corrections = {
+        c["field_name"]: c for c in (feedback.get("corrections", []) or []) if "field_name" in c
+    }
+    updated: list[ExtractedField] = []
+    for field in state.get("fields", []):
+        corr = corrections.get(field.name)
+        if corr is not None:
+            field.value_normalized = corr.get("corrected_value", field.value_normalized)
+            field.review_status = ReviewStatus.CORRECTED
+        elif field.review_status is ReviewStatus.PENDING:
+            field.review_status = ReviewStatus.APPROVED
+        updated.append(field)
+    return {"fields": updated}
 
 
 def learn(state: ExtractionState) -> dict[str, Any]:

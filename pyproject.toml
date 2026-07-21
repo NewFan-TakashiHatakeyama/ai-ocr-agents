@@ -6,9 +6,21 @@ requires-python = ">=3.12"
 readme = "README.md"
 
 [tool.uv.workspace]
-members = ["packages/*", "services/*"]
+members = ["packages/*", "services/*", "golden"]
+
+# e5 埋め込み（sentence-transformers, DD-06）が torch を引くが、既定の PyPI wheel は
+# CUDA 版（実測: torch 2.13.0+cu130）で nvidia ランタイム 2.7GB と triton 691MB を道連れにする。
+# ADR-0003 で推論も含め全て CPU（Fargate）と決めており GPU は一切使わないため、
+# CPU 版 wheel に固定する。orchestrator イメージが 17.3GB → 数GB になり、
+# ECR への push 時間・保管料・タスク起動時間がすべて縮む。
+# GPU を使う構成（Option B）に移る場合はここを外すこと。
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
 newfan-schemas = { workspace = true }
 newfan-paddle-client = { workspace = true }
 newfan-normalizers = { workspace = true }
@@ -19,6 +31,10 @@ newfan-llm-adapter = { workspace = true }
 newfan-gateway = { workspace = true }
 newfan-memory = { workspace = true }
 newfan-export = { workspace = true }
+newfan-golden = { workspace = true }
+newfan-metrics = { workspace = true }
+newfan-netguard = { workspace = true }
+newfan-workflow = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -29,6 +45,11 @@ dev = [
     "respx>=0.21",
     "pyyaml>=6.0",
     "types-pyyaml>=6.0",
+    "alembic>=1.13",
+    "langgraph>=0.2",
+    # 画像/TIFF ラスタライズ（§5.1）と DD-02 char_backfill のテストを実際に走らせるため。
+    # 無いと importorskip で丸ごとスキップされ、回帰を検出できない。
+    "pillow>=10.0",
 ]
 
 [tool.ruff]
@@ -44,10 +65,12 @@ namespace_packages = true
 [[tool.mypy.overrides]]
 module = [
     "pypdfium2", "pypdfium2.*", "langgraph.*", "boto3", "boto3.*",
+    "botocore", "botocore.*",
     "anthropic", "anthropic.*", "sentence_transformers", "faiss", "numpy",
+    "PIL", "PIL.*", "google", "google.*",
 ]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-q"
-testpaths = ["packages", "services", "inference"]
+testpaths = ["packages", "services", "inference", "db", "tests", "golden"]

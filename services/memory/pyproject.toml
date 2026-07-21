@@ -13,6 +13,11 @@ dependencies = [
 # 本番の埋め込み/ベクタ検索（テストは Hashing/InMemory で代替）
 embeddings = [
     "sentence-transformers>=3.0",  # intfloat/multilingual-e5-small (DD-06)
+    # torch は sentence-transformers の推移依存だが、ここで直接依存にしておかないと
+    # ワークスペース root の [tool.uv.sources] が効かない（sources は直接依存にのみ適用される）。
+    # 既定の PyPI wheel は CUDA 版で nvidia ランタイム 2.7GB を道連れにする。ADR-0003 は
+    # 全て CPU（Fargate）で GPU を使わないため、root で CPU 版 index に固定している。
+    "torch>=2.0",
 ]
 faiss = [
     "faiss-cpu>=1.8",  # IndexFlatIP (DD-07)

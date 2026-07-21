@@ -8,17 +8,24 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from newfan_metrics import render_latest
+from prometheus_client import CONTENT_TYPE_LATEST
 
+from newfan_gateway.admin import AdminRepository, InMemoryAdminRepository
 from newfan_gateway.auth import ApiKeyStore, InMemoryApiKeyStore
+from newfan_gateway.chat import ChatAgent, RuleBasedChatAgent
 from newfan_gateway.config import Settings
 from newfan_gateway.context import request_id_var
 from newfan_gateway.errors import ApiError, api_error_handler, error_body
 from newfan_gateway.ids import new_id
+from newfan_gateway.locks import InMemoryLockStore
 from newfan_gateway.ports import FakeOrchestratorClient, Ingestor, OrchestratorClient
 from newfan_gateway.queue import InMemoryQueue, Queue
 from newfan_gateway.repository import InMemoryRepository, Repository
+from newfan_gateway.workflows_repo import InMemoryWorkflowsRepository, WorkflowsRepository
 from newfan_gateway.routers import router
 
 
@@ -30,14 +37,34 @@ def create_app(
     orchestrator: Optional[OrchestratorClient] = None,
     ingestor: Optional[Ingestor] = None,
     api_keys: Optional[ApiKeyStore] = None,
+    admin: Optional[AdminRepository] = None,
+    chat_agent: Optional[ChatAgent] = None,
+    workflows: Optional[WorkflowsRepository] = None,
+    secret_store: Any = None,
 ) -> FastAPI:
     app = FastAPI(title="NewFan AI-OCR Gateway", version="0.1.0")
 
-    app.state.settings = settings or Settings.from_env()
+    resolved_settings = settings or Settings.from_env()
+    # CORS: web UI（別オリジン）から Bearer 認証で叩けるようにする（§6.1 は同一 API 前提だが
+    # ブラウザ SPA は cross-origin。cookie 不使用のため allow_credentials は不要）。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=resolved_settings.cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.state.settings = resolved_settings
     app.state.repo = repo or InMemoryRepository()
     app.state.queue = queue or InMemoryQueue()
     app.state.orchestrator = orchestrator or FakeOrchestratorClient()
+    app.state.admin = admin or InMemoryAdminRepository()
+    app.state.chat_agent = chat_agent or RuleBasedChatAgent()
+    app.state.workflows = workflows or InMemoryWorkflowsRepository()
+    # 秘密の保管先（Secrets Manager, P6）。未注入なら旧方式（config.secret）に fallback
+    app.state.secret_store = secret_store
     app.state.api_keys = api_keys or InMemoryApiKeyStore({})
+    app.state.lock_store = InMemoryLockStore()
     app.state.idempotency = {}
     if ingestor is not None:
         app.state.ingestor = ingestor
@@ -66,14 +93,34 @@ def create_app(
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/metrics")
+    def metrics() -> Response:
+        """Prometheus スクレイプ先（§12.1）。
+
+        認証は付けない。ALB のリスナルールが /v1/* と /healthz しか gateway へ
+        流さないため、この経路はインターネットからは到達しない（VPC 内のみ）。
+        UI 用の集計 API は /v1/metrics/summary で別物。
+        """
+        return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
+
     app.include_router(router)
     return app
 
 
 def _default_ingestor(settings: Settings) -> Ingestor:
-    # 本番: LocalObjectStore は将来 S3ObjectStore に差し替え。rasterizer は pypdfium2（runtime extra）。
+    # rasterizer は AutoRasterizer（PDF=pypdfium2 / 画像・TIFF=Pillow, runtime extra）。
+    # PdfiumRasterizer 単体だと PNG/JPEG のアップロードが NotImplementedError → 500 になる
+    # （validate_upload は pdf/png/jpeg/tiff/office を通すため。実コンテナで検出）。
+    # ObjectStore は S3_BUCKET 設定時 S3、無ければ Local。
     from newfan_ingest import IngestService
-    from newfan_ingest.rasterize import PdfiumRasterizer
-    from newfan_ingest.storage import LocalObjectStore
+    from newfan_ingest.rasterize import AutoRasterizer
 
-    return IngestService(LocalObjectStore(settings.storage_root), PdfiumRasterizer())
+    if settings.s3_bucket:
+        from newfan_ingest.storage import S3ObjectStore
+
+        store: Any = S3ObjectStore(settings.s3_bucket, kms_key_id=settings.s3_kms_key_id)
+    else:
+        from newfan_ingest.storage import LocalObjectStore
+
+        store = LocalObjectStore(settings.storage_root)
+    return IngestService(store, AutoRasterizer())

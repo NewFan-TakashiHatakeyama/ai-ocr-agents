@@ -29,10 +29,13 @@ ai-ocr-agents/
 │  ├─ structure/        # PP-StructureV3 サービング設定（PP-OCRv6_medium 固定）
 │  ├─ ocr/              # PP-OCRv6 単体（return_word_box=True 固定）
 │  └─ vl/               # PaddleOCR-VL-1.6 サービング
+├─ web/                 # HITL 検証UI（Next.js 15）§8
 ├─ prompts/2026.07-1/   # プロンプトバンドル（YAML）§4.6
-├─ deploy/              # compose / helm
+├─ db/                  # Alembic マイグレーション（§7 DDL/RLS）
+├─ deploy/              # compose / ECS(Terraform)
+├─ scripts/             # fixture録画等のユーティリティ
 ├─ docs/adr/            # 設計判断記録（ADR）
-└─ PaddleOCR/           # ベンダ参照（推論エンジン。編集しない）
+└─ PaddleOCR/           # ベンダ参照（推論エンジン。編集しない・.gitignore）
 ```
 
 ## 開発
@@ -56,9 +59,10 @@ uv run mypy packages          # 型チェック（strict）
 | inference/* | サービング設定 YAML・compose 実装済み |
 | deploy/ecs | ECS(Option A) Terraform IaC 実装済み（terraform validate は要 CI 実行） |
 | services/ingest | スケルトン（検証ロジックは実装、rasterize/preprocess は Protocol） |
-| services/orchestrator | 抽出グラフ。決定論＋LLM(kie/correct)＋memory(lookup/learn)＋structure_ocr(paddle_client)ノードを実体化。vl_fallback はスタブ |
+| services/orchestrator | 抽出グラフ。決定論＋LLM(kie/correct)＋memory(lookup/learn)＋structure_ocr＋vl_fallback を実体化。全ノード配線済み（load_context/apply_feedback 等の DB 接続は本番実装待ち） |
 | services/gateway | §6 REST/HITL API（FastAPI）実装済み。In-Memory で E2E、本番は PgRepository(RLS)/Redis/HTTP 注入 |
 | services/llm_adapter | §4.6 KIE/補正実装済み。span検証・DD-10強制・JSONリペア。既定 claude-opus-4-8 |
 | services/memory | §5.8 修正メモリ/ルール実装済み。埋め込み(e5)・FAISS・learn・ルール自動検証(§5.8.4)。本番はe5/faiss extra |
 | services/export | §5.9 JSON/CSV/Webhook 配信実装済み。HMAC署名・SSRFガード・指数リトライ。本番S3はboto3 extra |
-| web | 未着手 |
+| db | §7 DDL/RLS の Alembic 初期マイグレーション（offline SQL 生成で検証済み） |
+| web | §8 HITL 検証UI スキャフォールド（SCR-02/03・レビューキュー・DocViewer/FieldPanel/ConfirmBar）。要 pnpm install |

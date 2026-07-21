@@ -6,19 +6,29 @@
 # 推論層（structure / ocr / vl）をまず起動し、paddle_client の契約テスト fixture 録画や
 # ingest→orchestrator の E2E に使う。data 層（Postgres/Redis）は段階的に追加する。
 #
-# コスト最小トポロジ（ADR-0003 Option A）では structure/ocr は Fargate CPU 相当で動かすため、
-# OpenVINO CPU イメージ／`--device cpu` で確認する。GPU が要るのは vl-svc（既定無効）のみ。
-# 推論イメージタグ・GPU 構成は環境依存（付録C-1/C-4）。
+# コスト最小トポロジ（ADR-0003 Option A）では structure/ocr は Fargate CPU 相当で動かす。
+# GPU が要るのは vl-svc（既定無効）のみ。推論イメージタグは環境依存（付録C-1/C-4）。
+#
+# CPU バックエンド: paddle（+oneDNN）。paddlepaddle は 3.2.2 固定が必須（3.3.1 は oneDNN/PIR バグで500）。
+#   実測 4vCPU: 16.4s/page（onnxruntime の 51.2s より約3倍速く、コスト効率も約2.8倍）。
+#   OpenVINO は ultra-infer 1.2.0 が PP-OCRv6_medium_rec を読めず不可（inference/README.md 参照）。
 
+# structure-svc / ocr-svc は同一イメージ（deploy/docker/inference.Dockerfile）を
+# PIPELINE_CONFIG で使い分ける。entrypoint が起動前に validate_config.py を実行し、
+# DD-03/DD-08 違反や実在しないモデル名なら起動しない。
 services:
   structure-svc:
-    image: ${PADDLEX_SERVING_IMAGE:-ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr:latest}
-    command: >-
-      paddlex --serve
-      --pipeline /configs/pipeline_config.yaml
-      --host 0.0.0.0 --port 8080
+    build:
+      context: ..
+      dockerfile: deploy/docker/inference.Dockerfile
+    image: ${INFERENCE_IMAGE:-newfan-inference:local}
+    environment:
+      PIPELINE_CONFIG: /opt/inference/structure/pipeline_config.yaml
+      INFERENCE_ENGINE: ${INFERENCE_ENGINE:-paddle}
+      TENANT_LANG: ${TENANT_LANG:-ja}
     volumes:
-      - ./../inference/structure/pipeline_config.yaml:/configs/pipeline_config.yaml:ro
+      # モデルキャッシュ（初回 DL を再利用。本番は EFS 等に置く, 付録C-4）
+      - paddlex-models:/root/.paddlex
     ports:
       - "8081:8080"
     # GPU を使う場合は deploy.resources.reservations.devices を有効化
@@ -31,13 +41,18 @@ services:
     #           capabilities: [gpu]
 
   ocr-svc:
-    image: ${PADDLEX_SERVING_IMAGE:-ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddleocr:latest}
-    command: >-
-      paddlex --serve
-      --pipeline /configs/pipeline_config.yaml
-      --host 0.0.0.0 --port 8080
+    # structure-svc と同一イメージを PIPELINE_CONFIG だけ変えて使う。
+    # build: を書くと同じイメージを二重ビルドして "already exists" で失敗するため、
+    # ビルドは structure-svc 側に一本化する（`docker compose build` で両方揃う）。
+    image: ${INFERENCE_IMAGE:-newfan-inference:local}
+    depends_on:
+      - structure-svc
+    environment:
+      PIPELINE_CONFIG: /opt/inference/ocr/pipeline_config.yaml
+      INFERENCE_ENGINE: ${INFERENCE_ENGINE:-paddle}
+      TENANT_LANG: ${TENANT_LANG:-ja}
     volumes:
-      - ./../inference/ocr/pipeline_config.yaml:/configs/pipeline_config.yaml:ro
+      - paddlex-models:/root/.paddlex
     ports:
       - "8082:8080"
 
@@ -47,3 +62,100 @@ services:
   #   extends:
   #     file: ../PaddleOCR/deploy/paddleocr_vl_docker/hps/compose.yaml
   #     service: pipeline
+
+  # --- data 層（結合テスト用, §14.1） ---
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: newfan
+      POSTGRES_PASSWORD: newfan
+      POSTGRES_DB: newfan
+    ports:
+      # 同一マシンに他の postgres がある場合は POSTGRES_HOST_PORT で衝突回避
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U newfan"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+
+  # --- アプリ層（§14.1 結合テスト: アップロード→抽出→検証画面の全経路） ---
+
+  # マイグレーション適用（postgres 起動後に 1 回だけ走って終了する）
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/docker/migrate.Dockerfile
+    image: ${MIGRATE_IMAGE:-newfan-migrate:local}
+    environment:
+      DATABASE_URL: postgresql+psycopg://newfan:newfan@postgres:5432/newfan
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/docker/gateway.Dockerfile
+    image: ${GATEWAY_IMAGE:-newfan-gateway:local}
+    environment:
+      DATABASE_URL: postgresql+psycopg://newfan:newfan@postgres:5432/newfan
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-qa-secret-0123456789-abcdefghijklmnop}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      STORAGE_ROOT: /data
+      # ページ画像・原本は結合テストではローカル FS（本番は S3_BUCKET を設定）
+    volumes:
+      - appdata:/data
+    ports:
+      - "${GATEWAY_HOST_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  orchestrator-worker:
+    build:
+      context: ..
+      dockerfile: deploy/docker/orchestrator-worker.Dockerfile
+    image: ${ORCHESTRATOR_IMAGE:-newfan-orchestrator-worker:local}
+    environment:
+      DATABASE_URL: postgresql+psycopg://newfan:newfan@postgres:5432/newfan
+      REDIS_URL: redis://redis:6379/0
+      STRUCTURE_URL: http://structure-svc:8080
+      OCR_URL: http://ocr-svc:8080
+      # KIE/校正の LLM。実キーは .env から渡す（リポジトリには入れない）
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}
+      # sink.db_write のローカル用秘密（secret_ref "env:SINK_DB_PASSWORD" が読む。
+      # AWS では Secrets Manager を使うためこの変数は使われない）
+      SINK_DB_PASSWORD: ${SINK_DB_PASSWORD:-}
+    volumes:
+      - appdata:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # web は Dockerfile 未整備のためホストで動かす（結合テストではこれで足りる）:
+  #   cd web && NEXT_PUBLIC_API_BASE=http://localhost:8000/v1 npm run dev
+
+volumes:
+  pgdata:
+  # 推論モデルのキャッシュ（初回 DL は数百MB。毎回取り直さないよう永続化）
+  paddlex-models:
+  # 原本・ページ画像（gateway が書き、orchestrator が読む）
+  appdata:

@@ -26,6 +26,7 @@ class Repository(Protocol):
     def get_pages(self, tenant_id: str, document_id: str) -> list[PageRecord]: ...
 
     def has_active_run(self, tenant_id: str, document_id: str) -> bool: ...
+    def has_processing_run(self, tenant_id: str, document_id: str) -> bool: ...
     def create_run(self, run: RunRecord) -> None: ...
     def get_run(self, tenant_id: str, run_id: str) -> Optional[RunRecord]: ...
     def get_latest_run(self, tenant_id: str, document_id: str) -> Optional[RunRecord]: ...
@@ -35,7 +36,11 @@ class Repository(Protocol):
     def get_job(self, tenant_id: str, job_id: str) -> Optional[JobRecord]: ...
 
     def add_corrections(self, corrections: list[CorrectionRecord]) -> None: ...
+    def list_corrections(self, tenant_id: str, run_id: str) -> list[CorrectionRecord]: ...
     def list_review_runs(self, tenant_id: str) -> list[RunRecord]: ...
+    def list_hitl_boosts(self, tenant_id: str) -> dict[str, int]:
+        """document_id → hitl_gate の priority_boost（waiting_hitl の workflow_runs 由来, §16 P5）。"""
+        ...
 
 
 class InMemoryRepository:
@@ -45,6 +50,7 @@ class InMemoryRepository:
         self._runs: dict[str, RunRecord] = {}
         self._jobs: dict[str, JobRecord] = {}
         self._corrections: list[CorrectionRecord] = []
+        self._hitl_boosts: dict[tuple[str, str], int] = {}
 
     @staticmethod
     def _owned(rec_tenant: str, tenant_id: str) -> bool:
@@ -88,6 +94,20 @@ class InMemoryRepository:
             for r in self._runs.values()
         )
 
+    def has_processing_run(self, tenant_id: str, document_id: str) -> bool:
+        """実行中（processing）の Run があるか。
+
+        has_active_run は needs_review も含むが、こちらは「今まさに処理中」だけを見る。
+        チャットからの再抽出（§4.5）は needs_review の帳票を取り直す用途が主で、
+        needs_review を弾くと成立しないため区別が要る。
+        """
+        return any(
+            r.document_id == document_id
+            and self._owned(r.tenant_id, tenant_id)
+            and r.status == "processing"
+            for r in self._runs.values()
+        )
+
     def create_run(self, run: RunRecord) -> None:
         self._runs[run.id] = run
 
@@ -119,9 +139,21 @@ class InMemoryRepository:
     def add_corrections(self, corrections: list[CorrectionRecord]) -> None:
         self._corrections.extend(corrections)
 
+    def list_corrections(self, tenant_id: str, run_id: str) -> list[CorrectionRecord]:
+        return [
+            c for c in self._corrections
+            if c.run_id == run_id and self._owned(c.tenant_id, tenant_id)
+        ]
+
     def list_review_runs(self, tenant_id: str) -> list[RunRecord]:
         return [
             r
             for r in self._runs.values()
             if r.tenant_id == tenant_id and r.status == "needs_review"
         ]
+
+    def seed_hitl_boost(self, tenant_id: str, document_id: str, boost: int) -> None:
+        self._hitl_boosts[(tenant_id, document_id)] = boost
+
+    def list_hitl_boosts(self, tenant_id: str) -> dict[str, int]:
+        return {d: b for (t, d), b in self._hitl_boosts.items() if t == tenant_id}

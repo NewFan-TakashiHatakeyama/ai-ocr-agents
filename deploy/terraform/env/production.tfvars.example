@@ -1,0 +1,51 @@
+# cp production.tfvars.example production.tfvars して埋める。
+# production.tfvars 自体は ARN 等の環境固有値を含むためコミットしない（.gitignore 済み）。
+
+aws_region = "ap-northeast-1"
+env        = "production"
+
+# --- 起動/停止（scripts/aws_env.sh が上書きする） ---
+# false で Fargate を 0 台に。ただし ElastiCache/NAT/ALB は停止できず約$189/月が残るため、
+# 月単位で使わないなら scripts/aws_env.sh down（destroy, 残$3.95/月）を使うこと。
+# services_enabled = true
+
+# Container Insights は約$18/月。開発・デモ用途では切る。
+container_insights_enabled = false
+
+# ECR に push 済みのタグ（CD の image_tag と一致させる）
+image_tag = "v0.1.0"
+
+# 既存の default(172.31.0.0/16) / AIReadyConnect(10.0.0.0/16) と重ねないこと
+vpc_cidr = "10.1.0.0/16"
+
+# --- Secrets Manager の ARN（事前に作成しておく） ---
+jwt_secret_arn       = "arn:aws:secretsmanager:ap-northeast-1:654654601240:secret:ai-ocr/production/jwt-secret-XXXXXX"
+anthropic_secret_arn = "arn:aws:secretsmanager:ap-northeast-1:654654601240:secret:ai-ocr/production/anthropic-api-key-XXXXXX"
+
+# Gemini を使う場合のみ（llm_provider=gemini なら必須）
+# llm_provider      = "gemini"
+# llm_model         = "gemini-2.5-flash"
+# gemini_secret_arn = "arn:aws:secretsmanager:ap-northeast-1:654654601240:secret:ai-ocr/production/gemini-api-key-XXXXXX"
+
+# --- S3（バケットは terraform が作る。名前を固定したい時だけ指定） ---
+# 空なら ai-ocr-<env>-<accountid> を自動採番
+# s3_bucket_name = ""
+# 空なら AWS マネージドキー aws/s3 を使う
+# s3_kms_key_id  = ""
+
+# --- ALB ---
+# 空なら HTTP のみ（本番は ACM 証明書を入れて HTTPS 必須にすること）
+# acm_certificate_arn = ""
+# cors_origins        = "https://app.example.com"
+
+# --- 推論（実測: 4vCPU=16.4s/枚, 8vCPU=11.6s/枚） ---
+# structure_cpu    = 8192
+# structure_memory = 16384
+
+# 印章認識オプション（+2% 程度。DD-03: 機能は config が正）
+# structure_seal_enabled = true
+
+# --- データストア（MVP 既定。本番昇格時に見直す） ---
+# db_instance_class = "db.t4g.medium"
+# db_multi_az       = true
+# redis_node_type   = "cache.t4g.small"

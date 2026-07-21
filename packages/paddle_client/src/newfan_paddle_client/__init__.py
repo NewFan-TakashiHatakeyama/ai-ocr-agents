@@ -12,6 +12,7 @@ from newfan_paddle_client.schema import (
     ServingEnvelope,
 )
 from newfan_paddle_client.spans import build_layout_blocks, build_spans, poly_to_bbox
+from newfan_paddle_client.tables import build_tables
 
 __all__ = [
     "PaddleServingClient",
@@ -26,5 +27,6 @@ __all__ = [
     "ServingEnvelope",
     "build_spans",
     "build_layout_blocks",
+    "build_tables",
     "poly_to_bbox",
 ]

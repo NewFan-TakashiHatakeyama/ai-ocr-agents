@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from newfan_llm_adapter import LLMAdapter, PromptBundle, kie_extract, llm_correct
+from newfan_metrics import correction_reuse_hits_total, current_tenant
 from newfan_schemas import ExtractedField, ExtractionState, FieldSchema, ReviewStatus, Span
 
 from newfan_orchestrator.confidence import apply_correction_confidence
@@ -31,7 +32,10 @@ def make_kie_extract(adapter: LLMAdapter, bundle: PromptBundle) -> NodeFn:
             schema_json=dict(state.get("schema", {})),
             rule_hints=_rule_hints(state.get("active_rules", [])),
         )
-        return {"fields": result.fields, "tables": result.tables}
+        # 構造由来テーブル（structure_ocr が cell 座標付きで生成）を優先し、
+        # 無い場合のみ LLM 抽出のテーブルを使う（§5.3: 座標/構造が正確）。
+        tables = state.get("tables") or result.tables
+        return {"fields": result.fields, "tables": tables}
 
     return _node
 
@@ -73,6 +77,12 @@ def make_llm_correct(
                     "memory_refs": result.memory_refs,
                     "rationale": result.rationale,
                 }
+                # §12.1 correction_reuse_hits_total（価値 KPI）。
+                # memory_refs が付いている＝過去の修正メモリを引いて直せた補正。
+                # 「学習が実際に効いているか」を測る唯一の指標なので、適用が確定した
+                # ここで数える（参照しただけ・採用されなかった補正は数えない）。
+                if result.memory_refs:
+                    correction_reuse_hits_total.labels(tenant=current_tenant()).inc()
                 field.value_normalized = result.corrected
                 field.confidence = apply_correction_confidence(
                     field.confidence, result.confidence, dd10_ok=True

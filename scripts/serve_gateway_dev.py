@@ -1,0 +1,363 @@
+"""dev/QA 用 gateway 起動（In-Memory・seed 済み・CORS・固定JWT）。
+
+web UI のブラウザ検証用。needs_review の帳票を1件 seed し、レビュア JWT を出力する。
+ページ画像は SVG data URI（file:// のブラウザ制限を回避、bbox 座標系＝1000x1400）。
+
+    uv run --with uvicorn python scripts/serve_gateway_dev.py
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from pathlib import Path
+
+import jwt
+import uvicorn
+
+from newfan_gateway.admin import InMemoryAdminRepository
+from newfan_gateway.app import create_app
+from newfan_gateway.auth import InMemoryApiKeyStore
+from newfan_gateway.config import Settings
+from newfan_gateway.records import (
+    DocumentRecord,
+    MetricsSummary,
+    PageRecord,
+    RuleRecord,
+    RunRecord,
+    SchemaFieldDef,
+    SchemaRecord,
+)
+from newfan_gateway.repository import InMemoryRepository
+from newfan_schemas import ExtractedField, ReviewStatus, TableCell, TableResult
+
+SECRET = "dev-qa-secret-0123456789-abcdefghijklmnop"  # >= 32 bytes (HS256)
+
+# 実帳票をそのままページ画像に使う。bbox 座標系は各画像のピクセル空間
+# （実 PP-StructureV3 の rec_polys / cell_box_list 由来）。
+_ROOT = Path(__file__).resolve().parents[1]
+_SAMPLE = _ROOT / "sample.png"  # 御見積書 793x1123
+_SAMPLE2 = _ROOT / "sample2.png"  # 請求書(Pyxis) 740x1046
+
+
+def _page_data_uri(path: Path = _SAMPLE) -> str:
+    b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{b64}"
+
+
+# 実 PP-StructureV3 の記録 fixture（各 sample を推論した /layout-parsing 実応答）。
+# デモ明細は「実パイプライン（build_tables ＝構造解析 + B:span値補完 + C:縦積み分割）」
+# の出力をそのまま使う。値の乱れ（例: 2r0/001/00000、纸/达/俩 等の字形誤認）は実 OCR 品質で、
+# 構造抽出ではなく認識側の課題。座標も実 cell_box_list 由来なので画像と厳密に一致する。
+_REAL_FIXTURE = _ROOT / "packages/paddle_client/tests/fixtures/real_layout_parsing_sample.json"
+_REAL_FIXTURE2 = _ROOT / "packages/paddle_client/tests/fixtures/real_layout_parsing_sample2.json"
+
+
+def _real_table(fixture: Path, name: str) -> TableResult:
+    """記録済み実応答を build_tables に通して明細 TableResult を得る。"""
+    from newfan_paddle_client import LayoutParsingResponse, build_spans, build_tables
+
+    data = json.loads(fixture.read_text(encoding="utf-8"))
+    pr = LayoutParsingResponse.model_validate(data).layout_parsing_results[0].pruned_result
+    spans = build_spans(pr, page=1)
+    table = build_tables(pr, spans, page=1)[0]
+    table.name = name
+    return table
+
+
+def _line_items_table() -> TableResult:
+    """実 sample.png に対する PP-StructureV3 + build_tables の実出力を明細として返す。
+
+    fixture が無い環境向けに、実出力の構造（人数/箱数分割・合計行）を写した
+    ハンドクラフト表へフォールバックする。
+    """
+    try:
+        return _real_table(_REAL_FIXTURE, "line_items")
+    except Exception:  # noqa: BLE001 - fixture 不在等はフォールバック
+        cols = {
+            "商品名": (40, 327), "人数": (327, 420), "箱数": (327, 420),
+            "数量": (420, 500), "単位": (500, 565), "単価": (565, 640), "金額": (640, 753),
+        }
+        data_rows = [
+            ("冷凍コロッケ", "25", "10", "250", "袋", "85", "21,250", 373, 400),
+            ("冷凍ピザ", "8", "20", "160", "袋", "410", "65,600", 400, 427),
+            ("カップラーメン醤油味", "20", "10", "200", "個", "100", "20,000", 427, 453),
+            ("カップラーメン味噌味", "20", "10", "200", "個", "100", "20,000", 453, 480),
+            ("合計", None, None, None, None, None, "136,998", 907, 932),
+        ]
+        rows = []
+        for name, nin, hako, qty, unit, price, amount, y0, y1 in data_rows:
+            vals = {"商品名": name, "人数": nin, "箱数": hako, "数量": qty,
+                    "単位": unit, "単価": price, "金額": amount}
+            rows.append(
+                {c: TableCell(value=vals[c], bbox=[x0, y0, x1, y1])
+                 for c, (x0, x1) in cols.items() if vals[c] is not None}
+            )
+        return TableResult(name="line_items", page=1, confidence=0.78, rows=rows)
+
+
+def _kie_field(
+    name: str, label: str, raw: str | None, norm: str | None, conf: float,
+    bbox: list[int], sids: list[int], *, pending: bool = False, note: str | None = None,
+) -> ExtractedField:
+    """実 Gemini KIE（PP-OCRv6 span 入力）の抽出結果をそのまま ExtractedField 化する。"""
+    return ExtractedField(
+        name=name, label=label, value_raw=raw, value_normalized=norm,
+        confidence=conf, grounding_score=1.0 if sids else 0.0, page=1,
+        bbox=bbox or None, source_quote=raw, span_ids=sids,
+        review_status=ReviewStatus.PENDING if pending else ReviewStatus.AUTO,
+        correction=({"applied": False, "needs_review": True, "rationale": note} if note else None),
+    )
+
+
+def _seed_invoice(repo: InMemoryRepository) -> None:
+    """2件目: sample2.png（Pyxis 請求書, 740x1046）。明細もフィールドも実 OCR/KIE 由来。
+
+    フィールドは拡張スキーマ(sch_inv v5)で実 Gemini KIE を回した結果を写したもの。
+    value_raw / span_ids / bbox は実 PP-OCRv6 span をそのまま使う（座標の捏造なし）。
+    """
+    repo.create_document(
+        DocumentRecord(
+            id="doc_demo2",
+            tenant_id="ten_1",
+            storage_uri="s3://demo/sample2.png",
+            original_name="請求書_sample2.png",
+            mime_type="image/png",
+            page_count=1,
+            doc_type="invoice",
+            external_ref="GS0001",
+            status="needs_review",
+        ),
+        [PageRecord(page_no=1, width=740, height=1046, image_uri=_page_data_uri(_SAMPLE2))],
+    )
+    try:
+        tables = [_real_table(_REAL_FIXTURE2, "line_items")]
+    except Exception:  # noqa: BLE001
+        tables = []
+    repo.create_run(
+        RunRecord(
+            id="run_demo2",
+            tenant_id="ten_1",
+            document_id="doc_demo2",
+            status="needs_review",
+            result_version=1,
+            engine_versions={"paddleocr": "3.7.0", "ocr": "PP-OCRv6_medium", "llm": "gemini-2.5-flash"},
+            fields=[
+                _kie_field("issuer_name", "取引先名", "わくわく物産株式会社", "わくわく物産株式会社",
+                           0.99, [395, 140, 512, 154], [19]),
+                _kie_field("total_amount", "合計金額（税込）", "7,003", "7003",
+                           1.0, [585, 742, 619, 761], [81]),
+                _kie_field("tax_amount", "内消費税", "599", "599", 1.0, [594, 775, 618, 791], [83]),
+                # 帳票に登録番号（適格請求書番号）が見当たらない。critical 項目のため要確認。
+                _kie_field("registration_no", "登録番号", None, None, 0.0, [], [],
+                           pending=True, note="登録番号（適格請求書番号）が帳票上に見当たらない。原本確認が必要。"),
+                _kie_field("invoice_no", "請求番号", "請求番号 GS0001", "GS0001",
+                           0.99, [510, 87, 604, 101], [17]),
+                _kie_field("invoice_date", "請求日", "請求日付令和02年01月31日", "2020-01-31",
+                           0.97, [510, 71, 663, 84], [16]),
+                _kie_field("closing_date", "締切日", "締切日：令02/01/31", "2020-01-31",
+                           1.0, [395, 277, 534, 291], [24]),
+                _kie_field("payment_due", "お支払期限", "お支払期限：令02/02/29", "2020-02-29",
+                           1.0, [395, 292, 535, 305], [25]),
+                _kie_field("customer_dept", "担当部署", "総務部", "総務部", 1.0, [63, 192, 108, 211], [7]),
+                _kie_field("customer_person", "担当者", "青田晴美様", "青田晴美", 1.0,
+                           [64, 207, 144, 224], [8]),
+                _kie_field("customer_tel", "取引先電話番号", "TEL:044-999-9999 FAX:044-999-9999",
+                           "044-999-9999", 1.0, [65, 152, 278, 164], [5]),
+                _kie_field("customer_fax", "取引先FAX", "TEL:044-999-9999 FAX:044-999-9999",
+                           "044-999-9999", 1.0, [65, 152, 278, 164], [5]),
+                _kie_field("customer_postal", "取引先郵便番号", "T222-0001", "222-0001",
+                           0.97, [66, 110, 134, 124], [2]),
+                _kie_field("customer_address", "取引先住所", "神奈川県横浜市港北区樽町 エイピービル",
+                           "神奈川県横浜市港北区樽町エイピービル", 0.95, [63, 121, 216, 151], [3, 4]),
+                _kie_field("bank_accounts", "振込先銀行",
+                           "大東京銀行 四谷支店 普通 1234567 / 大阪日日銀行 麹町支店 普通 1234567"
+                           " / ルナ銀行 ス夕一支店 普通 1234567",
+                           "大東京銀行 四谷支店 普通 1234567", 0.94, [65, 251, 285, 291], [10, 11, 12]),
+            ],
+            tables=tables,
+            review_summary={"pending": 1, "auto": 14},
+        )
+    )
+
+
+def _seed(repo: InMemoryRepository) -> None:
+    repo.create_document(
+        DocumentRecord(
+            id="doc_demo",
+            tenant_id="ten_1",
+            storage_uri="s3://demo/sample.png",
+            original_name="御見積書_sample.png",
+            mime_type="image/png",
+            page_count=2,
+            doc_type="quotation",
+            external_ref="EST-00000101",
+            status="needs_review",
+        ),
+        # p.1=構造OCR良好、p.2=品質ゲート NG で VL 補完（§5.4）。同じ画像を流用（デモ用）。
+        [
+            PageRecord(page_no=1, width=793, height=1123, image_uri=_page_data_uri()),
+            PageRecord(page_no=2, width=793, height=1123, image_uri=_page_data_uri()),
+        ],
+    )
+    repo.create_run(
+        RunRecord(
+            id="run_demo",
+            tenant_id="ten_1",
+            document_id="doc_demo",
+            status="needs_review",
+            result_version=1,
+            engine_versions={"paddleocr": "3.7.0", "ocr": "PP-OCRv5_server", "llm": "claude-opus-4-8"},
+            # 値/bbox は sample.png（御見積書, 793x1123）の実 PP-StructureV3 OCR 由来
+            fields=[
+                ExtractedField(
+                    name="total_amount",
+                    label="御見積合計金額",
+                    value_raw="¥I36,998",  # OCR 誤読（I↔1）
+                    value_normalized="I36998",
+                    confidence=0.72,  # デモ用に要確認（実測は 0.93）
+                    grounding_score=1.0,
+                    page=1,
+                    bbox=[235, 306, 320, 330],
+                    source_quote="¥I36,998",
+                    span_ids=[5],
+                    review_status=ReviewStatus.PENDING,
+                    correction={
+                        "applied": False,
+                        "needs_review": True,
+                        "from": "I36998",
+                        "to": "136,998",
+                        "rationale": "混同ペア I↔1（先頭文字）。明細合計 ¥136,998 と一致（V-SUM）。",
+                        "used_pairs": ["I↔1"],
+                        "memory_refs": ["cor_01H8MQ"],
+                    },
+                ),
+                ExtractedField(
+                    name="issuer_name",
+                    label="取引先名",
+                    value_raw="ＡＡＡ食品株式会社",
+                    value_normalized="ＡＡＡ食品株式会社",
+                    confidence=0.99,
+                    grounding_score=1.0,
+                    page=1,
+                    bbox=[41, 158, 166, 172],
+                    span_ids=[2],
+                    review_status=ReviewStatus.AUTO,
+                ),
+                ExtractedField(
+                    name="quote_no",
+                    label="見積番号",
+                    value_raw="00000101",
+                    value_normalized="00000101",
+                    confidence=0.97,
+                    grounding_score=1.0,
+                    page=1,
+                    bbox=[694, 155, 751, 172],
+                    span_ids=[46],
+                    review_status=ReviewStatus.AUTO,
+                ),
+                ExtractedField(
+                    name="quote_date",
+                    label="見積日",
+                    value_raw="2014年04月01日",
+                    value_normalized="2014-04-01",
+                    confidence=1.0,
+                    grounding_score=1.0,
+                    page=1,
+                    bbox=[653, 169, 749, 186],
+                    span_ids=[49],
+                    review_status=ReviewStatus.AUTO,
+                ),
+            ],
+            tables=[_line_items_table()],
+            review_summary={"pending": 1, "auto": 3},
+            fallback_pages=[2],  # p.2 は VL 補完（バッジ/バナー露出のデモ, §5.4）
+        )
+    )
+
+
+def _seed_admin() -> InMemoryAdminRepository:
+    admin = InMemoryAdminRepository()
+    admin.seed_schema(
+        SchemaRecord(
+            id="sch_inv", tenant_id="ten_1", doc_type="invoice", version=5,
+            # KIE はスキーマ駆動（§4.6.1）。ここに無い項目は OCR が読めていても抽出されない。
+            # 取引先の連絡先・振込先・締切等を取るには項目定義が要る（SCR-06 で管理）。
+            fields=[
+                SchemaFieldDef(name="issuer_name", label="取引先名", type="string", required=True, critical=True),
+                SchemaFieldDef(name="total_amount", label="合計金額（税込）", type="money_jpy", required=True, critical=True),
+                SchemaFieldDef(name="tax_amount", label="内消費税", type="money_jpy"),
+                SchemaFieldDef(name="registration_no", label="登録番号", type="jp_invoice_reg_no", critical=True),
+                SchemaFieldDef(name="invoice_no", label="請求番号", type="string"),
+                SchemaFieldDef(name="invoice_date", label="請求日", type="date", required=True),
+                SchemaFieldDef(name="closing_date", label="締切日", type="date"),
+                SchemaFieldDef(name="payment_due", label="お支払期限", type="date"),
+                SchemaFieldDef(name="customer_dept", label="担当部署", type="string"),
+                SchemaFieldDef(name="customer_person", label="担当者", type="string"),
+                SchemaFieldDef(name="customer_tel", label="取引先電話番号", type="string"),
+                SchemaFieldDef(name="customer_fax", label="取引先FAX", type="string"),
+                SchemaFieldDef(name="customer_postal", label="取引先郵便番号", type="string"),
+                SchemaFieldDef(name="customer_address", label="取引先住所", type="string"),
+                SchemaFieldDef(name="bank_accounts", label="振込先銀行", type="string"),
+            ],
+        )
+    )
+    admin.seed_schema(
+        SchemaRecord(id="sch_po", tenant_id="ten_1", doc_type="order", version=2,
+                     fields=[SchemaFieldDef(name="order_no", label="注文番号", type="string", required=True)])
+    )
+    admin.seed_rule(RuleRecord(
+        id="rul_01J8format", tenant_id="ten_1", doc_type="invoice", supplier_key="サンプル商事",
+        field_name="伝票番号", rule_type="format", rule_json={"description": "伝票番号は先頭「7」の6桁", "pattern": "^7\\d{5}$", "on_violation": "needs_review"},
+        status="draft", validation_report={"reproduction_rate": 1.0, "regressions": 0}, source_correction_ids=["cor_a", "cor_b", "cor_c", "cor_d", "cor_e", "cor_f"]))
+    admin.seed_rule(RuleRecord(
+        id="rul_01J8vocab", tenant_id="ten_1", supplier_key="サンプル商事", field_name="取引先名",
+        rule_type="vocab_map", rule_json={"description": "「株式会社サンフル商事」→「サンプル商事」", "map": {"サンフル": "サンプル"}},
+        status="active", validation_report={"reproduction_rate": 0.92, "regressions": 0}, source_correction_ids=["cor_g"] * 12))
+    admin.seed_rule(RuleRecord(
+        id="rul_01J6hint", tenant_id="ten_1", doc_type="delivery", supplier_key="□□印刷", field_name="日付",
+        rule_type="llm_hint", rule_json={"description": "この取引先の日付は和暦表記"},
+        status="validating", validation_report={"reproduction_rate": 0.6, "regressions": 1}, source_correction_ids=["cor_h", "cor_i", "cor_j"]))
+    admin.set_metrics("ten_1", MetricsSummary(
+        total_documents=2498, status_counts={"confirmed": 2048, "needs_review": 350, "failed": 100},
+        stp_rate=0.824, corrections_total=1204, active_rules=1, pending_rules=1, memories_total=312))
+    return admin
+
+
+def main() -> None:
+    repo = InMemoryRepository()
+    _seed(repo)
+    _seed_invoice(repo)
+    admin = _seed_admin()
+    reviewer = jwt.encode({"sub": "reviewer1", "tenant_id": "ten_1", "role": "reviewer"}, SECRET, algorithm="HS256")
+    admin_tok = jwt.encode({"sub": "admin1", "tenant_id": "ten_1", "role": "admin"}, SECRET, algorithm="HS256")
+    print("=" * 60)
+    print("DEV REVIEWER TOKEN:")
+    print(reviewer)
+    print("DEV ADMIN TOKEN (管理画面 SCR-04/05/06 用):")
+    print(admin_tok)
+    print("=" * 60)
+    # SCR-07（ワークフローエディタ）用の seed。lint L009/L010 が通り activate まで
+    # ブラウザで確認できる状態にする（sch_inv + webhook/s3/postgres 接続）
+    from newfan_gateway.workflows_repo import InMemoryWorkflowsRepository
+
+    workflows = InMemoryWorkflowsRepository()
+    workflows.seed_schema_id("ten_1", "sch_inv")
+    for cid in ("con_hook", "con_inbox_s3", "con_erp"):
+        workflows.seed_connection("ten_1", cid)
+    admin.create_connection(
+        "ten_1", type="webhook", name="webhook.site",
+        config={"url": "https://example.com/hook"}, secret_ref=None, allowed_tables=[],
+    )
+    app = create_app(
+        settings=Settings(jwt_secret=SECRET, cors_origins=["*"]),
+        repo=repo,
+        api_keys=InMemoryApiKeyStore({}),
+        admin=admin,
+        workflows=workflows,
+    )
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

@@ -7,12 +7,16 @@ dependencies = [
     "pydantic>=2.7",
     "pyyaml>=6.0",
     "newfan-schemas",
+    "newfan-metrics",
 ]
 
 [project.optional-dependencies]
 # 本番プロバイダ（テストは FakeProvider で代替）
 anthropic = [
     "anthropic>=0.116",
+]
+gemini = [
+    "google-genai>=0.3",
 ]
 
 [build-system]

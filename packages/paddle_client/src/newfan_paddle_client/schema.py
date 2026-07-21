@@ -29,13 +29,16 @@ class OverallOcrRes(_Loose):
     rec_texts: list[str] = Field(default_factory=list)
     rec_scores: list[float] = Field(default_factory=list)
     rec_polys: list[Poly] = Field(default_factory=list)
-    # OCR 単体パイプラインは軸平行 rec_boxes を返すが、StructureV3 の overall_ocr_res
-    # には含まれないため Optional。含まれない場合は rec_polys から変換する（spans.py）。
+    # 実測(paddleocr 3.7.0 PP-StructureV3): overall_ocr_res に rec_boxes（軸平行bbox）が
+    # 含まれる。旧構成で欠落する場合に備え Optional とし、無ければ rec_polys から変換（spans.py）。
     rec_boxes: Optional[list[Bbox]] = None
     dt_polys: Optional[list[Poly]] = None
     textline_orientation_angles: Optional[list[int]] = None
-    # return_word_box=True 時の単語/単文字座標。サービングでの正確なフィールド名は
-    # docs 未記載（付録C-3）。候補名を複数受けられるよう Optional 群で保持し、実測で確定する。
+    # 付録C-3 実測結論: PP-StructureV3 + PP-OCRv5_server_rec では return_word_box=True を
+    # 指定しても単語/単文字座標は overall_ocr_res に出力されない（rec_word_boxes/rec_words/
+    # text_word_boxes は全て ABSENT。得られるのは行レベル rec_polys/rec_boxes のみ）。
+    # → 文字単位グラウンディング（char_boxes/char_confs, §8.3 文字差分ポップオーバー）は
+    #   DD-02 の crop→/ocr 再問合せで補完する必要がある。下記は他構成向けの前方互換で温存。
     rec_word_boxes: Optional[list[Any]] = None
     rec_words: Optional[list[Any]] = None
     text_word_boxes: Optional[list[Any]] = None
@@ -57,7 +60,9 @@ class TableOcrPred(_Loose):
 
 
 class TableRes(_Loose):
-    cell_box_list: Optional[list[Poly]] = None
+    # 実 PP-StructureV3 は 4値 bbox のリスト [[x1,y1,x2,y2],...]（点列 Poly ではない）を返す。
+    # 未使用フィールドかつサービング差分に強くするため Any で温存する（付録C-3, 実測で確定）。
+    cell_box_list: Optional[list[Any]] = None
     pred_html: Optional[str] = None
     table_ocr_pred: Optional[TableOcrPred] = None
     block_bbox: Optional[list[float]] = None

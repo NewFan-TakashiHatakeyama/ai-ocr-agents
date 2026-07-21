@@ -1,0 +1,45 @@
+{
+  "family": "newfan-gateway",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${TASK_ROLE_ARN}",
+  "runtimePlatform": { "cpuArchitecture": "X86_64", "operatingSystemFamily": "LINUX" },
+  "containerDefinitions": [
+    {
+      "name": "gateway",
+      "image": "${ECR_REPO_GATEWAY}:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        { "name": "gateway", "containerPort": 8000, "protocol": "tcp", "appProtocol": "http" }
+      ],
+      "environment": [
+        { "name": "APP_ENV", "value": "production" },
+        { "name": "AWS_REGION", "value": "${AWS_REGION}" },
+        { "name": "CORS_ORIGINS", "value": "${CORS_ORIGINS}" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "${DB_SECRET_ARN}" },
+        { "name": "REDIS_URL", "valueFrom": "${REDIS_SECRET_ARN}" },
+        { "name": "JWT_SECRET", "valueFrom": "${JWT_SECRET_ARN}" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/newfan-gateway",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)\""],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      }
+    }
+  ]
+}
