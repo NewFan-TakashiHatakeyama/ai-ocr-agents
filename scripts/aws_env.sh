@@ -22,8 +22,10 @@
 #   seed-schemas  field_schemas を投入（golden/data/schemas.json）
 #   probe-rls  実 RDS で RLS が効いているかを検査（§7.3）
 #   golden  ゴールデンセット回帰（§14.2）を実系に流して測り、リリースゲートを判定
+#   redrive S3 トリガーの DLQ を主キューへ戻す（down→up 後にワークフロー定義を
+#           復元してから実行。§16 P4）
 #
-# 使い方: scripts/aws_env.sh up|down|pause|resume|status|cost|vl-up|vl-down|vl-test|token|golden
+# 使い方: scripts/aws_env.sh up|down|pause|resume|status|cost|vl-up|vl-down|vl-test|token|golden|redrive
 set -euo pipefail
 
 TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../deploy/terraform" && pwd)"
@@ -100,6 +102,16 @@ cmd_status() {
       --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
       --query "Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]" \
       --output text 2>/dev/null | awk '{print "  待機中: "$1"  処理中: "$2}' || true
+    local dlq
+    dlq="$(aws sqs get-queue-url --region "$REGION" --queue-name ai-ocr-workflow-trigger-dlq \
+      --query QueueUrl --output text 2>/dev/null || true)"
+    if [ -n "$dlq" ] && [ "$dlq" != "None" ]; then
+      local n
+      n="$(aws sqs get-queue-attributes --region "$REGION" --queue-url "$dlq" \
+        --attribute-names ApproximateNumberOfMessages \
+        --query "Attributes.ApproximateNumberOfMessages" --output text 2>/dev/null || echo 0)"
+      echo "  DLQ: ${n} 件$([ "${n:-0}" != "0" ] && echo '  ★ワークフロー定義を復元してから redrive で戻せます')"
+    fi
     echo
   fi
   echo "※ Fargate が 0 台でも RDS/ElastiCache/NAT/ALB は課金され続ける（約 \$189/月）。"
@@ -452,6 +464,24 @@ cmd_vl_test() {
   echo "    scripts/vl_smoke.sh <画像パス>"
 }
 
+cmd_redrive() {
+  # DLQ に退避した S3 トリガーイベントを主キューへ戻す（§16 P4）。
+  # 想定シナリオ: down（DB destroy）→ up 直後は active なワークフローが無く、
+  # consumer は滞留イベントを削除せず保留 → 5 回で DLQ に落ちる。定義を復元
+  #（API/SCR-07 で再作成 or スナップショット復元）した後にこれを実行すると再処理される。
+  local dlq main
+  dlq="$(aws sqs get-queue-url --region "$REGION" --queue-name ai-ocr-workflow-trigger-dlq     --query QueueUrl --output text 2>/dev/null)" || { echo "[redrive] DLQ がありません" >&2; return 1; }
+  main="$(aws sqs get-queue-url --region "$REGION" --queue-name ai-ocr-workflow-trigger     --query QueueUrl --output text 2>/dev/null)" || { echo "[redrive] 主キューがありません" >&2; return 1; }
+  local n
+  n="$(aws sqs get-queue-attributes --region "$REGION" --queue-url "$dlq"     --attribute-names ApproximateNumberOfMessages     --query "Attributes.ApproximateNumberOfMessages" --output text)"
+  if [ "${n:-0}" = "0" ]; then echo "[redrive] DLQ は空です"; return 0; fi
+  local dlq_arn
+  dlq_arn="$(aws sqs get-queue-attributes --region "$REGION" --queue-url "$dlq"     --attribute-names QueueArn --query "Attributes.QueueArn" --output text)"
+  echo "[redrive] DLQ の ${n} 件を主キューへ戻します"
+  aws sqs start-message-move-task --region "$REGION" --source-arn "$dlq_arn" >/dev/null     || { echo "[redrive] 失敗" >&2; return 1; }
+  echo "[redrive] 開始しました。数十秒で反映されます（status で確認）。"
+}
+
 case "${1:-}" in
   up)      cmd_up ;;
   push)    cmd_push ;;
@@ -469,5 +499,6 @@ case "${1:-}" in
   vl-up)   cmd_vl_up ;;
   vl-down) cmd_vl_down ;;
   vl-test) cmd_vl_test ;;
+  redrive) cmd_redrive ;;
   *) sed -n '2,22p' "${BASH_SOURCE[0]}"; exit 1 ;;
 esac

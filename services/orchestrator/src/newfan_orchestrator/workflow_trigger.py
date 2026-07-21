@@ -142,10 +142,12 @@ class S3TriggerConsumer:
         processed = 0
         for msg in resp.get("Messages", []) or []:
             try:
-                self._process(json.loads(msg["Body"]))
+                done = self._process(json.loads(msg["Body"]))
             except Exception:  # noqa: BLE001 - 削除しない → visibility timeout 後に再配信（→DLQ）
                 logger.exception("[trigger] イベント処理に失敗（再配信に委ねる）")
                 continue
+            if not done:
+                continue  # 処理できる状態でない（削除しない）。再配信 → 5 回で DLQ
             self._sqs.delete_message(
                 QueueUrl=self._queue_url, ReceiptHandle=msg["ReceiptHandle"]
             )
@@ -154,7 +156,12 @@ class S3TriggerConsumer:
 
     # --- 1 イベントの処理 ---
 
-    def _process(self, body: dict[str, Any]) -> None:
+    def _process(self, body: dict[str, Any]) -> bool:
+        """1 イベントを処理する。True なら SQS から削除してよい（skip 含む）。
+
+        False は「今は処理できる状態でない」（削除しない）。再配信 → 5 回で DLQ に
+        退避され、状態が直った後に redrive（aws_env.sh redrive）で戻す。
+        """
         detail = body.get("detail") or {}
         bucket = ((detail.get("bucket") or {}).get("name")) or ""
         obj = detail.get("object") or {}
@@ -162,17 +169,26 @@ class S3TriggerConsumer:
         etag = obj.get("etag") or ""
         if not bucket or not key:
             logger.info("[trigger] S3 イベントでないため skip: %s", body.get("detail-type"))
-            return
+            return True
         if "/" not in key:
             # 規約: 最上位フォルダ = テナント ID。規約外は誰の帳票か決められない
             logger.warning("[trigger] キーがテナント規約外のため skip: %s", key)
-            return
+            return True
         tenant_id, rel_key = key.split("/", 1)
         if not tenant_id or not rel_key:
             logger.warning("[trigger] キーがテナント規約外のため skip: %s", key)
-            return
+            return True
 
         workflows = self._store.list_active_workflows(tenant_id)
+        if not workflows:
+            # active が 1 つも無いのは「定義がまだ無い」状態。down（DB destroy）→ up 直後は
+            # ここに該当し、定義を復元する前に滞留イベントを消化すると全部失われる。
+            # 削除せず残す（→DLQ）。定義復元後に redrive すれば処理される。
+            logger.warning(
+                "[trigger] active なワークフローが無いため保留（削除しない）: tenant=%s key=%s",
+                tenant_id, key,
+            )
+            return False
         matches = match_s3_event(
             workflows,
             lambda cid: self._store.get_s3_connection_bucket(tenant_id, cid),
@@ -181,7 +197,7 @@ class S3TriggerConsumer:
         )
         if not matches:
             logger.info("[trigger] 一致するワークフローなし: tenant=%s key=%s", tenant_id, key)
-            return
+            return True
 
         # 早期 skip（DD-13）。ingest（S3 取得+前処理書込み）の前に安価に判定する
         if all(
@@ -189,7 +205,7 @@ class S3TriggerConsumer:
             for m in matches
         ):
             logger.info("[trigger] 取込済みのため skip: %s (etag=%s)", key, etag)
-            return
+            return True
 
         content = self._fetch(bucket, key)
         document_id = f"doc_{uuid.uuid4().hex[:24]}"
@@ -235,7 +251,7 @@ class S3TriggerConsumer:
         if not run_ids:
             # register 内の claim で競合（他プロセスが先に取込済み）
             logger.info("[trigger] claim 競合のため skip: %s", key)
-            return
+            return True
         for run_id in run_ids:
             self._enqueue(
                 "q.workflow",
@@ -245,6 +261,7 @@ class S3TriggerConsumer:
             "[trigger] 取込完了: tenant=%s key=%s document=%s runs=%s",
             tenant_id, key, document_id, run_ids,
         )
+        return True
 
 
 class InMemoryTriggerStore:

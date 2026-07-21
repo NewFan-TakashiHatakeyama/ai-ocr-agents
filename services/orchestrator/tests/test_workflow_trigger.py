@@ -263,3 +263,22 @@ def test_S3イベントでないBodyはskipして削除する() -> None:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_activeワークフローゼロなら削除せず保留する() -> None:
+    # down（DB destroy）→ up 直後の状態。定義を復元する前に滞留イベントを消化すると
+    # 全部失われるため、削除せず SQS に残す（→5 回で DLQ → redrive で復帰）。
+    store = InMemoryTriggerStore()
+    store.seed_s3_connection("ten_1", "con_s3", "inbox-bkt")  # 接続はあるが workflow ゼロ
+    sqs = FakeSqs([_event("ten_1/invoices/a.png")])
+    c, enqueued, ingested = _consumer(store, sqs)
+    assert c.run_once() == 0
+    assert sqs.deleted == []  # 削除しない
+    assert ingested == [] and enqueued == []
+
+    # 定義が復元されたら、同じイベントの再配信で普通に処理される
+    store.seed_workflow("ten_1", "wf_1", 1, GRAPH)
+    sqs2 = FakeSqs([_event("ten_1/invoices/a.png")])
+    c2, enqueued2, _ = _consumer(store, sqs2)
+    assert c2.run_once() == 1
+    assert len(enqueued2) == 1
