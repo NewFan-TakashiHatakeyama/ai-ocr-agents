@@ -508,6 +508,7 @@ def review_queue(
 
 def _schema_dto(rec: Any) -> dto.SchemaDto:
     return dto.SchemaDto(
+        id=rec.id,
         doc_type=rec.doc_type,
         version=rec.version,
         fields=[dto.SchemaFieldDto(**f.model_dump()) for f in rec.fields],

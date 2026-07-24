@@ -104,9 +104,33 @@ export interface SchemaFieldDto {
 }
 
 export interface SchemaDto {
+  id: string;
   doc_type: string;
   version: number;
   fields: SchemaFieldDto[];
+}
+
+export interface ExtractAccepted {
+  job_id: string;
+  run_id: string;
+}
+
+export interface JobStatus {
+  job_id: string;
+  kind: string;
+  status: string;
+  error_code?: string | null;
+}
+
+export interface ConnectionDto {
+  id: string;
+  type: string;
+  name: string;
+  config: Record<string, unknown>;
+  secret_ref?: string | null;
+  allowed_tables: string[];
+  status: string;
+  created_at?: string | null;
 }
 
 export interface RuleDto {

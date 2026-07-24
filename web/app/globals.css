@@ -590,6 +590,31 @@ a {
   color: var(--ink2);
 }
 
+/* 抽出開始（run 無しの帳票） */
+.extract-start {
+  max-width: 460px; margin: 48px auto; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.extract-start .emoji { font-size: 40px; }
+.extract-start h2 { margin: 4px 0 0; font-size: 18px; }
+.extract-start p { margin: 0; color: var(--ink2); font-size: 13.5px; line-height: 1.7; }
+.extract-field { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 13px; }
+.extract-field select {
+  padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface); color: inherit; font-size: 13px; min-width: 200px;
+}
+.extract-hint { color: var(--ink3); font-size: 12px; }
+
+/* SCR-02 アップロードのドラッグ&ドロップ */
+.doc-dropzone { position: relative; }
+.doc-dropzone.over { outline: 2px dashed var(--brand-deep); outline-offset: -8px; border-radius: 12px; }
+.doc-droplabel {
+  position: absolute; inset: 8px; z-index: 5; pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--brand-soft); color: var(--brand-deep); font-weight: 700;
+  border-radius: 10px; font-size: 15px;
+}
+
 .empty .emoji {
   font-size: 34px;
 }

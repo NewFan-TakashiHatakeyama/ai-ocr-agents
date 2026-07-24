@@ -5,6 +5,7 @@ import Link from "next/link";
 import { use, useCallback, useEffect, useMemo, useState } from "react";
 
 import { DocViewer } from "@/components/DocViewer";
+import { ExtractStart } from "@/components/ExtractStart";
 import { FieldPanel } from "@/components/FieldPanel";
 import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
@@ -16,9 +17,15 @@ import { fmtRemaining, useDocumentLock } from "@/lib/useDocumentLock";
 // SCR-03 検証画面（HITL, §8.2/§8.3）。本プロダクトの中核。全操作キーボード完結（§8.4）。
 export default function ReviewPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isPending, error, refetch } = useQuery({
     queryKey: ["result", id],
     queryFn: () => api.getResult(id),
+    // 4xx（未抽出の E1001 等）は確定エラー。リトライすると、バックオフ待機中に
+    // 「読込中でも error でもない」状態になり抽出導線が一瞬フォールバックに化ける
+    retry: (count, e) => {
+      const st = (e as { status?: number } | null)?.status ?? 0;
+      return st >= 500 && count < 2;
+    },
   });
   const { selectedField, selectedCell, edits, select, setEdit, clearEdits } = useReviewStore();
   const push = useToasts((s) => s.push);
@@ -148,7 +155,23 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     return () => clearTimeout(handle);
   }, [edits, data, push, refetch, readOnly]);
 
-  if (isLoading) return <div className="page">読み込み中…</div>;
+  if (isPending) return <div className="page">読み込み中…</div>;
+  // まだ抽出していない（run 無し = E1001）なら行き止まりにせず「抽出を開始」導線を出す。
+  // instanceof は dev のモジュール重複で false になり得るため code を直接見る（duck typing）
+  const errCode = (error as { code?: string } | null)?.code;
+  if (errCode === "E1001") {
+    return (
+      <div className="main">
+        <div className="rv-head">
+          <Link href="/documents" className="btn sm ghost">
+            ← 一覧
+          </Link>
+          <span className="docname" style={{ marginLeft: 8 }}>{id}</span>
+        </div>
+        <ExtractStart documentId={id} onDone={() => refetch()} />
+      </div>
+    );
+  }
   if (error || !data) return <div className="page">結果の取得に失敗しました。</div>;
 
   const auto = Number(data.review_summary?.auto ?? data.fields.filter((f) => f.review_status !== "pending").length);

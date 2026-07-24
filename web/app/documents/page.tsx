@@ -1,23 +1,48 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useMemo, useRef, useState } from "react";
 
 import { AppShell } from "@/components/AppShell";
 import { StatusChip } from "@/components/StatusChip";
 import { api } from "@/lib/api";
+import { useToasts } from "@/lib/toast";
+
+// 取り込める帳票の種類（ingest が受ける MIME に合わせる）
+const ACCEPT = "application/pdf,image/png,image/jpeg,image/tiff,.pdf,.png,.jpg,.jpeg,.tif,.tiff";
 
 // SCR-02 ドキュメント一覧 / レビューキュー（§8.1 / §8.5）。2タブ構成。
 function DocumentsInner() {
   const router = useRouter();
   const params = useSearchParams();
+  const qc = useQueryClient();
+  const push = useToasts((s) => s.push);
   const tab = params.get("tab") === "queue" ? "queue" : "all";
   const [q, setQ] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const docs = useQuery({ queryKey: ["documents"], queryFn: () => api.listDocuments() });
   const queue = useQuery({ queryKey: ["review-queue"], queryFn: () => api.reviewQueue() });
   const queueCount = queue.data?.items.length ?? 0;
+
+  // アップロード → 一覧更新 → その帳票ページへ（そこで「抽出を開始」できる）
+  const upload = useMutation({
+    mutationFn: (file: File) => api.uploadDocument(file),
+    onSuccess: (created) => {
+      qc.invalidateQueries({ queryKey: ["documents"] });
+      push({ kind: "ok", message: "アップロードしました。抽出を開始できます。" });
+      router.push(`/documents/${created.document_id}`);
+    },
+    onError: (e) =>
+      push({ kind: "warn", message: `アップロードに失敗しました（${(e as Error).message}）。` }),
+  });
+
+  function onFiles(files: FileList | null) {
+    const file = files?.[0];
+    if (file) upload.mutate(file);
+  }
 
   const filtered = useMemo(() => {
     const items = docs.data?.items ?? [];
@@ -50,7 +75,23 @@ function DocumentsInner() {
             aria-label="検索"
           />
         </span>
-        <button className="btn sm grad">＋ アップロード</button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept={ACCEPT}
+          hidden
+          onChange={(e) => {
+            onFiles(e.target.files);
+            e.target.value = ""; // 同じファイルを続けて選べるように
+          }}
+        />
+        <button
+          className="btn sm grad"
+          onClick={() => fileRef.current?.click()}
+          disabled={upload.isPending}
+        >
+          {upload.isPending ? "アップロード中…" : "＋ アップロード"}
+        </button>
       </div>
 
       <div className="list-tools">
@@ -64,7 +105,22 @@ function DocumentsInner() {
         </div>
       </div>
 
-      <div style={{ overflow: "auto" }}>
+      <div
+        className={`doc-dropzone${dragOver ? " over" : ""}`}
+        style={{ overflow: "auto" }}
+        onDragOver={(e) => {
+          if (tab !== "all") return;
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          if (tab === "all") onFiles(e.dataTransfer.files);
+        }}
+      >
+        {dragOver && <div className="doc-droplabel">ここにドロップして帳票をアップロード</div>}
         {tab === "all" ? (
           <>
             {docs.isLoading && <p className="page">読み込み中…</p>}
@@ -103,7 +159,10 @@ function DocumentsInner() {
               <div className="empty">
                 <div className="emoji">🗂️</div>
                 <h3>該当するドキュメントがありません</h3>
-                <p>アップロードするとここに表示されます。</p>
+                <p>帳票をアップロードするか、ここにドラッグ&ドロップしてください。</p>
+                <button className="btn grad" style={{ marginTop: 10 }} onClick={() => fileRef.current?.click()}>
+                  ＋ 帳票をアップロード
+                </button>
               </div>
             )}
           </>

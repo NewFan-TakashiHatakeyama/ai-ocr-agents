@@ -216,6 +216,67 @@ function localizeObject(obj: SchemaNode): void {
   }
 }
 
+// ノード種別 → connection_id に許される接続 type。ID の手転記を避け、
+// 該当 type の接続だけを選ばせる（DD-12: db_write は postgres 限定 等）。
+const CONNECTION_TYPE_BY_NODE: Record<string, string> = {
+  "source.s3_event": "s3",
+  "sink.db_write": "postgres",
+  "sink.webhook": "webhook",
+  "sink.notify": "webhook",
+  "sink.file": "s3",
+};
+
+type PickerSchema = { id: string; doc_type: string; version: number };
+type PickerConn = { id: string; name: string; type: string };
+
+/** schema_id / connection_id の文字列入力を、実在する ID の選択肢（oneOf）へ差し替える。
+ *
+ * gateway が返すスキーマ一覧・接続一覧から候補を作り、ユーザーが ID を手打ちせず
+ * 選べるようにする（④-b の「ID 手転記」摩擦の解消）。現在値が候補に無い場合も
+ * （消えた接続を参照している等）option として残し、値が黙って消えないようにする。 */
+export function injectPickers(
+  schema: RJSFSchema,
+  opts: { nodeType: string; config: Record<string, unknown>; schemas: PickerSchema[]; connections: PickerConn[] },
+): RJSFSchema {
+  const clone = JSON.parse(JSON.stringify(schema)) as SchemaNode;
+  const props = clone.properties;
+  if (!props) return clone as RJSFSchema;
+
+  const setOptions = (
+    prop: string,
+    options: { const: string; title: string }[],
+    current: unknown,
+  ) => {
+    const spec = props[prop] as SchemaNode | undefined;
+    if (!spec) return;
+    const opts2 = [...options];
+    if (typeof current === "string" && current && !opts2.some((o) => o.const === current)) {
+      opts2.unshift({ const: current, title: `${current}（現在の値）` });
+    }
+    if (opts2.length === 0) return; // 候補ゼロなら素のテキスト入力のままにする
+    spec.oneOf = opts2;
+    delete spec.enum;
+  };
+
+  if ("schema_id" in props) {
+    setOptions(
+      "schema_id",
+      opts.schemas.map((s) => ({ const: s.id, title: `${s.doc_type}（${s.id}・v${s.version}）` })),
+      opts.config.schema_id,
+    );
+  }
+  if ("connection_id" in props) {
+    const want = CONNECTION_TYPE_BY_NODE[opts.nodeType];
+    const conns = want ? opts.connections.filter((c) => c.type === want) : opts.connections;
+    setOptions(
+      "connection_id",
+      conns.map((c) => ({ const: c.id, title: `${c.name || c.id}（${c.type}）` })),
+      opts.config.connection_id,
+    );
+  }
+  return clone as RJSFSchema;
+}
+
 /** 失敗トースト用: pydantic クラス名+プロパティ名 → 日本語ラベル。
  *
  * クラス名が分かればそれで引く。分からない/ネストのときは全スキーマ横断で

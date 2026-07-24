@@ -56,7 +56,7 @@ import type {
 } from "@/lib/types";
 
 import { CATEGORY, NodeIcon, TYPE_LABEL } from "../node-icons";
-import { fieldLabel, jaTranslateString, localizeSchema, pruneEmpty } from "../field-labels";
+import { fieldLabel, injectPickers, jaTranslateString, localizeSchema, pruneEmpty } from "../field-labels";
 
 // 複数行で書くフィールドは textarea にする（1行 input だと窮屈で読みにくい）
 const UI_SCHEMA_BY_TYPE: Record<string, UiSchema> = {
@@ -182,6 +182,12 @@ function WorkflowEditor({ id }: { id: string }) {
   const { data: catalog } = useQuery({
     queryKey: ["workflow-catalog"],
     queryFn: () => api.workflowCatalog(),
+  });
+  // schema_id / connection_id を手打ちさせず選ばせるための候補
+  const { data: schemaList } = useQuery({ queryKey: ["schemas"], queryFn: () => api.listSchemas() });
+  const { data: connList } = useQuery({
+    queryKey: ["connections"],
+    queryFn: () => api.listConnections(),
   });
 
   // エディタのローカル状態（保存で PUT）。wf 到着時に一度だけ流し込む
@@ -499,11 +505,21 @@ function WorkflowEditor({ id }: { id: string }) {
   const rawSchema = selected
     ? ((catalog?.types[selected.type] ?? null) as RJSFSchema | null)
     : null;
-  // catalog は不変なので type ごとに一度だけ日本語化する（毎レンダーのクローンを避ける）
-  const selectedSchema = useMemo(
-    () => (rawSchema ? localizeSchema(rawSchema) : null),
-    [rawSchema],
-  );
+  const selSchemaId = selected?.config?.schema_id;
+  const selConnId = selected?.config?.connection_id;
+  // 日本語化 + schema_id/connection_id を実在候補のドロップダウンへ差し替える。
+  // 現在値を候補に残すため、その値も依存に含める（無関係な編集では再計算しない）。
+  const selectedSchema = useMemo(() => {
+    if (!rawSchema || !selected) return null;
+    const localized = localizeSchema(rawSchema);
+    return injectPickers(localized, {
+      nodeType: selected.type,
+      config: selected.config,
+      schemas: schemaList?.items ?? [],
+      connections: connList?.items ?? [],
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawSchema, selected?.type, selSchemaId, selConnId, schemaList, connList]);
   const selectedUiSchema = selected ? UI_SCHEMA_BY_TYPE[selected.type] : undefined;
 
   // 点検結果・出力プレビューで node_id を日本語ノード名に読み替えるための表
