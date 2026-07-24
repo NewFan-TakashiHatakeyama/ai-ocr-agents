@@ -161,22 +161,34 @@ cmd_push() {
   local repo_root; repo_root="$(cd "$TF_DIR/../.." && pwd)"
   echo "[push] image_tag=${tag} を確認します"
 
+  # web は NEXT_PUBLIC_API_BASE をビルド時に焼き込む（実行時 env では変えられない、
+  # web.Dockerfile 参照）。ALB は down/up の再作成のたびに DNS 名が変わるため、
+  # タグの有無だけで判定すると destroy 済みの旧 ALB を指す古いイメージを再利用してしまい、
+  # up 直後のフロントエンドが全 API 呼び出しで Failed to fetch になる
+  # （実発生・down→up 検証で検出。焼き込み値は runtime イメージの config に残らず
+  # 事後検出できないため、web だけは常に再ビルドする）。
+  local alb; alb="$(cd "$TF_DIR" && terraform output -raw alb_dns_name 2>/dev/null || echo "")"
+
   local missing=()
   for i in gateway orchestrator-worker export-worker migrate inference web vl-pipeline vlm-server; do
-    if _ecr_has_tag "$i" "$tag"; then
+    if [ "$i" = "web" ]; then
+      [ -z "$alb" ] && { echo "  [!] ALB 未確定のため web をビルドできません（apply 後に実行してください）" >&2; return 1; }
+      echo "  ai-ocr-${i}:${tag} … ALB 依存のため常に再ビルドします"
+      missing+=("$i")
+    elif _ecr_has_tag "$i" "$tag"; then
       echo "  ai-ocr-${i}:${tag} … あり"
     else
       echo "  ai-ocr-${i}:${tag} … 無し（ビルドします）"
       missing+=("$i")
     fi
   done
-  [ ${#missing[@]} -eq 0 ] && { echo "[push] 全イメージが ECR にあります。スキップします。"; return 0; }
 
   aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$reg" >/dev/null
 
-  # web は NEXT_PUBLIC_API_BASE をビルド時に焼き込む（実行時 env では変えられない）。
-  # ALB の DNS は apply 後に確定するのでここで取る。
-  local alb; alb="$(cd "$TF_DIR" && terraform output -raw alb_dns_name 2>/dev/null || echo "")"
+  # ECR は imageTagMutability=IMMUTABLE のため同タグへの push が拒否される。
+  # 旧タグが存在すれば明示的に削除してから push し直す（無ければ何もしない）。
+  aws ecr batch-delete-image --region "$REGION" --repository-name ai-ocr-web \
+    --image-ids imageTag="$tag" >/dev/null 2>&1 || true
 
   local i
   for i in "${missing[@]}"; do
@@ -387,7 +399,16 @@ cmd_up() {
 
   # ECR は apply で作られる。イメージが無いとタスクが起動できないので先に push し、
   # そのあとサービスを安定させる。
+  #
+  # 注意: ECR は長命スタック（down で消えない）。apply の時点で web:${tag} が
+  # 前回 up の（今の ALB とは別の DNS を焼き込んだ）古いイメージのまま存在するため、
+  # ECS はここで既に古いイメージの pull・タスク起動を始めている。cmd_push が
+  # 新イメージを push しても、起動済みタスクは自動で置き換わらない
+  # （実発生: up 直後の web が Failed to fetch で全滅した）。
+  # push 後に web サービスへ force-new-deployment を打って確実に新イメージへ切り替える。
   cmd_push || return 1
+  aws ecs update-service --region "$REGION" --cluster "$(_prefix)" \
+    --service ai-ocr-web --force-new-deployment >/dev/null
   cmd_migrate || return 1
 
   echo "[up] ECS サービスの安定を待機中..."

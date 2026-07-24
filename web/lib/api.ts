@@ -27,10 +27,18 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000/v1";
 export class ApiError extends Error {
   status: number;
   code: string;
-  constructor(status: number, code: string, message?: string) {
+  /** gateway の error.details（E4001 の検証エラー一覧など）。UI で位置を示すのに使う */
+  details?: Record<string, unknown>;
+  constructor(
+    status: number,
+    code: string,
+    message?: string,
+    details?: Record<string, unknown>,
+  ) {
     super(message ?? `API error ${code} (${status})`);
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -53,14 +61,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     let code = String(res.status);
     let message: string | undefined;
+    let details: Record<string, unknown> | undefined;
     try {
       const body = await res.json();
       code = body?.error?.code ?? code;
       message = body?.error?.message;
+      details = body?.error?.details;
     } catch {
       /* ignore */
     }
-    throw new ApiError(res.status, code, message);
+    throw new ApiError(res.status, code, message, details);
   }
   return (await res.json()) as T;
 }

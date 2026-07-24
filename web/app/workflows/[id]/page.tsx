@@ -5,7 +5,20 @@
 // - 保存は常に可（lint error があっても draft は保存できる, §11）
 // - lint 指摘は node_id をキャンバス上でハイライト
 // - activate は lint の activatable（error=0 + 実装済みのみ + dry-run）で活性
-import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+//
+// ドラッグ性能: ノード位置は React Flow の state（useNodesState）が正で、
+// graph_json へは保存時にまとめて書き戻す。ドメイン配列をドラッグ毎フレーム
+// 再構築すると全ノードが毎フレーム再描画されカクつくため、この分離が必須。
+import {
+  createContext,
+  use,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -13,10 +26,15 @@ import {
   Controls,
   Handle,
   MarkerType,
+  MiniMap,
   Position,
   ReactFlow,
+  ReactFlowProvider,
+  useNodesState,
+  useReactFlow,
   type Connection,
   type Edge,
+  type EdgeChange,
   type Node,
   type NodeChange,
   type NodeProps,
@@ -37,48 +55,52 @@ import type {
   WorkflowNodeDto,
 } from "@/lib/types";
 
-// ---------- ノードの見た目（カテゴリ色はデザイントークンに寄せる） ----------
+import { CATEGORY, NodeIcon, TYPE_LABEL } from "../node-icons";
 
-const CATEGORY: Record<string, { label: string; color: string }> = {
-  source: { label: "トリガー", color: "var(--ok, #2e9e6b)" },
-  process: { label: "処理", color: "var(--accent, #3b6ef5)" },
-  branch: { label: "分岐", color: "var(--warn, #d98a1f)" },
-  transform: { label: "変換", color: "#8a5cd6" },
-  sink: { label: "出力", color: "#d65c7a" },
-};
+// ---------- ノードの見た目 ----------
 
-const TYPE_LABEL: Record<string, string> = {
-  "source.s3_event": "S3 イベント",
-  "source.manual": "手動実行",
-  "source.schedule": "スケジュール",
-  "source.email_attachment": "メール添付",
-  "process.classify": "帳票分類",
-  "process.extract": "AI-OCR 抽出",
-  "branch.condition": "条件分岐",
-  "branch.hitl_gate": "HITL ゲート",
-  "transform.map_fields": "フィールド変換",
-  "sink.db_write": "DB 格納",
-  "sink.webhook": "Webhook",
-  "sink.file": "ファイル出力",
-  "sink.notify": "通知",
-};
+type WfFlowNode = Node<{ wf: WorkflowNodeDto }, "wf">;
 
-type FlowNodeData = { wf: WorkflowNodeDto; bad: boolean; implemented: boolean };
+// lint 結果・catalog はノード data に埋めず context で配る。埋めると更新のたびに
+// 全ノード data を同期し直す羽目になる（ドラッグと干渉しやすい）。
+const EditorMeta = createContext<{ bad: Set<string>; implemented: Set<string> }>({
+  bad: new Set(),
+  implemented: new Set(),
+});
 
-function WfNode({ data, selected }: NodeProps<Node<FlowNodeData>>) {
+function WfNode({ id, data, selected }: NodeProps<WfFlowNode>) {
+  const meta = useContext(EditorMeta);
   const cat = CATEGORY[data.wf.type.split(".")[0]] ?? CATEGORY.process;
+  const bad = meta.bad.has(id);
+  const isSource = data.wf.type.startsWith("source.");
   return (
-    <div
-      className={`wfnode${selected ? " sel" : ""}${data.bad ? " bad" : ""}`}
-      style={{ borderTopColor: cat.color }}
-    >
-      <Handle type="target" position={Position.Left} />
-      <div className="wfnode-cat" style={{ color: cat.color }}>
-        {cat.label}
-        {!data.implemented && <span className="wfnode-todo">未実装</span>}
+    <div className={`wfnode${selected ? " sel" : ""}${bad ? " bad" : ""}`}>
+      {/* トリガーへは新規接続を張らせない。ただし Handle 自体を消すと、source への
+          流入辺を持つ既存グラフを開いた時に辺が不可視・削除不能になるため描画は残す */}
+      <Handle
+        type="target"
+        position={Position.Left}
+        isConnectable={!isSource}
+        style={isSource ? { opacity: 0 } : undefined}
+      />
+      <span className="wfnode-icon" style={{ background: cat.color }}>
+        <NodeIcon type={data.wf.type} size={16} />
+      </span>
+      <div className="wfnode-body">
+        <div className="wfnode-label">{TYPE_LABEL[data.wf.type] ?? data.wf.type}</div>
+        <div className="wfnode-meta">
+          <span className="wfnode-cat" style={{ color: cat.color }}>
+            {cat.label}
+          </span>
+          <span className="wfnode-id">{id}</span>
+          {!meta.implemented.has(data.wf.type) && <span className="wfnode-todo">未実装</span>}
+        </div>
       </div>
-      <div className="wfnode-label">{TYPE_LABEL[data.wf.type] ?? data.wf.type}</div>
-      <div className="wfnode-id">{data.wf.id}</div>
+      {bad && (
+        <span className="wfnode-warnmark" title="lint エラーがあります">
+          !
+        </span>
+      )}
       <Handle type="source" position={Position.Right} />
     </div>
   );
@@ -88,43 +110,63 @@ const NODE_TYPES = { wf: WfNode };
 
 // branch.condition の分岐先は config（branches/else）が正。キャンバスには
 // 破線ラベル付きで描くだけで、辺としての編集はさせない（§4.1）。
-function conditionEdges(nodes: WorkflowNodeDto[]): Edge[] {
+type CondSpec = {
+  id: string;
+  config: { branches?: { when: string; to: string }[]; else?: string };
+};
+
+function conditionEdges(conds: CondSpec[], validIds: Set<string>): Edge[] {
   const out: Edge[] = [];
-  for (const n of nodes) {
-    if (n.type !== "branch.condition") continue;
-    const cfg = n.config as { branches?: { when: string; to: string }[]; else?: string };
-    (cfg.branches ?? []).forEach((b, i) => {
+  for (const n of conds) {
+    const mk = (key: string, to: string, label: string) => {
+      if (!validIds.has(to)) return; // 参照先が消えた分岐は描かない（lint が指摘する）
       out.push({
-        id: `cond:${n.id}:${i}`,
+        id: `cond:${n.id}:${key}`,
         source: n.id,
-        target: b.to,
-        label: b.when,
+        target: to,
+        label,
         animated: true,
         style: { strokeDasharray: "6 3" },
         deletable: false,
         markerEnd: { type: MarkerType.ArrowClosed },
       });
-    });
-    if (cfg.else) {
-      out.push({
-        id: `cond:${n.id}:else`,
-        source: n.id,
-        target: cfg.else,
-        label: "else",
-        animated: true,
-        style: { strokeDasharray: "6 3" },
-        deletable: false,
-        markerEnd: { type: MarkerType.ArrowClosed },
-      });
-    }
+    };
+    (n.config.branches ?? []).forEach((b, i) => mk(String(i), b.to, b.when));
+    if (n.config.else) mk("else", n.config.else, "else");
   }
   return out;
 }
 
-export default function WorkflowEditorPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
+const DND_MIME = "application/newfan-wf-node";
+
+// エッジ id。素朴な `e:from->to` はノード id が '->' を含むと衝突するため
+// JSON エスケープで区切りを保護する
+const edgeId = (e: { from: string; to: string }) => `e:${JSON.stringify([e.from, e.to])}`;
+
+// rjsf はマウント時にも onChange を発火し、キー順も保存済み config と一致しない。
+// 「選択しただけで未保存」を防ぐため、順序に依存しない同値判定で実変更だけ拾う。
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((v, i) => deepEqual(v, b[i]));
+  }
+  if (typeof a === "object") {
+    const ka = Object.keys(a as object);
+    const kb = Object.keys(b as object);
+    if (ka.length !== kb.length) return false;
+    return ka.every((k) =>
+      deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
+    );
+  }
+  return false;
+}
+
+function WorkflowEditor({ id }: { id: string }) {
   const qc = useQueryClient();
   const push = useToasts((s) => s.push);
+  const { screenToFlowPosition } = useReactFlow();
 
   const { data: wf, error } = useQuery({
     queryKey: ["workflow", id],
@@ -137,9 +179,9 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
 
   // エディタのローカル状態（保存で PUT）。wf 到着時に一度だけ流し込む
   const [name, setName] = useState("");
-  const [nodes, setNodes] = useState<WorkflowNodeDto[]>([]);
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState<WfFlowNode>([]);
   const [edges, setEdges] = useState<{ from: string; to: string }[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selEdgeIds, setSelEdgeIds] = useState<ReadonlySet<string>>(new Set());
   const [findings, setFindings] = useState<LintFindingDto[]>([]);
   const [activatable, setActivatable] = useState(false);
   const [dryRun, setDryRun] = useState<DryRunResultDto | null>(null);
@@ -150,78 +192,100 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
     if (!wf || loadedFor.current === `${wf.id}:${wf.version}`) return;
     loadedFor.current = `${wf.id}:${wf.version}`;
     setName(wf.name);
-    setNodes(wf.graph_json.nodes.map((n, i) => ({ ...n, pos: n.pos ?? [80 + i * 240, 160] })));
-    setEdges(wf.graph_json.edges);
+    setRfNodes(
+      wf.graph_json.nodes.map((n, i) => {
+        const pos = n.pos ?? [80 + i * 240, 160];
+        return {
+          id: n.id,
+          type: "wf" as const,
+          position: { x: pos[0], y: pos[1] },
+          data: { wf: n },
+        };
+      }),
+    );
+    // サーバ由来の同一 {from,to} 重複は React key 衝突になるため先頭のみ残す
+    const seen = new Set<string>();
+    setEdges(
+      wf.graph_json.edges.filter((e) => {
+        const k = edgeId(e);
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      }),
+    );
+    setSelEdgeIds(new Set());
     setDirty(false);
-  }, [wf]);
+  }, [wf, setRfNodes]);
 
+  // 保存・lint に渡す graph_json はエディタ state からその場で組み立てる
   const graph = useCallback(
-    (): WorkflowGraphDto => ({ version: 1, nodes, edges }),
-    [nodes, edges],
+    (): WorkflowGraphDto => ({
+      version: 1,
+      nodes: rfNodes.map((rn) => ({
+        ...rn.data.wf,
+        pos: [Math.round(rn.position.x), Math.round(rn.position.y)] as [number, number],
+      })),
+      edges,
+    }),
+    [rfNodes, edges],
   );
 
   const badIds = useMemo(
-    () => new Set(findings.filter((f) => f.severity === "error" && f.node_id).map((f) => f.node_id)),
+    () =>
+      new Set(
+        findings
+          .filter((f) => f.severity === "error" && f.node_id)
+          .map((f) => f.node_id as string),
+      ),
     [findings],
   );
   const implemented = useMemo(() => new Set(catalog?.implemented ?? []), [catalog]);
+  const editorMeta = useMemo(() => ({ bad: badIds, implemented }), [badIds, implemented]);
 
-  const rfNodes: Node<FlowNodeData>[] = useMemo(
-    () =>
-      nodes.map((n) => ({
-        id: n.id,
-        type: "wf",
-        position: { x: n.pos?.[0] ?? 0, y: n.pos?.[1] ?? 0 },
-        // controlled モードでは selected をこちらが載せないと選択が即座に外れる
-        selected: n.id === selectedId,
-        data: { wf: n, bad: badIds.has(n.id), implemented: implemented.has(n.type) },
-      })),
-    [nodes, badIds, implemented, selectedId],
-  );
-  const rfEdges: Edge[] = useMemo(
-    () => [
-      ...edges.map((e) => ({
-        id: `e:${e.from}->${e.to}`,
-        source: e.from,
-        target: e.to,
-        markerEnd: { type: MarkerType.ArrowClosed },
-      })),
-      ...conditionEdges(nodes),
-    ],
-    [edges, nodes],
-  );
+  // 条件分岐の派生エッジ。ドラッグ中は config が変わらないため、内容の
+  // シグネチャで memo してフレーム毎の再計算・エッジ再生成を避ける。
+  const condSig = JSON.stringify({
+    ids: rfNodes.map((n) => n.id),
+    conds: rfNodes
+      .filter((n) => n.data.wf.type === "branch.condition")
+      .map((n) => ({ id: n.id, config: n.data.wf.config })),
+  });
+  const rfEdges: Edge[] = useMemo(() => {
+    const { ids, conds } = JSON.parse(condSig) as { ids: string[]; conds: CondSpec[] };
+    const valid = new Set(ids);
+    return [
+      ...edges
+        .filter((e) => valid.has(e.from) && valid.has(e.to))
+        .map((e) => ({
+          id: edgeId(e),
+          source: e.from,
+          target: e.to,
+          selected: selEdgeIds.has(edgeId(e)),
+          markerEnd: { type: MarkerType.ArrowClosed },
+        })),
+      ...conditionEdges(conds, valid),
+    ];
+  }, [edges, condSig, selEdgeIds]);
 
-  const onNodesChange = useCallback((changes: NodeChange<Node<FlowNodeData>>[]) => {
-    // 位置だけ graph_json（pos）へ反映。削除はパレット側のボタンで明示的に行う
-    for (const ch of changes) {
-      if (ch.type === "position" && ch.position) {
-        const { x, y } = ch.position;
-        setNodes((ns) =>
-          ns.map((n) => (n.id === ch.id ? { ...n, pos: [Math.round(x), Math.round(y)] } : n)),
-        );
-        setDirty(true);
+  // エッジは domain state（from/to）が正。RF からは選択だけ受けて Delete を効かせる
+  const onEdgesChange = useCallback((changes: EdgeChange[]) => {
+    setSelEdgeIds((prev) => {
+      let next: Set<string> | null = null;
+      for (const ch of changes) {
+        if (ch.type === "select") {
+          next ??= new Set(prev);
+          if (ch.selected) next.add(ch.id);
+          else next.delete(ch.id);
+        } else if (ch.type === "remove") {
+          // 掃除しないと同じ from→to を張り直した時に選択状態で復活し、
+          // 次の Delete で巻き添え削除される
+          next ??= new Set(prev);
+          next.delete(ch.id);
+        }
       }
-      if (ch.type === "select") setSelectedId(ch.selected ? ch.id : null);
-    }
+      return next ?? prev;
+    });
   }, []);
-
-  const onConnect = useCallback(
-    (c: Connection) => {
-      if (!c.source || !c.target) return;
-      const src = nodes.find((n) => n.id === c.source);
-      if (src?.type === "branch.condition") {
-        push({ kind: "warn", message: "条件分岐の行き先は config（branches / else）で指定します。" });
-        return;
-      }
-      setEdges((es) =>
-        es.some((e) => e.from === c.source && e.to === c.target)
-          ? es
-          : [...es, { from: c.source, to: c.target }],
-      );
-      setDirty(true);
-    },
-    [nodes, push],
-  );
 
   const onEdgesDelete = useCallback((deleted: Edge[]) => {
     setEdges((es) =>
@@ -230,24 +294,103 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
     setDirty(true);
   }, []);
 
-  const addNode = (type: string) => {
-    const prefix = type.split(".")[1].replace(/_/g, "").slice(0, 4);
-    let i = 1;
-    while (nodes.some((n) => n.id === `${prefix}${i}`)) i += 1;
-    setNodes((ns) => [
-      ...ns,
-      { id: `${prefix}${i}`, type, config: {}, pos: [80 + ns.length * 230, 330 + (ns.length % 2) * 110] },
-    ]);
+  const onNodesDelete = useCallback((deleted: Node[]) => {
+    const ids = new Set(deleted.map((d) => d.id));
+    setEdges((es) => es.filter((e) => !ids.has(e.from) && !ids.has(e.to)));
+    setDirty(true);
+  }, []);
+
+  const onConnect = useCallback(
+    (c: Connection) => {
+      if (!c.source || !c.target) return;
+      const src = rfNodes.find((n) => n.id === c.source);
+      if (src?.data.wf.type === "branch.condition") {
+        push({ kind: "warn", message: "条件分岐の行き先は config（branches / else）で指定します。" });
+        return;
+      }
+      if (rfNodes.find((n) => n.id === c.target)?.data.wf.type.startsWith("source.")) {
+        push({ kind: "warn", message: "トリガーへは接続できません。" });
+        return;
+      }
+      // 既存と同じ辺は何も変えない（dirty を立てると dry-run/有効化が無意味に塞がる）
+      if (edges.some((e) => e.from === c.source && e.to === c.target)) return;
+      const from = c.source;
+      const to = c.target;
+      setEdges((es) => [...es, { from, to }]);
+      setDirty(true);
+    },
+    [rfNodes, edges, push],
+  );
+
+  const addNode = useCallback(
+    (type: string, pos?: [number, number]) => {
+      setRfNodes((ns) => {
+        const prefix = type.split(".")[1].replace(/_/g, "").slice(0, 4);
+        let i = 1;
+        while (ns.some((n) => n.id === `${prefix}${i}`)) i += 1;
+        const nid = `${prefix}${i}`;
+        const p = pos ?? [80 + ns.length * 230, 330 + (ns.length % 2) * 110];
+        return [
+          // 追加ノードを選択状態にして右の設定フォームをすぐ開く
+          ...ns.map((n) => (n.selected ? { ...n, selected: false } : n)),
+          {
+            id: nid,
+            type: "wf" as const,
+            position: { x: p[0], y: p[1] },
+            selected: true,
+            data: { wf: { id: nid, type, config: {} } },
+          },
+        ];
+      });
+      setDirty(true);
+    },
+    [setRfNodes],
+  );
+
+  // パレット → キャンバスへのドラッグ配置（クリック追加も残す）
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      // 先にキャンセルする。OS からのファイルドロップでページ遷移して
+      // 未保存グラフが消えるのを防ぐ（パレット以外のドロップは無視するだけ）
+      e.preventDefault();
+      const type = e.dataTransfer.getData(DND_MIME);
+      if (!type) return;
+      const p = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      // つまんだ位置がカード中央になるよう半分ずらす
+      addNode(type, [Math.round(p.x) - 90, Math.round(p.y) - 24]);
+    },
+    [screenToFlowPosition, addNode],
+  );
+
+  const removeSelected = () => {
+    const sel = rfNodes.filter((n) => n.selected);
+    if (!sel.length) return;
+    const ids = new Set(sel.map((n) => n.id));
+    setRfNodes((ns) => ns.filter((n) => !ids.has(n.id)));
+    setEdges((es) => es.filter((e) => !ids.has(e.from) && !ids.has(e.to)));
+    // ボタン削除は RF を経由しない（remove change が来ない）ので選択集合も自前で掃除
+    setSelEdgeIds((prev) => {
+      const next = new Set(prev);
+      for (const e of edges) if (ids.has(e.from) || ids.has(e.to)) next.delete(edgeId(e));
+      return next;
+    });
     setDirty(true);
   };
 
-  const removeSelected = () => {
-    if (!selectedId) return;
-    setNodes((ns) => ns.filter((n) => n.id !== selectedId));
-    setEdges((es) => es.filter((e) => e.from !== selectedId && e.to !== selectedId));
-    setSelectedId(null);
-    setDirty(true);
-  };
+  // ドラッグ終了と矢印キー移動はどちらも dragging:false の position change として
+  // 届く。onNodeDragStop だけではキーボード移動が「未保存」にならない
+  const handleNodesChange = useCallback(
+    (changes: NodeChange<WfFlowNode>[]) => {
+      onNodesChange(changes);
+      if (changes.some((ch) => ch.type === "position" && !ch.dragging)) setDirty(true);
+    },
+    [onNodesChange],
+  );
+
+  const selectNode = (nid: string) =>
+    setRfNodes((ns) =>
+      ns.map((n) => (n.selected !== (n.id === nid) ? { ...n, selected: n.id === nid } : n)),
+    );
 
   const save = useMutation({
     mutationFn: () => api.putWorkflow(id, name, graph()),
@@ -261,8 +404,25 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
       setFindings(lint.findings);
       setActivatable(lint.activatable);
     },
-    onError: (e) =>
-      push({ kind: "warn", message: `保存に失敗しました（${(e as Error).message}）。` }),
+    onError: (e) => {
+      // E4001（config スキーマ不正）は「どのノードのどの項目か」まで示す。
+      // トーストが原因を伝えないと、利用者は保存できない理由を探せない。
+      const errs = (e instanceof ApiError &&
+        (e.details as { errors?: { loc?: string; msg?: string }[] } | undefined)?.errors) || null;
+      if (errs?.length) {
+        const g = graph();
+        const parts = errs.slice(0, 2).map((er) => {
+          const loc = er.loc ?? "";
+          const m = /^nodes\.(\d+)\./.exec(loc);
+          const nid = m ? (g.nodes[Number(m[1])]?.id ?? loc) : loc;
+          const field = loc.split(".").pop() ?? "";
+          return `${nid} の ${field}: ${er.msg}`;
+        });
+        push({ kind: "warn", message: `保存できません — ${parts.join(" / ")}` });
+        return;
+      }
+      push({ kind: "warn", message: `保存に失敗しました（${(e as Error).message}）。` });
+    },
   });
 
   const runLint = useMutation({
@@ -298,13 +458,15 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
   const pause = useMutation({
     mutationFn: () => api.pauseWorkflow(id),
     onSuccess: () => {
+      // loadedFor は触らない。pause は version を変えないため、リフェッチ後も
+      // ロード effect のガード（id:version 一致）が効いて未保存編集が破棄されない。
+      // status 表示は StatusChip が wf.status を直接読むので invalidate だけで更新される
       qc.invalidateQueries({ queryKey: ["workflow", id] });
-      loadedFor.current = null;
       push({ kind: "ok", message: "停止しました。" });
     },
   });
 
-  const selected = nodes.find((n) => n.id === selectedId) ?? null;
+  const selected = rfNodes.find((n) => n.selected)?.data.wf ?? null;
   const selectedSchema = selected
     ? ((catalog?.types[selected.type] ?? null) as RJSFSchema | null)
     : null;
@@ -317,6 +479,16 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
           <h2>権限がありません</h2>
           <p>この画面は管理者（admin）のみ利用できます。</p>
         </div>
+      </AppShell>
+    );
+  }
+
+  if (!wf) {
+    // 本体ロード前は編集 UI を出さない。到着時に graph_json を無条件で流し込むため、
+    // ロード前に行った編集（パレット追加・タイトル入力）は黙って消えてしまう
+    return (
+      <AppShell active="workflows">
+        <div className="sub" style={{ padding: 24 }}>読み込み中…</div>
       </AppShell>
     );
   }
@@ -380,6 +552,7 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
         {/* パレット */}
         <div className="wf-palette">
           <div className="wf-pane-title">ノード（カタログ）</div>
+          <div className="wf-palette-hint">クリック、またはキャンバスへドラッグで追加</div>
           {Object.entries(CATEGORY).map(([cat, meta]) => (
             <div key={cat}>
               <div className="wf-palette-cat" style={{ color: meta.color }}>
@@ -388,34 +561,73 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
               {Object.keys(catalog?.types ?? {})
                 .filter((t) => t.startsWith(cat + "."))
                 .map((t) => (
-                  <button key={t} className="wf-palette-item" onClick={() => addNode(t)}>
-                    {TYPE_LABEL[t] ?? t}
+                  <button
+                    key={t}
+                    className="wf-palette-item"
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(DND_MIME, t);
+                      e.dataTransfer.effectAllowed = "move";
+                    }}
+                    onClick={() => addNode(t)}
+                  >
+                    <span className="wf-palette-ic" style={{ background: meta.color }}>
+                      <NodeIcon type={t} size={13} />
+                    </span>
+                    <span className="wf-palette-name">{TYPE_LABEL[t] ?? t}</span>
                     {!implemented.has(t) && <span className="wfnode-todo">未実装</span>}
                   </button>
                 ))}
             </div>
           ))}
-          <button className="btn danger" style={{ marginTop: 12 }} onClick={removeSelected} disabled={!selectedId}>
+          <button
+            className="btn danger"
+            style={{ marginTop: 12 }}
+            onClick={removeSelected}
+            disabled={!rfNodes.some((n) => n.selected)}
+          >
             選択ノードを削除
           </button>
         </div>
 
         {/* キャンバス */}
-        <div className="wf-canvas">
-          <ReactFlow
-            nodes={rfNodes}
-            edges={rfEdges}
-            nodeTypes={NODE_TYPES}
-            onNodesChange={onNodesChange}
-            onConnect={onConnect}
-            onEdgesDelete={onEdgesDelete}
-            deleteKeyCode={["Delete", "Backspace"]}
-            fitView
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background gap={16} />
-            <Controls showInteractive={false} />
-          </ReactFlow>
+        <div
+          className="wf-canvas"
+          onDragOver={(e) => {
+            e.preventDefault();
+            // 外来ドラッグ（OS のファイル等）にはドロップ不可カーソルを示す
+            if (!e.dataTransfer.types.includes(DND_MIME)) e.dataTransfer.dropEffect = "none";
+          }}
+          onDrop={onDrop}
+        >
+          <EditorMeta.Provider value={editorMeta}>
+            <ReactFlow
+              nodes={rfNodes}
+              edges={rfEdges}
+              nodeTypes={NODE_TYPES}
+              onNodesChange={handleNodesChange}
+              onNodesDelete={onNodesDelete}
+              onEdgesChange={onEdgesChange}
+              onEdgesDelete={onEdgesDelete}
+              onConnect={onConnect}
+              deleteKeyCode={["Delete", "Backspace"]}
+              connectionRadius={38}
+              fitView
+              fitViewOptions={{ padding: 0.25, maxZoom: 1.2 }}
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background gap={16} />
+              <Controls showInteractive={false} />
+              <MiniMap
+                className="wf-minimap"
+                pannable
+                zoomable
+                nodeColor={(n) =>
+                  CATEGORY[(n as WfFlowNode).data.wf.type.split(".")[0]]?.color ?? "#8888"
+                }
+              />
+            </ReactFlow>
+          </EditorMeta.Provider>
         </div>
 
         {/* 右パネル: config フォーム + lint + dry-run */}
@@ -427,20 +639,34 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
                 <span className="sub" style={{ marginLeft: 6 }}>{selected.id}</span>
               </div>
               <Form
+                key={selected.id}
                 schema={selectedSchema}
                 validator={validator}
                 formData={selected.config}
                 liveValidate={false}
                 showErrorList={false}
-                onChange={({ formData }) => {
-                  setNodes((ns) =>
-                    ns.map((n) =>
-                      n.id === selected.id
-                        ? { ...n, config: (formData ?? {}) as Record<string, unknown> }
-                        : n,
-                    ),
-                  );
-                  setDirty(true);
+                onChange={({ formData }, fieldId) => {
+                  const next = (formData ?? {}) as Record<string, unknown>;
+                  if (deepEqual(next, selected.config)) return;
+                  const apply = () =>
+                    setRfNodes((ns) =>
+                      ns.map((n) =>
+                        n.id === selected.id
+                          ? { ...n, data: { wf: { ...n.data.wf, config: next } } }
+                          : n,
+                      ),
+                    );
+                  if (fieldId === undefined) {
+                    // fieldId 無しはユーザー操作ではなく rjsf の default 補完で、
+                    // Form の constructor（= render 中）から同期で呼ばれる。そのまま
+                    // setState すると React の「render 中に他コンポーネントを更新」
+                    // エラーになるためマイクロタスクへ逃がす。補完はバックエンド
+                    // 既定値と同義なので「未保存」にもしない。
+                    queueMicrotask(apply);
+                  } else {
+                    apply();
+                    setDirty(true);
+                  }
                 }}
               >
                 {/* 送信ボタン不要（保存はツールバー） */}
@@ -458,7 +684,7 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
               <button
                 key={i}
                 className={`wf-finding ${f.severity}`}
-                onClick={() => f.node_id && setSelectedId(f.node_id)}
+                onClick={() => f.node_id && selectNode(f.node_id)}
               >
                 <b>{f.rule}</b> {f.message}
                 {f.node_id ? `（${f.node_id}）` : ""}
@@ -481,5 +707,14 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
         </div>
       </div>
     </AppShell>
+  );
+}
+
+export default function WorkflowEditorPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params);
+  return (
+    <ReactFlowProvider>
+      <WorkflowEditor id={id} />
+    </ReactFlowProvider>
   );
 }
