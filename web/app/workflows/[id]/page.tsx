@@ -513,6 +513,53 @@ function WorkflowEditor({ id }: { id: string }) {
     return m;
   }, [rfNodes]);
 
+  // DB 格納の「どの列にどんな値が入るか」を、直前の map_fields からテーブル用に組む。
+  // dry-run（プレビュー=実 SQL）と同じ前段走査（_map_preds）に合わせる。
+  const dbWriteTable = (
+    sinkId: string,
+  ): { rows: { column: string; source: string; note?: string }[]; target?: string; method: string } | null => {
+    const sink = rfNodes.find((n) => n.id === sinkId)?.data.wf;
+    if (!sink || sink.type !== "sink.db_write") return null;
+    const cfg = sink.config as { table?: string; mode?: string; keys?: string[] };
+    const preds = new Set<string>();
+    for (const e of edges) if (e.to === sinkId) preds.add(e.from);
+    for (const n of rfNodes) {
+      if (n.data.wf.type !== "branch.condition") continue;
+      const c = n.data.wf.config as { branches?: { to: string }[]; else?: string };
+      const targets = new Set([...(c.branches ?? []).map((b) => b.to), ...(c.else ? [c.else] : [])]);
+      if (targets.has(sinkId)) preds.add(n.id);
+    }
+    const rows: { column: string; source: string; note?: string }[] = [];
+    for (const pid of [...preds].sort()) {
+      const p = rfNodes.find((n) => n.id === pid)?.data.wf;
+      if (p?.type !== "transform.map_fields") continue;
+      const mc = p.config as {
+        mappings?: { from?: string; to: string; const?: string; format?: string; mask?: boolean }[];
+      };
+      for (const mp of mc.mappings ?? []) {
+        if (rows.some((r) => r.column === mp.to)) continue;
+        const source =
+          mp.const != null && mp.const !== ""
+            ? `固定値「${mp.const}」`
+            : mp.from
+              ? `抽出値「${mp.from}」`
+              : "（未設定）";
+        const notes: string[] = [];
+        if (mp.format) notes.push(`書式: ${mp.format}`);
+        if (mp.mask) notes.push("マスク");
+        rows.push({ column: mp.to, source, note: notes.join(" / ") || undefined });
+      }
+    }
+    if ((cfg.mode ?? "") === "insert") {
+      rows.push({ column: "nf_write_key", source: "自動（重複防止キー）" });
+    }
+    const method =
+      cfg.mode === "upsert"
+        ? `追加または更新（重複判定: ${(cfg.keys ?? []).join(", ") || "―"}）`
+        : "新規追加";
+    return { rows, target: cfg.table, method };
+  };
+
   if (error instanceof ApiError && error.status === 403) {
     return (
       <AppShell active="workflows">
@@ -776,7 +823,46 @@ function WorkflowEditor({ id }: { id: string }) {
                     </span>
                   </div>
                   {!s2.ok && s2.error && <div className="wf-preview-err">{s2.error}</div>}
-                  {s2.sql && (
+                  {(() => {
+                    // DB 格納は SQL ではなくテーブル形式で「どの列に何が入るか」を見せる
+                    const t = s2.ok && s2.node_type === "sink.db_write" ? dbWriteTable(s2.node_id) : null;
+                    if (!t) return null;
+                    return (
+                      <>
+                        <div className="wf-preview-target">
+                          書き込み先：<b>{t.target ?? "（未設定）"}</b>
+                          <span className="wf-nodetag">{t.method}</span>
+                        </div>
+                        <table className="wf-dbtable">
+                          <thead>
+                            <tr>
+                              <th>列（テーブルの項目）</th>
+                              <th>入る値</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {t.rows.map((r) => (
+                              <tr key={r.column}>
+                                <td className="wf-dbcol">{r.column}</td>
+                                <td>
+                                  {r.source}
+                                  {r.note && <span className="wf-dbnote">{r.note}</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {s2.sql && (
+                          <details className="wf-sqldetails">
+                            <summary>SQL を表示（上級者向け）</summary>
+                            <pre className="wf-sql">{s2.sql}</pre>
+                          </details>
+                        )}
+                      </>
+                    );
+                  })()}
+                  {/* db_write 以外（webhook 等）は従来どおり SQL / ペイロードを表示 */}
+                  {s2.sql && s2.node_type !== "sink.db_write" && (
                     <>
                       <div className="wf-preview-label">書き込まれる SQL</div>
                       <pre className="wf-sql">{s2.sql}</pre>

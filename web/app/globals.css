@@ -1708,6 +1708,23 @@ a {
 .wf-preview-node { font-size: 12px; font-weight: 600; }
 .wf-preview-err { font-size: 11px; color: var(--ng, #d64545); margin-top: 4px; }
 .wf-preview-label { font-size: 10px; font-weight: 700; color: var(--sub); margin: 8px 0 2px; }
+.wf-preview-target { font-size: 12px; margin: 8px 0 6px; }
+
+/* DB 格納の「列 → 入る値」テーブル */
+.wf-dbtable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.wf-dbtable th, .wf-dbtable td {
+  text-align: left; padding: 5px 8px; border: 1px solid var(--line); vertical-align: top;
+}
+.wf-dbtable th { background: var(--bg); font-weight: 700; font-size: 11px; color: var(--sub); }
+.wf-dbcol { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+.wf-dbnote {
+  display: inline-block; margin-left: 6px; font-size: 10px; color: var(--sub);
+  padding: 1px 5px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line);
+}
+.wf-sqldetails { margin-top: 8px; }
+.wf-sqldetails summary {
+  font-size: 11px; color: var(--sub); cursor: pointer; user-select: none;
+}
 
 /* rjsf の素の HTML をデザインシステムへ寄せる */
 .wf-config form { font-size: 12px; }
