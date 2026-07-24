@@ -165,6 +165,30 @@ class PgContextStore:
                 params,
             )
 
+    def mark_run_failed(self, tenant_id, run_id) -> None:
+        # processing のまま失敗した run を failed へ。needs_review/confirmed（再配信成功後）は
+        # 触らない（WHERE status='processing'）ので自己回復する。document も failed にして
+        # 一覧で分かるようにする。これが無いと has_active_run が掴んで再抽出が E1005 で塞がる。
+        from sqlalchemy import text
+
+        with self._engine.begin() as c:
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
+            c.execute(
+                text(
+                    "UPDATE extraction_runs SET status='failed', finished_at=now()"
+                    " WHERE id=:r AND tenant_id=:t AND status='processing'"
+                ),
+                {"r": run_id, "t": tenant_id},
+            )
+            c.execute(
+                text(
+                    "UPDATE documents SET status='failed', updated_at=now()"
+                    " WHERE tenant_id=:t AND id=(SELECT document_id FROM extraction_runs"
+                    "   WHERE id=:r) AND status='processing'"
+                ),
+                {"r": run_id, "t": tenant_id},
+            )
+
     def set_job_status(self, tenant_id, job_id, status, *, error_code=None) -> None:
         # §6.3 の契約はクライアントが GET /jobs/{id} を polling して終了を待つこと。
         # ここを書かないと jobs.status は queued のままで、ジョブが成功しても

@@ -86,9 +86,14 @@ export const api = {
     request<ResultResponse>(`/documents/${documentId}/result`),
 
   // 抽出（AI-OCR）を開始する。schema_id 未指定でも走るが、項目を出すにはスキーマ指定を推奨。
-  extract: (documentId: string, opts?: { schema_id?: string; force_vl?: boolean }) =>
+  // Idempotency-Key で連打・再送の二重 run を防ぐ（gateway が同キーをキャッシュ応答する）。
+  extract: (
+    documentId: string,
+    opts?: { schema_id?: string; force_vl?: boolean; idempotencyKey?: string },
+  ) =>
     request<ExtractAccepted>(`/documents/${documentId}/extract`, {
       method: "POST",
+      headers: opts?.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : undefined,
       body: JSON.stringify({
         schema_id: opts?.schema_id ?? null,
         options: { force_vl: opts?.force_vl ?? false },

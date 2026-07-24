@@ -7,7 +7,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import { useToasts } from "@/lib/toast";
 
 type Phase = "idle" | "running" | "error";
@@ -31,10 +31,22 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
   // 未選択なら先頭スキーマを既定に（項目を出すにはスキーマ指定が要る）
   const effectiveSchema = touched ? schemaId : (schemaId || items[0]?.id || "");
 
-  // ジョブ完了まで命令的にポーリング（react-query の refetchInterval より確実）
+  // ジョブ完了まで命令的にポーリング（react-query の refetchInterval より確実）。
+  // 締切・dead 終端・恒久エラーで必ず止める（停滞ジョブでの無限ループを防ぐ）。
   function pollJob(jobId: string) {
+    const startedAt = Date.now();
+    const DEADLINE_MS = 3 * 60_000; // 3分で打ち切り（キュー滞留/ワーカー停止対策）
+    const fail = (message: string) => {
+      if (!alive.current) return;
+      setPhase("error");
+      push({ kind: "warn", message });
+    };
     const tick = async () => {
       if (!alive.current) return;
+      if (Date.now() - startedAt > DEADLINE_MS) {
+        fail("抽出がタイムアウトしました。時間をおいて再試行してください。");
+        return;
+      }
       try {
         const j = await api.getJob(jobId);
         if (!alive.current) return;
@@ -43,13 +55,17 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
           onDone();
           return;
         }
-        if (j.status === "failed") {
-          setPhase("error");
-          push({ kind: "warn", message: "抽出に失敗しました。時間をおいて再試行してください。" });
+        // dead も終端（再配信枯渇）。failed と同じく失敗として止める
+        if (j.status === "failed" || j.status === "dead") {
+          fail("抽出に失敗しました。時間をおいて再試行してください。");
           return;
         }
-      } catch {
-        /* 一時エラーは無視して継続 */
+      } catch (e) {
+        // 一時的な 5xx/ネットワークは継続。ジョブ未検出(E1001)や 4xx 恒久エラーは打ち切る
+        if (e instanceof ApiError && (e.code === "E1001" || (e.status >= 400 && e.status < 500))) {
+          fail("抽出状況を取得できませんでした。時間をおいて再試行してください。");
+          return;
+        }
       }
       if (alive.current) setTimeout(tick, 1500);
     };
@@ -57,7 +73,11 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
   }
 
   const start = useMutation({
-    mutationFn: () => api.extract(documentId, { schema_id: effectiveSchema || undefined }),
+    mutationFn: () =>
+      api.extract(documentId, {
+        schema_id: effectiveSchema || undefined,
+        idempotencyKey: crypto.randomUUID(),
+      }),
     onSuccess: (r) => {
       setPhase("running");
       pollJob(r.job_id);

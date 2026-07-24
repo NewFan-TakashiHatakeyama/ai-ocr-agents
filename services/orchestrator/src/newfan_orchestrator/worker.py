@@ -175,5 +175,14 @@ class ExtractionWorker:
                 # 再配信で running に戻るので failed のままにはならない。ここを書かないと
                 # 落ちたジョブが queued に見え、クライアントは待ち続ける。
                 self._job(payload, "failed", "E9001")
+                # extract ジョブが落ちると run は processing のまま残り、has_active_run が
+                # 掴んで再抽出が E1005 で塞がる（帳票が行き止まりになる）。processing 限定で
+                # failed へ落とす（再配信が成功すれば save_result が needs_review で上書き）。
+                run_id = payload.get("run_id")
+                if run_id:
+                    try:
+                        self._store.mark_run_failed(payload["tenant_id"], run_id)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("[worker] run の failed 化に失敗: run_id=%s", run_id)
                 continue
         return processed
