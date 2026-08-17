@@ -13,9 +13,20 @@ import { useToasts } from "@/lib/toast";
 
 const TYPE_LABEL: Record<string, string> = {
   gdrive: "Google Drive",
+  m365: "Microsoft 365",
+  box: "Box",
   s3: "S3",
   postgres: "PostgreSQL",
   webhook: "Webhook",
+};
+
+// フォルダ監視系（⑤⑥）。作成フォームと「今すぐ同期」を同型で扱う
+const FOLDER_TYPES = ["gdrive", "m365", "box"] as const;
+
+const FOLDER_ID_HINT: Record<string, string> = {
+  gdrive: "Drive フォルダの ID（URL 末尾の英数字）",
+  m365: "<ドライブID>/<フォルダID>（Graph API の drive/item）",
+  box: "Box フォルダの ID（数値）",
 };
 
 const STATUS_LABEL: Record<string, { cls: string; label: string }> = {
@@ -40,9 +51,10 @@ function AdminDenied() {
   );
 }
 
-function CreateGDriveForm({ onCreated }: { onCreated: () => void }) {
+function CreateFolderConnectionForm({ onCreated }: { onCreated: () => void }) {
   const push = useToasts((s) => s.push);
   const [open, setOpen] = useState(false);
+  const [type, setType] = useState<string>("gdrive");
   const [name, setName] = useState("");
   const [folderId, setFolderId] = useState("");
   const [secretRef, setSecretRef] = useState("");
@@ -50,16 +62,15 @@ function CreateGDriveForm({ onCreated }: { onCreated: () => void }) {
   const create = useMutation({
     mutationFn: () =>
       api.createConnection({
-        type: "gdrive",
-        name: name.trim() || "Google Drive",
+        type,
+        name: name.trim() || TYPE_LABEL[type],
         config: { folder_id: folderId.trim() },
         secret_ref: secretRef.trim() || null,
       }),
     onSuccess: () => {
       push({
         kind: "ok",
-        message:
-          "Google Drive 接続を作成しました。ワークフローの「Google Drive」トリガーから選べます。",
+        message: `${TYPE_LABEL[type]} 接続を作成しました。ワークフローの「${TYPE_LABEL[type]}」トリガーから選べます。`,
       });
       setOpen(false);
       setName("");
@@ -73,7 +84,7 @@ function CreateGDriveForm({ onCreated }: { onCreated: () => void }) {
   if (!open) {
     return (
       <button className="btn sm primary" onClick={() => setOpen(true)}>
-        ＋ Google Drive を接続
+        ＋ フォルダ連携を追加（Google Drive / Microsoft 365 / Box）
       </button>
     );
   }
@@ -81,6 +92,16 @@ function CreateGDriveForm({ onCreated }: { onCreated: () => void }) {
   return (
     <div className="hint-form">
       <div className="hint-row">
+        <label>
+          サービス
+          <select value={type} onChange={(e) => setType(e.target.value)} aria-label="サービス">
+            {FOLDER_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {TYPE_LABEL[t]}
+              </option>
+            ))}
+          </select>
+        </label>
         <label>
           接続名
           <input
@@ -95,7 +116,7 @@ function CreateGDriveForm({ onCreated }: { onCreated: () => void }) {
           <input
             value={folderId}
             onChange={(e) => setFolderId(e.target.value)}
-            placeholder="Drive フォルダの ID（URL 末尾の英数字）"
+            placeholder={FOLDER_ID_HINT[type]}
             aria-label="フォルダID"
           />
         </label>
@@ -110,8 +131,8 @@ function CreateGDriveForm({ onCreated }: { onCreated: () => void }) {
         />
       </label>
       <p className="sub" style={{ margin: 0 }}>
-        フォルダに追加されたファイルは自動で取り込まれ、Google Drive
-        トリガーのワークフローが起動します（環境稼働中のみ・数分間隔）。
+        フォルダに追加されたファイルは自動で取り込まれ、対応するトリガーの
+        ワークフローが起動します（環境稼働中のみ・数分間隔）。
         作成後に「今すぐ同期」を1回実行すると疎通確認（テスト済）になり、
         ワークフローの有効化に使えるようになります。
       </p>
@@ -171,7 +192,9 @@ export default function ConnectionsPage() {
       </div>
 
       <div style={{ padding: "14px 22px 0" }}>
-        <CreateGDriveForm onCreated={() => qc.invalidateQueries({ queryKey: ["connections"] })} />
+        <CreateFolderConnectionForm
+          onCreated={() => qc.invalidateQueries({ queryKey: ["connections"] })}
+        />
       </div>
 
       <div style={{ padding: "14px 22px" }}>
@@ -190,14 +213,13 @@ export default function ConnectionsPage() {
             <tbody>
               {items.map((c) => {
                 const st = STATUS_LABEL[c.status] ?? { cls: "st-uploaded", label: c.status };
-                const summary =
-                  c.type === "gdrive"
-                    ? `フォルダ: ${String(c.config.folder_id ?? "—")}`
-                    : c.type === "s3"
-                      ? `バケット: ${String(c.config.bucket ?? "—")}`
-                      : c.type === "postgres"
-                        ? `ホスト: ${String(c.config.host ?? "—")}`
-                        : String(c.config.url ?? "—");
+                const summary = (FOLDER_TYPES as readonly string[]).includes(c.type)
+                  ? `フォルダ: ${String(c.config.folder_id ?? "—")}`
+                  : c.type === "s3"
+                    ? `バケット: ${String(c.config.bucket ?? "—")}`
+                    : c.type === "postgres"
+                      ? `ホスト: ${String(c.config.host ?? "—")}`
+                      : String(c.config.url ?? "—");
                 return (
                   <tr key={c.id}>
                     <td>
@@ -210,7 +232,7 @@ export default function ConnectionsPage() {
                       <span className={`chip ${st.cls}`}>{st.label}</span>
                     </td>
                     <td>
-                      {c.type === "gdrive" && (
+                      {(FOLDER_TYPES as readonly string[]).includes(c.type) && (
                         <button
                           className="btn sm"
                           disabled={syncingId === c.id}
@@ -226,7 +248,8 @@ export default function ConnectionsPage() {
               {items.length === 0 && (
                 <tr>
                   <td colSpan={5} className="sub">
-                    接続はまだありません。「＋ Google Drive を接続」でフォルダ監視を始められます。
+                    接続はまだありません。「＋ フォルダ連携を追加」で Google Drive / Microsoft 365 /
+                    Box のフォルダ監視を始められます。
                   </td>
                 </tr>
               )}

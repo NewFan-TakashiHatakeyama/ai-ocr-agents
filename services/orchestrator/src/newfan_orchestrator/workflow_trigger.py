@@ -30,7 +30,12 @@ from typing import Any, Callable, Optional, Protocol
 from newfan_metrics import watch_lag_seconds
 from newfan_workflow import WorkflowGraph
 from newfan_workflow.cron import JST, CronError, cron_matches
-from newfan_workflow.models import GDriveEventNode, S3EventNode, ScheduleNode
+from newfan_workflow.models import (
+    FOLDER_EVENT_NODE_TYPES,
+    GDriveEventNode,
+    S3EventNode,
+    ScheduleNode,
+)
 
 from newfan_orchestrator.gdrive import GDriveProvider
 
@@ -51,19 +56,23 @@ class TriggerMatch:
 
 
 @dataclass(frozen=True)
-class GDriveConnection:
-    """type=gdrive の接続。folder_id は config、リフレッシュトークンは secret_ref。"""
+class FolderConnection:
+    """フォルダ監視系接続（gdrive/m365/box）。folder_id は config、認証は secret_ref。"""
 
     folder_id: str
     secret_ref: Optional[str]
 
 
+# 後方互換の別名（gdrive 実装時の名前）
+GDriveConnection = FolderConnection
+
+
 class TriggerStore(Protocol):
     def list_active_workflows(self, tenant_id: str) -> list[tuple[str, int, dict[str, Any]]]: ...
     def get_s3_connection_bucket(self, tenant_id: str, connection_id: str) -> Optional[str]: ...
-    def get_gdrive_connection(
-        self, tenant_id: str, connection_id: str
-    ) -> Optional[GDriveConnection]: ...
+    def get_folder_connection(
+        self, tenant_id: str, connection_id: str, conn_type: str
+    ) -> Optional[FolderConnection]: ...
     def mark_connection_tested(self, tenant_id: str, connection_id: str) -> None: ...
     def already_claimed(
         self, tenant_id: str, connection_id: str, source_key: str, content_hash: str
@@ -308,21 +317,22 @@ class S3TriggerConsumer:
         return True
 
 
-def match_gdrive_event(
+def match_folder_event(
     workflows: list[tuple[str, int, dict[str, Any]]],
     connection_id: str,
     filename: str,
+    node_cls: type,
 ) -> list[TriggerMatch]:
-    """active ワークフローの gdrive_event ノードとファイルを突き合わせる（純関数）。"""
+    """active ワークフローのフォルダ監視ノードとファイルを突き合わせる（純関数）。"""
     out: list[TriggerMatch] = []
     for wf_id, version, graph_json in workflows:
         try:
             wf = WorkflowGraph.model_validate(graph_json)
         except Exception:  # noqa: BLE001 - 壊れた定義でトリガー全体を止めない
-            logger.warning("[gdrive] graph_json が読めないため除外: workflow=%s", wf_id)
+            logger.warning("[folder] graph_json が読めないため除外: workflow=%s", wf_id)
             continue
         for node in wf.nodes:
-            if not isinstance(node, GDriveEventNode):
+            if not isinstance(node, node_cls):
                 continue
             cfg = node.config
             if cfg.connection_id != connection_id:
@@ -343,18 +353,18 @@ def match_gdrive_event(
     return out
 
 
-class GDrivePoller:
-    """Google Drive フォルダの差分検知（⑤⑥ / 常駐ゼロ）。
+class FolderEventPoller:
+    """SaaS フォルダの差分検知（⑤⑥ / 常駐ゼロ）。gdrive/m365/box で同型。
 
     orchestrator-worker の主ループから run_once される（ScheduleTicker と同型）。
     常駐プロセスは増やさず、環境 up の間だけ interval おきにポーリングする。
-    down 中の新着はファイルが Drive に残っているため次の up で遡って取り込まれる。
+    down 中の新着はファイルが SaaS 側に残っているため次の up で遡って取り込まれる。
 
-    冪等（DD-13）: (tenant, connection, "gdrive:"+file_id, content_hash) を
+    冪等（DD-13）: (tenant, connection, "<type>:"+file_id, content_hash) を
     source_cursors の UNIQUE で claim する（S3 トリガーと同一の仕組み・同一トランザクション）。
     同じファイルの再検知は skip、内容が変われば（hash 変化）再処理される。
 
-    resolve_secret: secret_ref → リフレッシュトークン。FakeGDriveProvider は
+    resolve_secret: secret_ref → 認証トークン。Fake（ローカル dir）プロバイダは
     secret を使わないため未解決（None）でも動く。
 
     1 回のポーリングで取り込むのは接続あたり MAX_FILES_PER_POLL 件まで。worker の
@@ -375,6 +385,8 @@ class GDrivePoller:
         enqueue: Callable[[str, dict[str, Any]], None],
         resolve_secret: Optional[Callable[[str], str]] = None,
         poll_interval_sec: float = 300.0,
+        conn_type: str = "gdrive",
+        node_cls: type = GDriveEventNode,
     ) -> None:
         self._store = store
         self._provider = provider
@@ -382,6 +394,8 @@ class GDrivePoller:
         self._enqueue = enqueue
         self._resolve_secret = resolve_secret
         self._interval = poll_interval_sec
+        self._conn_type = conn_type
+        self._node_cls = node_cls
         # 「未実行」は None。0.0 を番兵にすると、起動直後のホスト（monotonic が
         # interval 未満）で初回ポーリングまで間引かれる（CI の Linux VM で実際に発生）
         self._last_poll: Optional[float] = None
@@ -413,7 +427,7 @@ class GDrivePoller:
         workflows = self._store.list_active_workflows(tenant_id)
         if not workflows:
             return 0
-        # gdrive_event ノードが参照する接続を集める（同じ接続は1回だけ見る）
+        # 自種別のフォルダ監視ノードが参照する接続を集める（同じ接続は1回だけ見る）
         connection_ids: list[str] = []
         for _wf_id, _version, graph_json in workflows:
             try:
@@ -421,7 +435,7 @@ class GDrivePoller:
             except Exception:  # noqa: BLE001
                 continue
             for node in wf.nodes:
-                if isinstance(node, GDriveEventNode):
+                if isinstance(node, self._node_cls):
                     cid = node.config.connection_id
                     if cid not in connection_ids:
                         connection_ids.append(cid)
@@ -431,7 +445,8 @@ class GDrivePoller:
                 processed += self._poll_connection(tenant_id, cid, workflows)
             except Exception:  # noqa: BLE001 - 1接続の失敗で他を止めない
                 logger.exception(
-                    "[gdrive] 接続のポーリングに失敗: tenant=%s connection=%s", tenant_id, cid
+                    "[%s] 接続のポーリングに失敗: tenant=%s connection=%s",
+                    self._conn_type, tenant_id, cid,
                 )
         return processed
 
@@ -441,18 +456,18 @@ class GDrivePoller:
         connection_id: str,
         workflows: list[tuple[str, int, dict[str, Any]]],
     ) -> int:
-        conn = self._store.get_gdrive_connection(tenant_id, connection_id)
+        conn = self._store.get_folder_connection(tenant_id, connection_id, self._conn_type)
         if conn is None:
             logger.warning(
-                "[gdrive] gdrive 接続が見つからないため skip: tenant=%s connection=%s",
-                tenant_id, connection_id,
+                "[%s] 接続が見つからないため skip: tenant=%s connection=%s",
+                self._conn_type, tenant_id, connection_id,
             )
             return 0
         secret: Optional[str] = None
         if conn.secret_ref and self._resolve_secret is not None:
             secret = self._resolve_secret(conn.secret_ref)
         files = self._provider.list_files(folder_id=conn.folder_id, secret=secret)
-        # フォルダの一覧取得に成功＝疎通OK。gdrive の疎通テストは gateway からは
+        # フォルダの一覧取得に成功＝疎通OK。SaaS の疎通テストは gateway からは
         # できない（プロバイダは worker 側にしか無い）ため、同期の成功をもって
         # untested → tested に昇格させる（lint L010 / connection_ok が要求する状態）。
         self._store.mark_connection_tested(tenant_id, connection_id)
@@ -460,15 +475,15 @@ class GDrivePoller:
         for f in files:
             if processed >= self.MAX_FILES_PER_POLL:
                 logger.info(
-                    "[gdrive] 1回のポーリング上限（%d件）に達したため残りは次回: tenant=%s connection=%s",
-                    self.MAX_FILES_PER_POLL, tenant_id, connection_id,
+                    "[%s] 1回のポーリング上限（%d件）に達したため残りは次回: tenant=%s connection=%s",
+                    self._conn_type, self.MAX_FILES_PER_POLL, tenant_id, connection_id,
                 )
                 break
-            matches = match_gdrive_event(workflows, connection_id, f.name)
+            matches = match_folder_event(workflows, connection_id, f.name, self._node_cls)
             if not matches:
                 continue
             # 早期 skip（DD-13）。download の前に安価に判定する
-            source_key = f"gdrive:{f.id}"
+            source_key = f"{self._conn_type}:{f.id}"
             if all(
                 self._store.already_claimed(tenant_id, m.connection_id, source_key, f.content_hash)
                 for m in matches
@@ -480,6 +495,7 @@ class GDrivePoller:
 
             from newfan_ingest import UploadInput  # 遅延 import（core は pydantic のみ）
 
+            external_ref = f"{self._conn_type}://{conn.folder_id}/{f.name}"
             result = self._ingest(
                 UploadInput(
                     tenant_id=tenant_id,
@@ -488,7 +504,7 @@ class GDrivePoller:
                     content=content,
                     declared_mime=None,
                     doc_type=None,
-                    external_ref=f"gdrive://{conn.folder_id}/{f.name}",
+                    external_ref=external_ref,
                 )
             )
             run_ids = self._store.register_ingested(
@@ -501,7 +517,7 @@ class GDrivePoller:
                     "original_name": f.name,
                     "mime_type": result.mime_type,
                     "page_count": result.page_count,
-                    "external_ref": f"gdrive://{conn.folder_id}/{f.name}",
+                    "external_ref": external_ref,
                 },
                 pages=[
                     {
@@ -514,7 +530,7 @@ class GDrivePoller:
                     for p in result.pages
                 ],
                 matches=matches,
-                trigger_type="gdrive_event",
+                trigger_type=f"{self._conn_type}_event",
             )
             if not run_ids:
                 continue  # claim 競合（別 consumer が先に取込済み）
@@ -525,10 +541,14 @@ class GDrivePoller:
                 )
             processed += 1
             logger.info(
-                "[gdrive] 取込完了: tenant=%s file=%s document=%s runs=%s",
-                tenant_id, f.name, document_id, run_ids,
+                "[%s] 取込完了: tenant=%s file=%s document=%s runs=%s",
+                self._conn_type, tenant_id, f.name, document_id, run_ids,
             )
         return processed
+
+
+# 後方互換の別名（gdrive 実装時の名前。既定パラメタが gdrive）
+GDrivePoller = FolderEventPoller
 
 
 class InMemoryTriggerStore:
@@ -537,10 +557,12 @@ class InMemoryTriggerStore:
     def __init__(self) -> None:
         self.workflows: dict[str, list[tuple[str, int, dict[str, Any]]]] = {}
         self.s3_connections: dict[tuple[str, str], str] = {}
-        self.gdrive_connections: dict[tuple[str, str], GDriveConnection] = {}
+        # (tenant, connection) → (conn_type, FolderConnection)
+        self.folder_connections: dict[tuple[str, str], tuple[str, FolderConnection]] = {}
         self.claims: set[tuple[str, str, str, str]] = set()
         self.documents: list[dict[str, Any]] = []
         self.runs: list[dict[str, Any]] = []
+        self.tested_connections: set[tuple[str, str]] = set()
         self._seq = 0
 
     def seed_workflow(
@@ -551,12 +573,23 @@ class InMemoryTriggerStore:
     def seed_s3_connection(self, tenant_id: str, connection_id: str, bucket: str) -> None:
         self.s3_connections[(tenant_id, connection_id)] = bucket
 
+    def seed_folder_connection(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        conn_type: str,
+        folder_id: str,
+        secret_ref: Optional[str] = None,
+    ) -> None:
+        self.folder_connections[(tenant_id, connection_id)] = (
+            conn_type,
+            FolderConnection(folder_id=folder_id, secret_ref=secret_ref),
+        )
+
     def seed_gdrive_connection(
         self, tenant_id: str, connection_id: str, folder_id: str, secret_ref: Optional[str] = None
     ) -> None:
-        self.gdrive_connections[(tenant_id, connection_id)] = GDriveConnection(
-            folder_id=folder_id, secret_ref=secret_ref
-        )
+        self.seed_folder_connection(tenant_id, connection_id, "gdrive", folder_id, secret_ref)
 
     def list_active_workflows(self, tenant_id: str) -> list[tuple[str, int, dict[str, Any]]]:
         return list(self.workflows.get(tenant_id, []))
@@ -564,13 +597,15 @@ class InMemoryTriggerStore:
     def get_s3_connection_bucket(self, tenant_id: str, connection_id: str) -> Optional[str]:
         return self.s3_connections.get((tenant_id, connection_id))
 
-    def get_gdrive_connection(
-        self, tenant_id: str, connection_id: str
-    ) -> Optional[GDriveConnection]:
-        return self.gdrive_connections.get((tenant_id, connection_id))
+    def get_folder_connection(
+        self, tenant_id: str, connection_id: str, conn_type: str
+    ) -> Optional[FolderConnection]:
+        entry = self.folder_connections.get((tenant_id, connection_id))
+        if entry is None or entry[0] != conn_type:
+            return None
+        return entry[1]
 
     def mark_connection_tested(self, tenant_id: str, connection_id: str) -> None:
-        self.tested_connections = getattr(self, "tested_connections", set())
         self.tested_connections.add((tenant_id, connection_id))
 
     def already_claimed(self, tenant_id, connection_id, source_key, content_hash) -> bool:

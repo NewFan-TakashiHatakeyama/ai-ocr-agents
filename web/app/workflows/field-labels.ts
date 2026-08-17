@@ -50,6 +50,26 @@ const SCHEMA_LABELS: Record<string, SchemaLabels> = {
       help: "取り込むファイルの拡張子（.pdf など。ドット始まり）",
     },
   },
+  M365EventConfig: {
+    connection_id: {
+      label: "接続先（Microsoft 365）",
+      help: "監視する OneDrive/SharePoint フォルダの接続を選びます（フォルダは接続側で設定）",
+    },
+    extensions: {
+      label: "対象の拡張子",
+      help: "取り込むファイルの拡張子（.pdf など。ドット始まり）",
+    },
+  },
+  BoxEventConfig: {
+    connection_id: {
+      label: "接続先（Box）",
+      help: "監視する Box フォルダの接続を選びます（フォルダは接続側で設定）",
+    },
+    extensions: {
+      label: "対象の拡張子",
+      help: "取り込むファイルの拡張子（.pdf など。ドット始まり）",
+    },
+  },
   EmailAttachmentConfig: {
     connection_id: { label: "接続先（メール）" },
     from_filter: { label: "差出人で絞り込み", help: "任意。指定した差出人のメールだけ対象にします" },
@@ -231,6 +251,8 @@ function localizeObject(obj: SchemaNode): void {
 const CONNECTION_TYPE_BY_NODE: Record<string, string> = {
   "source.s3_event": "s3",
   "source.gdrive_event": "gdrive",
+  "source.m365_event": "m365",
+  "source.box_event": "box",
   "sink.db_write": "postgres",
   "sink.webhook": "webhook",
   "sink.notify": "webhook",

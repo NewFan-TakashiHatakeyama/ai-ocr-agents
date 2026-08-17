@@ -58,16 +58,16 @@ class EmailAttachmentConfig(_Cfg):
     subject_filter: Optional[str] = None
 
 
-class GDriveEventConfig(_Cfg):
-    """Google Drive フォルダ監視トリガー（⑤⑥ SaaS連携）。
+class _FolderEventConfig(_Cfg):
+    """SaaS フォルダ監視トリガーの共通形（⑤⑥）。gdrive/m365/box が同じ設定を持つ。
 
-    常駐は増やさない: orchestrator-worker 内のポーラーが up の間だけ
-    GDRIVE_POLL_INTERVAL_SEC おきに新着を検知する（source.schedule の分ティックと同型）。
-    down 中の新着はファイルが Drive 側に残っているため、次の up のポーリングで
-    遡って取り込まれる（s3_event の SQS 滞留 drain と同じ「後追い」保証）。
+    常駐は増やさない: orchestrator-worker 内のポーラーが up の間だけ interval おきに
+    新着を検知する（source.schedule の分ティックと同型）。down 中の新着はファイルが
+    SaaS 側に残っているため、次の up のポーリングで遡って取り込まれる
+    （s3_event の SQS 滞留 drain と同じ「後追い」保証）。
 
-    接続は type=gdrive（config.folder_id、OAuth リフレッシュトークンは secret_ref）。
-    どのフォルダを見るかは接続側が持つ（テナントは自分の folder_id を意識しない）。
+    接続は対応する type（gdrive/m365/box）を指し、config.folder_id と認証の
+    secret_ref は接続側が持つ（テナントはノード側で folder を意識しない）。
     """
 
     connection_id: str = Field(min_length=1)
@@ -82,6 +82,18 @@ class GDriveEventConfig(_Cfg):
         if bad:
             raise ValueError(f"拡張子は '.' 始まりで書いてください: {bad}")
         return [e.lower() for e in v]
+
+
+class GDriveEventConfig(_FolderEventConfig):
+    """Google Drive フォルダ監視トリガー（接続 type=gdrive）。"""
+
+
+class M365EventConfig(_FolderEventConfig):
+    """Microsoft 365（OneDrive/SharePoint）フォルダ監視トリガー（接続 type=m365）。"""
+
+
+class BoxEventConfig(_FolderEventConfig):
+    """Box フォルダ監視トリガー（接続 type=box）。"""
 
 
 class ManualConfig(_Cfg):
@@ -236,6 +248,20 @@ class GDriveEventNode(_NodeBase):
     config: GDriveEventConfig
 
 
+class M365EventNode(_NodeBase):
+    type: Literal["source.m365_event"]
+    config: M365EventConfig
+
+
+class BoxEventNode(_NodeBase):
+    type: Literal["source.box_event"]
+    config: BoxEventConfig
+
+
+# フォルダ監視トリガー一式（lint / trigger 側の同型処理で使う）
+FOLDER_EVENT_NODE_TYPES = (GDriveEventNode, M365EventNode, BoxEventNode)
+
+
 class EmailAttachmentNode(_NodeBase):
     type: Literal["source.email_attachment"]
     config: EmailAttachmentConfig
@@ -300,6 +326,8 @@ WorkflowNode = Annotated[
     Union[
         S3EventNode,
         GDriveEventNode,
+        M365EventNode,
+        BoxEventNode,
         EmailAttachmentNode,
         ManualNode,
         ScheduleNode,
@@ -370,6 +398,8 @@ def is_sink(node: WorkflowNode) -> bool:
 NODE_CONFIG_MODELS: dict[str, type[BaseModel]] = {
     "source.s3_event": S3EventConfig,
     "source.gdrive_event": GDriveEventConfig,
+    "source.m365_event": M365EventConfig,
+    "source.box_event": BoxEventConfig,
     "source.email_attachment": EmailAttachmentConfig,
     "source.manual": ManualConfig,
     "source.schedule": ScheduleConfig,

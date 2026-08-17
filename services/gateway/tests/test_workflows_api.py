@@ -241,8 +241,10 @@ def test_catalogは全種のJSONSchemaと実装済み一覧を返す(client: Tes
     r = client.get("/v1/workflows/catalog", headers=_auth())
     assert r.status_code == 200
     body = r.json()
-    assert len(body["types"]) == 14  # 13 + source.gdrive_event（⑤⑥）
+    assert len(body["types"]) == 16  # 13 + フォルダ監視3種（gdrive/m365/box, ⑤⑥）
     assert "source.gdrive_event" in body["implemented"]  # ⑤⑥: worker 内ポーラー
+    assert "source.m365_event" in body["implemented"]  # ⑤⑥ 横展開
+    assert "source.box_event" in body["implemented"]  # ⑤⑥ 横展開
     assert "schema_id" in body["types"]["process.extract"]["required"]
     assert "source.manual" in body["implemented"]
     assert "source.s3_event" in body["implemented"]  # P4 で実装済み

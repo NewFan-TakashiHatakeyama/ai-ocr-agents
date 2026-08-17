@@ -551,27 +551,27 @@ class PgTriggerStore:
             ).first()
         return row[0] if row else None
 
-    def get_gdrive_connection(self, tenant_id: str, connection_id: str):
+    def get_folder_connection(self, tenant_id: str, connection_id: str, conn_type: str):
         from sqlalchemy import text
 
-        from newfan_orchestrator.workflow_trigger import GDriveConnection
+        from newfan_orchestrator.workflow_trigger import FolderConnection
 
         # ソース接続は取込のみでデータ流出面が無く、疎通テスト（test_connection）も
         # postgres 専用のため、untested を弾かない（疎通は同期の成否で確認する）。
-        # disabled だけは尊重する。
+        # disabled だけは尊重する。gdrive/m365/box で同型（フォルダ監視系）。
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
             row = c.execute(
                 text(
                     "SELECT config->>'folder_id', secret_ref FROM connections"
-                    " WHERE tenant_id=:t AND id=:i AND type='gdrive'"
+                    " WHERE tenant_id=:t AND id=:i AND type=:ty"
                     " AND status <> 'disabled'"
                 ),
-                {"t": tenant_id, "i": connection_id},
+                {"t": tenant_id, "i": connection_id, "ty": conn_type},
             ).first()
         if row is None or not row[0]:
             return None
-        return GDriveConnection(folder_id=row[0], secret_ref=row[1])
+        return FolderConnection(folder_id=row[0], secret_ref=row[1])
 
     def mark_connection_tested(self, tenant_id: str, connection_id: str) -> None:
         from sqlalchemy import text

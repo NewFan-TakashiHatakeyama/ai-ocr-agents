@@ -196,7 +196,7 @@ def test_catalogは全ノード種別のJSONSchemaを返す() -> None:
     # SCR-07 の設定フォームはここから自動生成する（手書きしない）
     schemas = catalog()
     assert set(schemas) == set(NODE_CONFIG_MODELS)
-    assert len(schemas) == 14  # 13 + source.gdrive_event（⑤⑥）
+    assert len(schemas) == 16  # 13 + フォルダ監視3種（gdrive/m365/box, ⑤⑥）
     assert "schema_id" in schemas["process.extract"]["required"]
     # extra=forbid が JSON Schema にも出る（フォーム側で未知キーを出さない）
     assert schemas["process.extract"]["additionalProperties"] is False

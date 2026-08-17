@@ -96,3 +96,42 @@ def test_folder_idは正規化して保存される(ctx: SimpleNamespace) -> Non
     r = _create(ctx, config={"folder_id": "  keiri-inbox  "})
     assert r.status_code == 201, r.text
     assert r.json()["config"]["folder_id"] == "keiri-inbox"
+
+
+# ---- ⑤⑥ 横展開: m365 / box 接続 ----
+
+
+def _create_typed(ctx: SimpleNamespace, conn_type: str, folder_id: str = "inbox"):
+    return ctx.client.post(
+        "/v1/connections",
+        headers=auth("admin"),
+        json={"type": conn_type, "name": f"{conn_type} 接続", "config": {"folder_id": folder_id}},
+    )
+
+
+def test_m365とbox接続を作成できる(ctx: SimpleNamespace) -> None:
+    for t in ("m365", "box"):
+        r = _create_typed(ctx, t)
+        assert r.status_code == 201, r.text
+        assert r.json()["type"] == t
+
+
+def test_m365とboxもfolder_id必須(ctx: SimpleNamespace) -> None:
+    for t in ("m365", "box"):
+        r = ctx.client.post(
+            "/v1/connections",
+            headers=auth("admin"),
+            json={"type": t, "name": "x", "config": {}},
+        )
+        assert r.status_code == 422, t
+        assert r.json()["error"]["code"] == "E4001"
+
+
+def test_今すぐ同期はq_syncに実種別を積む(ctx: SimpleNamespace) -> None:
+    # worker は payload["type"] で種別毎のポーラーへ振り分ける
+    for t in ("m365", "box"):
+        cid = _create_typed(ctx, t).json()["id"]
+        r = ctx.client.post(f"/v1/connections/{cid}/sync", headers=auth("admin"))
+        assert r.status_code == 202, r.text
+        msg = [m for s, m in ctx.queue.messages if s == "q.sync" and m["connection_id"] == cid][-1]
+        assert msg["type"] == t

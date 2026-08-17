@@ -12,11 +12,11 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Literal, Mapping, Optional
 
 from newfan_workflow.models import (
+    FOLDER_EVENT_NODE_TYPES,
     ConditionNode,
     DbWriteNode,
     ExtractNode,
     FileSinkNode,
-    GDriveEventNode,
     HitlGateNode,
     MapFieldsNode,
     WorkflowGraph,
@@ -85,11 +85,12 @@ def lint(
     if not triggers:
         findings.append(Finding("L002", "error", "トリガーノードがありません"))
 
-    # L011: 同じ接続・重なる拡張子の Google Drive トリガーが複数あると、1 ファイルの
-    # 新着で run が二重生成される（claim は接続単位のため両ノードが match する。レビュー確定）
-    gdrive_triggers = [n for n in graph.nodes if isinstance(n, GDriveEventNode)]
-    for i, a in enumerate(gdrive_triggers):
-        for b in gdrive_triggers[i + 1:]:
+    # L011: 同じ接続・重なる拡張子のフォルダ監視トリガー（gdrive/m365/box）が複数あると、
+    # 1 ファイルの新着で run が二重生成される（claim は接続単位のため両ノードが match する。
+    # レビュー確定）。接続は type を跨いで共有できないため connection_id で束ねれば足りる
+    folder_triggers = [n for n in graph.nodes if isinstance(n, FOLDER_EVENT_NODE_TYPES)]
+    for i, a in enumerate(folder_triggers):
+        for b in folder_triggers[i + 1:]:
             if a.config.connection_id != b.config.connection_id:
                 continue
             if set(a.config.extensions) & set(b.config.extensions):
@@ -97,7 +98,7 @@ def lint(
                     Finding(
                         "L011",
                         "error",
-                        "同じ接続を監視する Google Drive トリガーが重複しています"
+                        "同じ接続を監視するフォルダトリガーが重複しています"
                         f"（1ファイルで実行が二重になります）: {a.id} / {b.id}",
                         node_id=b.id,
                     )

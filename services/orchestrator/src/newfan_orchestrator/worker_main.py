@@ -228,59 +228,105 @@ def main() -> None:
             )
             print("[worker] trigger consumer 有効: " + os.environ["TRIGGER_SQS_URL"])
 
-        # Google Drive ポーリングトリガー（⑤⑥ SaaS連携 / 常駐ゼロ方針）。
+        # SaaS フォルダ監視トリガー（⑤⑥ / 常駐ゼロ方針）。gdrive/m365/box で同型。
         # 常駐プロセスは増やさず、この主ループが up の間だけ interval おきに差分検知する。
-        # 選択: GDRIVE_FAKE_ROOT（開発: ローカル dir を Drive に見立てる）
-        #     → GOOGLE_OAUTH_CLIENT_ID/SECRET（実 Drive API。モックファースト方針のため
-        #       実アカウント E2E は未了）→ どちらも無ければ無効。
-        gdrive_poller = None
-        gdrive_sync_consumer = None
-        gdrive_provider: Any = None
-        if os.environ.get("GDRIVE_FAKE_ROOT"):
-            from newfan_orchestrator.gdrive import FakeGDriveProvider
+        # 種別ごとの選択: <TYPE>_FAKE_ROOT（開発: ローカル dir を SaaS フォルダに見立てる）
+        # → 実 API の env が揃った時（モックファースト方針のため実アカウント E2E は未了）
+        # → どちらも無ければその種別は無効。
+        from newfan_workflow.models import BoxEventNode, GDriveEventNode, M365EventNode
 
-            gdrive_provider = FakeGDriveProvider(os.environ["GDRIVE_FAKE_ROOT"])
-            print("[worker] gdrive: FakeGDriveProvider 有効 root=" + os.environ["GDRIVE_FAKE_ROOT"])
-        elif os.environ.get("GOOGLE_OAUTH_CLIENT_ID") and os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET"):
-            from newfan_orchestrator.gdrive import GoogleDriveProvider
+        def _make_saas_provider(kind: str) -> Any:
+            fake_root = os.environ.get(f"{kind.upper()}_FAKE_ROOT")
+            if fake_root:
+                from newfan_orchestrator.gdrive import FakeGDriveProvider
 
-            gdrive_provider = GoogleDriveProvider(
-                os.environ["GOOGLE_OAUTH_CLIENT_ID"], os.environ["GOOGLE_OAUTH_CLIENT_SECRET"]
-            )
-            print("[worker] gdrive: GoogleDriveProvider 有効")
-        if gdrive_provider is not None:
-            from newfan_ingest import IngestService
-            from newfan_ingest.rasterize import AutoRasterizer
+                print(f"[worker] {kind}: Fake(ローカルdir) 有効 root={fake_root}")
+                return FakeGDriveProvider(fake_root)
+            if kind == "gdrive" and os.environ.get("GOOGLE_OAUTH_CLIENT_ID") and os.environ.get(
+                "GOOGLE_OAUTH_CLIENT_SECRET"
+            ):
+                from newfan_orchestrator.gdrive import GoogleDriveProvider
 
-            from newfan_orchestrator.workflow_trigger import GDrivePoller
-
-            # 保存先は gateway と同じ規約: S3_BUCKET があれば S3、無ければローカル FS
-            if os.environ.get("S3_BUCKET"):
-                from newfan_ingest.storage import S3ObjectStore
-
-                object_store: Any = S3ObjectStore(
-                    os.environ["S3_BUCKET"],
-                    kms_key_id=os.environ.get("S3_KMS_KEY_ID") or None,
+                print("[worker] gdrive: GoogleDriveProvider 有効")
+                return GoogleDriveProvider(
+                    os.environ["GOOGLE_OAUTH_CLIENT_ID"], os.environ["GOOGLE_OAUTH_CLIENT_SECRET"]
                 )
-            else:
-                from pathlib import Path
+            if kind == "m365" and all(
+                os.environ.get(k) for k in ("M365_TENANT_ID", "M365_CLIENT_ID", "M365_CLIENT_SECRET")
+            ):
+                from newfan_orchestrator.m365box import GraphFolderProvider
 
-                from newfan_ingest.storage import LocalObjectStore
+                print("[worker] m365: GraphFolderProvider 有効")
+                return GraphFolderProvider(
+                    os.environ["M365_TENANT_ID"],
+                    os.environ["M365_CLIENT_ID"],
+                    os.environ["M365_CLIENT_SECRET"],
+                )
+            if kind == "box" and all(
+                os.environ.get(k) for k in ("BOX_CLIENT_ID", "BOX_CLIENT_SECRET", "BOX_ENTERPRISE_ID")
+            ):
+                from newfan_orchestrator.m365box import BoxFolderProvider
 
-                object_store = LocalObjectStore(Path(os.environ.get("STORAGE_ROOT", "/data")))
-            gdrive_poller = GDrivePoller(
+                print("[worker] box: BoxFolderProvider 有効")
+                return BoxFolderProvider(
+                    os.environ["BOX_CLIENT_ID"],
+                    os.environ["BOX_CLIENT_SECRET"],
+                    os.environ["BOX_ENTERPRISE_ID"],
+                )
+            return None
+
+        saas_pollers: dict[str, Any] = {}
+        saas_sync_consumer = None
+        saas_ingest: Any = None
+        saas_interval = float(
+            os.environ.get("SAAS_POLL_INTERVAL_SEC")
+            or os.environ.get("GDRIVE_POLL_INTERVAL_SEC", "300")
+        )
+        for kind, node_cls in (
+            ("gdrive", GDriveEventNode),
+            ("m365", M365EventNode),
+            ("box", BoxEventNode),
+        ):
+            saas_provider = _make_saas_provider(kind)
+            if saas_provider is None:
+                continue
+            if saas_ingest is None:
+                from newfan_ingest import IngestService
+                from newfan_ingest.rasterize import AutoRasterizer
+
+                # 保存先は gateway と同じ規約: S3_BUCKET があれば S3、無ければローカル FS
+                if os.environ.get("S3_BUCKET"):
+                    from newfan_ingest.storage import S3ObjectStore
+
+                    object_store: Any = S3ObjectStore(
+                        os.environ["S3_BUCKET"],
+                        kms_key_id=os.environ.get("S3_KMS_KEY_ID") or None,
+                    )
+                else:
+                    from pathlib import Path
+
+                    from newfan_ingest.storage import LocalObjectStore
+
+                    object_store = LocalObjectStore(Path(os.environ.get("STORAGE_ROOT", "/data")))
+                saas_ingest = IngestService(object_store, AutoRasterizer())
+            from newfan_orchestrator.workflow_trigger import FolderEventPoller
+
+            saas_pollers[kind] = FolderEventPoller(
                 store=trigger_store,
-                provider=gdrive_provider,
-                ingest=IngestService(object_store, AutoRasterizer()).ingest,
+                provider=saas_provider,
+                ingest=saas_ingest.ingest,
                 enqueue=export_queue.enqueue,
                 resolve_secret=resolve_secret,
-                poll_interval_sec=float(os.environ.get("GDRIVE_POLL_INTERVAL_SEC", "300")),
+                poll_interval_sec=saas_interval,
+                conn_type=kind,
+                node_cls=node_cls,
             )
+        if saas_pollers:
             # 「今すぐ同期」（gateway の POST /connections/{id}/sync → q.sync）
-            gdrive_sync_consumer = RedisStreamConsumer(
+            saas_sync_consumer = RedisStreamConsumer(
                 os.environ["REDIS_URL"],
                 "q.sync",
-                "gdrive-sync",
+                "gdrive-sync",  # 既存グループ名を維持（デプロイ跨ぎの PEL 引継ぎ）
                 os.environ.get("CONSUMER_NAME", socket.gethostname()),
             )
 
@@ -291,29 +337,40 @@ def main() -> None:
             if trigger is not None:
                 trigger.run_once()  # 5 秒間隔で SQS をポーリング（内部で間引く）
             ticker.run_once()  # source.schedule の分ティック（分が変わった時だけ動く）
-            if gdrive_poller is not None:
+            if saas_pollers:
                 try:
-                    gdrive_poller.run_once()  # interval おきに Drive を差分検知（内部で間引く）
+                    for saas_poller in saas_pollers.values():
+                        saas_poller.run_once()  # interval おきに差分検知（内部で間引く）
                     # 注意: Redis の BLOCK 0 は「無限ブロック」。空キューで主ループが
                     # 固まりソケットタイムアウトで落ちる（実 compose で検出）→ 1ms
-                    for msg_id, payload in gdrive_sync_consumer.consume(count=5, block_ms=1):
+                    for msg_id, payload in saas_sync_consumer.consume(count=5, block_ms=1):
+                        kind = payload.get("type", "gdrive")  # 旧メッセージ互換
+                        target = saas_pollers.get(kind)
+                        if target is None:
+                            # この worker に未構成の種別。再配信しても直らないため
+                            # ack して捨てる（構成後に「今すぐ同期」し直してもらう）
+                            logging.getLogger(__name__).warning(
+                                "[saas] 未構成の種別への同期要求を破棄: %s", kind
+                            )
+                            saas_sync_consumer.ack(msg_id)
+                            continue
                         try:
-                            n = gdrive_poller.sync_now(
+                            n = target.sync_now(
                                 payload.get("tenant_id", ""), payload.get("connection_id", "")
                             )
                             print(
-                                f"[worker] gdrive 今すぐ同期: {payload.get('connection_id')} → {n} 件"
+                                f"[worker] {kind} 今すぐ同期: {payload.get('connection_id')} → {n} 件"
                             )
                             # 成功時のみ ack（at-least-once）。untested 接続の tested 昇格
                             # 経路は q.sync だけなので、transient 失敗で ack すると接続が
                             # untested に固着し WF 有効化が詰まる（レビュー確定）。失敗時は
                             # PEL に残し autoclaim(60s) の再配信で再試行。重複実行は
                             # source_cursors claim で冪等
-                            gdrive_sync_consumer.ack(msg_id)
+                            saas_sync_consumer.ack(msg_id)
                         except Exception:  # noqa: BLE001 - 同期失敗でループを止めない
-                            logging.getLogger(__name__).exception("[gdrive] 今すぐ同期に失敗")
-                except Exception:  # noqa: BLE001 - gdrive 区画の失敗で抽出/実行を殺さない
-                    logging.getLogger(__name__).exception("[gdrive] ポーリング区画で例外")
+                            logging.getLogger(__name__).exception("[%s] 今すぐ同期に失敗", kind)
+                except Exception:  # noqa: BLE001 - SaaS 区画の失敗で抽出/実行を殺さない
+                    logging.getLogger(__name__).exception("[saas] ポーリング区画で例外")
     print("[worker] SIGTERM 受信: 停止しました")
 
 
