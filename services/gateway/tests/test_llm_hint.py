@@ -67,3 +67,53 @@ def test_学習ルールは従来どおり検証未達で有効化を拒否(ctx:
     act = ctx.client.patch("/v1/rules/rule_regex_x", headers=auth("admin"), json={"status": "active"})
     assert act.status_code == 409  # E1006（検証未達）
     assert act.json()["error"]["code"] == "E1006"
+
+
+# ---- 敵対的レビュー確定/保留所見の回帰（2026-08-17） ----
+
+
+def test_agent生成のllm_hintは検証免除されない(ctx: SimpleNamespace) -> None:
+    # 検証免除は「人が明示的に書いた指示」に限る。学習エージェント生成の llm_hint
+    # まで免除すると、検証不合格ルールが1クリックで全 KIE プロンプトに注入される。
+    from newfan_gateway.records import RuleRecord
+
+    ctx.admin.create_rule(
+        RuleRecord(
+            id="rule_agent_hint",
+            tenant_id="ten_1",
+            doc_type="invoice",
+            rule_type="llm_hint",
+            rule_json={"hint_text": "agent が推測した指示"},
+            status="draft",
+            created_by="agent",
+        )
+    )
+    rules = ctx.client.get("/v1/rules", headers=auth("admin")).json()["items"]
+    target = next(r for r in rules if r["id"] == "rule_agent_hint")
+    assert target["activatable"] is False
+    act = ctx.client.patch("/v1/rules/rule_agent_hint", headers=auth("admin"), json={"status": "active"})
+    assert act.status_code == 409
+    assert act.json()["error"]["code"] == "E1006"
+
+
+def test_llm_hintの本文長は上限あり(ctx: SimpleNamespace) -> None:
+    # 無制限だと1件の巨大ヒントが全 KIE プロンプトを肥大化させ抽出を恒久失敗させ得る
+    r = ctx.client.post(
+        "/v1/rules",
+        headers=auth("admin"),
+        json={"doc_type": "invoice", "hint_text": "あ" * 2001},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "E1003"
+
+
+def test_llm_hintは未登録doc_typeを拒否する(ctx: SimpleNamespace) -> None:
+    # 未登録 doc_type は memory_lookup の等値一致に一度もヒットせず
+    # 「有効なのに適用されない」サイレント故障になる
+    r = ctx.client.post(
+        "/v1/rules",
+        headers=auth("admin"),
+        json={"doc_type": "invoce", "hint_text": "typo した doc_type"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "E1001"

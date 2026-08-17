@@ -25,7 +25,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from newfan_metrics import sink_write_rows_total, workflow_node_duration_seconds
 from newfan_workflow import EvalContext, FieldView, WorkflowGraph, evaluate, is_trigger, parse_expr
-from newfan_workflow.classify import DOC_TYPE_SYNONYMS, build_candidate, classify_text
+from newfan_workflow.classify import (
+    DOC_TYPE_SYNONYMS,
+    build_candidate,
+    canonical_doc_type,
+    classify_text,
+)
 from newfan_workflow.dbsink import (
     LEDGER_COLUMN,
     build_db_write_sql,
@@ -308,32 +313,42 @@ _CLASSIFY_MIN_CONFIDENCE = 0.75
 def _make_classify(node: ClassifyNode) -> Callable:
     """process.classify（P8）。帳票種別を許可リストと照合する。
 
-    まずスキーマ由来の doc_type（抽出が返す）を使うが、ファイル名や抽出値から
-    内容分類が確信をもって別種別を示す場合はそれを採用してゲートする（⑦）。
-    これで「請求ワークフローに発注書が紛れ込む」ような取り違えを検知できる。
+    まずスキーマ由来の doc_type（抽出が返す）を使うが、ファイル名の内容分類が
+    確信をもって別種別を示す場合はそれを採用してゲートする（⑦）。これで
+    「請求ワークフローに発注書が紛れ込む」ような取り違えを検知できる。
+
+    信号はファイル名のみ。抽出フィールドの値は使わない — 請求書の備考が
+    「見積書No…」を引用するのは常態で、自種別の語は値にほぼ現れないため、
+    値は構造的に他種別へ偏った信号になり正当な run を halt させる
+    （敵対的レビューで実測確定した誤検知）。
+
+    許可リスト照合は正準名（canonical_doc_type）で行う。doc_types に日本語名
+    （例「請求書」）が入っていても、内容分類が返す英語正準キー（invoice）と
+    同一視され、正当な帳票を「対象外」と誤判定しない。
+
     on_unknown=halt は対象外帳票で run を止める。default_route は素通り
     （下流の branch.condition が doc.doc_type で経路を分ける前提）。
-
-    信号（ファイル名・抽出値）が無い、または確信が持てない場合は従来どおり
-    スキーマ doc_type をそのまま使う（非破壊）。
+    信号が無い、または確信が持てない場合は従来どおりスキーマ doc_type を使う（非破壊）。
     """
-    # 許可種別＋既知の一般種別を候補にする。許可外の種別も認識できるようにして、
-    # 「対象外がすり抜ける」ケースを拾う。
-    doc_types = list(dict.fromkeys([*node.config.doc_types, *DOC_TYPE_SYNONYMS.keys()]))
-    candidates = [build_candidate(dt) for dt in doc_types]
+    allowed_canon = {canonical_doc_type(dt) for dt in node.config.doc_types}
+    # 候補は「許可種別＋既知の一般種別」を正準名で統合する。同義の候補を別々に
+    # 立てると票が割れて確信度が不当に下がる（日本語名 vs 英語キーの同点化）。
+    cand_types = list(
+        dict.fromkeys(
+            [canonical_doc_type(dt) for dt in node.config.doc_types]
+            + list(DOC_TYPE_SYNONYMS.keys())
+        )
+    )
+    candidates = [build_candidate(dt) for dt in cand_types]
 
     def run(state: WorkflowState) -> dict[str, Any]:
         schema_dt = state.get("doc_type")
         filename = state.get("original_name") or ""
-        fields = state.get("fields") or {}
-        text = " ".join(
-            str(v.get("value") or "") for v in fields.values() if isinstance(v, dict)
-        )
 
         content = None
-        if filename or text:
+        if filename:
             out = classify_text(
-                text=text,
+                text="",
                 filename=filename,
                 candidates=candidates,
                 min_confidence=_CLASSIFY_MIN_CONFIDENCE,
@@ -342,7 +357,7 @@ def _make_classify(node: ClassifyNode) -> Callable:
                 content = out
 
         effective_dt = content.doc_type if content else schema_dt
-        known = effective_dt in node.config.doc_types
+        known = bool(effective_dt) and canonical_doc_type(effective_dt) in allowed_canon
         if not known and node.config.on_unknown == "halt":
             raise RuntimeError(
                 f"doc_type が分類対象外です: {effective_dt!r}（対象: {node.config.doc_types}）"

@@ -139,10 +139,12 @@ export const api = {
 
   // 管理画面（SCR-04/05/06, admin）
   listSchemas: () => request<{ items: SchemaDto[] }>(`/schemas`),
-  putSchema: (docType: string, fields: SchemaFieldDto[]) =>
+  // create=true は新規作成モード: 既存 doc_type ならサーバが E1005(409) で拒否する
+  //（クライアントの重複チェックは一覧が陳腐化していると素通りするため）
+  putSchema: (docType: string, fields: SchemaFieldDto[], opts?: { create?: boolean }) =>
     request<SchemaDto>(`/schemas`, {
       method: "PUT",
-      body: JSON.stringify({ doc_type: docType, fields }),
+      body: JSON.stringify({ doc_type: docType, fields, create: opts?.create ?? false }),
     }),
   listConnections: () => request<{ items: ConnectionDto[] }>(`/connections`),
   listRules: (status?: string) =>

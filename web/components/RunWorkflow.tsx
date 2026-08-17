@@ -52,7 +52,15 @@ export function RunWorkflow({ documentId }: { documentId: string }) {
 
   return (
     <div className="run-wf">
-      {active.length === 0 ? (
+      {workflows.isError ? (
+        // 取得失敗を「有効なワークフローがありません」と混同させない（誤って再作成に誘導しない）
+        <span className="sub">
+          ワークフロー一覧を取得できません。
+          <button className="btn sm ghost" onClick={() => workflows.refetch()}>
+            再試行
+          </button>
+        </span>
+      ) : active.length === 0 ? (
         <span className="sub">
           有効なワークフローがありません（
           <a href="/workflows">ワークフロー</a> で作成・有効化してください）。

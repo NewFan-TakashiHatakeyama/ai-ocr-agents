@@ -248,3 +248,52 @@ def test_非所有ロールでcheckpointを読み書きできる() -> None:
     with PostgresSaver.from_conn_string(app_dsn) as saver:
         saver.put(cfg, blank, {"source": "input", "step": 0}, {})
         assert saver.get(cfg) is not None
+
+
+def test_load_extract_resultは実DDLからoriginal_nameとfieldsを返す() -> None:
+    """敵対的レビュー確定所見（Pg経路のテストゼロ）の回帰。
+
+    分類ゲート（⑦）の入力になる original_name の SELECT 列追加が実 DDL と
+    整合していることを InMemory でなく実 PostgreSQL で固定する。
+    """
+    from sqlalchemy import create_engine, text
+
+    from newfan_orchestrator.workflow_store import PgWorkflowRunStore
+
+    owner = create_engine(_DSN, future=True)  # type: ignore[arg-type]
+    tenant = "ten_wf_ler"
+    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+    with owner.begin() as c:
+        c.execute(text("INSERT INTO tenants (id,name) VALUES (:t,'x') ON CONFLICT DO NOTHING"),
+                  {"t": tenant})
+        c.execute(text(
+            "INSERT INTO documents (id, tenant_id, storage_uri, original_name, mime_type,"
+            " page_count, doc_type, status)"
+            " VALUES (:d,:t,'s3://x','請求書_ABC_2026.pdf','image/png',1,'invoice','uploaded')"),
+            {"d": doc_id, "t": tenant})
+
+    store = PgWorkflowRunStore(_DSN, enqueue=lambda s, m: None)  # type: ignore[arg-type]
+    run_id = store.ensure_extract_run(
+        tenant, doc_id, None, {"force_vl": False}, f"{doc_id}:x1",
+        {"stream": "q.workflow", "workflow_run_id": "wfrun_ler"},
+    )
+    try:
+        with owner.begin() as c:
+            c.execute(text(
+                "INSERT INTO extraction_fields (id, tenant_id, run_id, field_name,"
+                " value_normalized, final_value, confidence)"
+                " VALUES (:i,:t,:r,'total_amount','136998',NULL,0.97)"),
+                {"i": f"fld_{uuid.uuid4().hex[:12]}", "r": run_id, "t": tenant})
+
+        got = store.load_extract_result(tenant, run_id)
+        assert got["doc_type"] == "invoice"
+        assert got["original_name"] == "請求書_ABC_2026.pdf"
+        assert got["fields"]["total_amount"]["value"] == "136998"
+        assert got["run_confidence"] == pytest.approx(0.97, abs=1e-6)
+    finally:
+        with owner.begin() as c:
+            c.execute(text("DELETE FROM extraction_fields WHERE run_id=:r"), {"r": run_id})
+            c.execute(text("DELETE FROM jobs WHERE ref_id=:r"), {"r": run_id})
+            c.execute(text("DELETE FROM extraction_runs WHERE id=:r"), {"r": run_id})
+            c.execute(text("DELETE FROM documents WHERE id=:d"), {"d": doc_id})
+            c.execute(text("DELETE FROM tenants WHERE id=:t"), {"t": tenant})

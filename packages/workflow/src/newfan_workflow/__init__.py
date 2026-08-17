@@ -10,6 +10,7 @@ from newfan_workflow.classify import (
     ClassifyCandidate,
     ClassifyOutcome,
     build_candidate,
+    canonical_doc_type,
     classify_text,
     synonyms_for,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "Finding",
     "NODE_CONFIG_MODELS",
     "build_candidate",
+    "canonical_doc_type",
     "classify_text",
     "synonyms_for",
     "Severity",

@@ -37,7 +37,14 @@ export default function SchemasPage() {
   const [creating, setCreating] = useState(false);
   const [newDocType, setNewDocType] = useState("");
 
-  const current = creating ? undefined : data?.items.find((s) => s.doc_type === docType) ?? data?.items[0];
+  // docType が指定済みで一覧に見つからない場合は current=undefined（保存ボタンが無効化される）。
+  // `?? items[0]` へ落とすと、作成直後の stale な一覧の間「別スキーマの見出し＋新規項目」で
+  // 保存でき、無関係なスキーマを新規項目で上書きできてしまう（敵対的レビュー確定major）
+  const current = creating
+    ? undefined
+    : docType
+      ? data?.items.find((s) => s.doc_type === docType)
+      : data?.items[0];
   useEffect(() => {
     if (!creating && current) {
       setDocType(current.doc_type);
@@ -46,7 +53,8 @@ export default function SchemasPage() {
   }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = useMutation({
-    mutationFn: () => api.putSchema(creating ? newDocType.trim() : current!.doc_type, fields),
+    mutationFn: () =>
+      api.putSchema(creating ? newDocType.trim() : current!.doc_type, fields, { create: creating }),
     onSuccess: (rec) => {
       push({
         kind: "ok",
@@ -54,11 +62,22 @@ export default function SchemasPage() {
           ? `スキーマ「${rec.doc_type}」を作成しました（v${rec.version}）。抽出のスキーマ選択に表示されます。`
           : `新しい版として保存しました（${rec.doc_type} v${rec.version}）。進行中のRunには影響しません。`,
       });
+      // サーバ応答を正として項目を同期（一覧 refetch を待たない）
+      setFields(rec.fields.map((f) => ({ ...f })));
       setCreating(false);
       setDocType(rec.doc_type);
       qc.invalidateQueries({ queryKey: ["schemas"] });
     },
-    onError: (e) => push({ kind: "err", message: `保存に失敗しました（${(e as Error).message}）。` }),
+    onError: (e) => {
+      const status = (e as { status?: number })?.status;
+      push({
+        kind: "err",
+        message:
+          creating && status === 409
+            ? "同名のスキーマが既に存在します。既存スキーマを選んで編集してください。"
+            : `保存に失敗しました（${(e as Error).message}）。`,
+      });
+    },
   });
 
   if (error instanceof ApiError && error.status === 403) return <AdminDenied message="権限がありません" />;

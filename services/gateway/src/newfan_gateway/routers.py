@@ -586,9 +586,12 @@ def _rule_dto(rec: Any) -> dto.RuleDto:
         validation_report=rec.validation_report,
         source_correction_ids=rec.source_correction_ids,
         created_by=rec.created_by,
-        # llm_hint は決定論変換でなく人が書いた指示。ゴールデン再現率の検証対象外なので
-        # 検証レポート無しでも有効化できる（regex/vocab は従来どおり再現率ゲートが必要）。
-        activatable=rec.rule_type == "llm_hint" or is_activatable(rec.validation_report),
+        # llm_hint の検証免除は「人が明示的に書いた指示」に限る。学習エージェント生成の
+        # llm_hint（created_by="agent"）まで免除すると、検証不合格のルールが1クリックで
+        # 全 KIE プロンプトに注入される（レビュー保留所見）。regex/vocab は従来どおり
+        # 再現率ゲートが必要。
+        activatable=(rec.rule_type == "llm_hint" and rec.created_by != "agent")
+        or is_activatable(rec.validation_report),
     )
 
 
@@ -618,6 +621,14 @@ def put_schema(
     principal: Principal = Depends(require_role("admin")),
     admin: AdminRepository = Depends(get_admin),
 ) -> dto.SchemaDto:
+    # 新規作成モードはサーバ側で重複を拒否する。クライアントの重複チェックは一覧が
+    # 陳腐化していると素通りし、既存スキーマを黙って新版で置換してしまう（レビュー確定）。
+    if body.create and admin.get_schema(principal.tenant_id, body.doc_type) is not None:
+        raise ApiError(
+            "E1005",
+            "同名のスキーマが既に存在します。既存スキーマを選んで編集してください",
+            details={"doc_type": body.doc_type},
+        )
     fields = [SchemaFieldDef(**f.model_dump()) for f in body.fields]
     rec = admin.put_schema(principal.tenant_id, body.doc_type, fields)  # 常に新版
     return _schema_dto(rec)
@@ -1270,16 +1281,28 @@ def create_llm_hint(
     hint = (body.hint_text or "").strip()
     if not hint:
         raise ApiError("E1003", "ヒント本文（hint_text）を入力してください")
-    if not (body.doc_type or "").strip():
+    # 上限なしだと1件の巨大ヒントが当該 doc_type の全 KIE プロンプトを恒久的に
+    # 肥大化させ、抽出をコンテキスト超過で全件失敗させ得る（レビュー確定）
+    if len(hint) > 2000:
+        raise ApiError("E1003", "ヒント本文が長すぎます（2000文字以内）")
+    doc_type = (body.doc_type or "").strip()
+    if not doc_type:
         raise ApiError("E1003", "対象の帳票種別（doc_type）を指定してください")
+    # 未登録 doc_type は memory_lookup の等値一致に一度もヒットせず「有効なのに
+    # 適用されない」サイレント故障になる（レビュー確定）。作成時に存在を検証する
+    if admin.get_schema(principal.tenant_id, doc_type) is None:
+        raise ApiError("E1001", "スキーマ未登録の帳票種別です", details={"doc_type": doc_type})
+    desc = (body.description or "").strip()
+    if len(desc) > 200:
+        raise ApiError("E1003", "メモが長すぎます（200文字以内）")
     rule_json: dict[str, Any] = {"hint_text": hint}
-    if body.description:
-        rule_json["description"] = body.description.strip()
+    if desc:
+        rule_json["description"] = desc
     rec = admin.create_rule(
         RuleRecord(
             id=new_id("rule"),
             tenant_id=principal.tenant_id,
-            doc_type=body.doc_type.strip(),
+            doc_type=doc_type,
             field_name=(body.field_name or None),
             rule_type="llm_hint",
             rule_json=rule_json,
@@ -1314,11 +1337,14 @@ def patch_rule(
     rec = admin.get_rule(principal.tenant_id, rule_id)
     if rec is None:
         raise ApiError("E1001", "ルールが見つかりません", details={"rule_id": rule_id})
-    # 有効化は検証合格（再現率≥90%・回帰0件）が条件（§5.8.4）。ただし llm_hint は
-    # 人が書いた指示で決定論変換の検証対象ではないため、この条件を課さない。
+    # 有効化は検証合格（再現率≥90%・回帰0件）が条件（§5.8.4）。ただし「人が明示的に
+    # 書いた」llm_hint は決定論変換の検証対象ではないため、この条件を課さない。
+    # 学習エージェント生成の llm_hint（created_by="agent"）は従来どおりゲート対象
+    # （無検証ルールの1クリック注入を防ぐ。レビュー保留所見）。
+    human_hint = rec.rule_type == "llm_hint" and rec.created_by != "agent"
     if (
         body.status == "active"
-        and rec.rule_type != "llm_hint"
+        and not human_hint
         and not is_activatable(rec.validation_report)
     ):
         raise ApiError("E1006", "検証未達のため有効化できません（再現率≥90%・回帰0件が必要）")

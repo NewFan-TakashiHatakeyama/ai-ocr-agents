@@ -148,6 +148,10 @@ class SchemaList(BaseModel):
 class PutSchemaRequest(BaseModel):
     doc_type: str
     fields: list[SchemaFieldDto]
+    # 新規作成モード: 既存 doc_type があれば E1005 で拒否する。クライアントの重複チェックは
+    # 一覧が陳腐化していると素通りし、既存スキーマを黙って新版で置換してしまうため、
+    # 「作成のつもり」はサーバ側で守る。省略時（false）は従来どおり常に新版作成（§7.2）。
+    create: bool = False
 
 
 class RuleDto(BaseModel):
