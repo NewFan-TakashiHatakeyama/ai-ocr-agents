@@ -16,6 +16,7 @@ from newfan_workflow.models import (
     DbWriteNode,
     ExtractNode,
     FileSinkNode,
+    GDriveEventNode,
     HitlGateNode,
     MapFieldsNode,
     WorkflowGraph,
@@ -83,6 +84,24 @@ def lint(
     triggers = [n for n in graph.nodes if is_trigger(n)]
     if not triggers:
         findings.append(Finding("L002", "error", "トリガーノードがありません"))
+
+    # L011: 同じ接続・重なる拡張子の Google Drive トリガーが複数あると、1 ファイルの
+    # 新着で run が二重生成される（claim は接続単位のため両ノードが match する。レビュー確定）
+    gdrive_triggers = [n for n in graph.nodes if isinstance(n, GDriveEventNode)]
+    for i, a in enumerate(gdrive_triggers):
+        for b in gdrive_triggers[i + 1:]:
+            if a.config.connection_id != b.config.connection_id:
+                continue
+            if set(a.config.extensions) & set(b.config.extensions):
+                findings.append(
+                    Finding(
+                        "L011",
+                        "error",
+                        "同じ接続を監視する Google Drive トリガーが重複しています"
+                        f"（1ファイルで実行が二重になります）: {a.id} / {b.id}",
+                        node_id=b.id,
+                    )
+                )
 
     # L003: 到達不能ノード（トリガーが無い場合は L002 が出るので重ねない）
     if triggers and not cycle:

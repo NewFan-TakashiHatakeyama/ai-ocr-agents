@@ -667,7 +667,8 @@ class PgTriggerStore:
         return run_id
 
     def register_ingested(
-        self, tenant_id, *, source_key, content_hash, document, pages, matches
+        self, tenant_id, *, source_key, content_hash, document, pages, matches,
+        trigger_type="s3_event",
     ):
         import uuid
 
@@ -754,7 +755,9 @@ class PgTriggerStore:
                         "v": m.workflow_version,
                         "tr": json.dumps(
                             {
-                                "type": "s3_event",
+                                # 取込元の実種別（s3_event / gdrive_event）。監査で
+                                # 出所を誤認しないよう呼び出し元が渡す（レビュー確定）
+                                "type": trigger_type,
                                 "source_key": source_key,
                                 "etag": content_hash,
                                 "node_id": m.node_id,

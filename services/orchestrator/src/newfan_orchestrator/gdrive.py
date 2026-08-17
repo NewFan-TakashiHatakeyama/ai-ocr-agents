@@ -55,7 +55,10 @@ class FakeGDriveProvider:
     def list_files(self, *, folder_id: str, secret: Optional[str]) -> list[DriveFile]:
         d = self._dir(folder_id)
         if not os.path.isdir(d):
-            return []
+            # 空フォルダ（存在する）は正常だが、不存在は「疎通NG」。[] を返すと
+            # folder_id のタイポでも tested に昇格し、検知ゼロのまま「テスト済」と
+            # 表示されるサイレント故障になる（レビュー確定）
+            raise FileNotFoundError(f"gdrive fake folder not found: {folder_id}")
         folder = os.path.basename(folder_id)
         out: list[DriveFile] = []
         for name in sorted(os.listdir(d)):
@@ -97,16 +100,19 @@ class GoogleDriveProvider:
         self._client_id = client_id
         self._client_secret = client_secret
         self._timeout = timeout
-        self._token: Optional[str] = None
-        self._token_expires_at = 0.0
+        # refresh_token ごとにキャッシュする。単一インスタンスを全テナント・全接続で
+        # 共有するため、鍵なしのキャッシュだと別アカウントのアクセストークンを混用し、
+        # 他テナントの資格情報で Drive を読む（認可境界・監査帰属の破れ。レビュー確定major）
+        self._tokens: dict[str, tuple[str, float]] = {}
 
     def _access_token(self, refresh_token: str) -> str:
         import time
 
         import httpx
 
-        if self._token and time.monotonic() < self._token_expires_at - 60:
-            return self._token
+        cached = self._tokens.get(refresh_token)
+        if cached and time.monotonic() < cached[1] - 60:
+            return cached[0]
         resp = httpx.post(
             self.TOKEN_URL,
             data={
@@ -119,9 +125,12 @@ class GoogleDriveProvider:
         )
         resp.raise_for_status()
         body = resp.json()
-        self._token = body["access_token"]
-        self._token_expires_at = time.monotonic() + float(body.get("expires_in", 3600))
-        return self._token
+        token = str(body["access_token"])
+        self._tokens[refresh_token] = (
+            token,
+            time.monotonic() + float(body.get("expires_in", 3600)),
+        )
+        return token
 
     def list_files(self, *, folder_id: str, secret: Optional[str]) -> list[DriveFile]:
         import httpx

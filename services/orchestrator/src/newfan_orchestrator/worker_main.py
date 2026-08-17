@@ -304,10 +304,14 @@ def main() -> None:
                             print(
                                 f"[worker] gdrive 今すぐ同期: {payload.get('connection_id')} → {n} 件"
                             )
+                            # 成功時のみ ack（at-least-once）。untested 接続の tested 昇格
+                            # 経路は q.sync だけなので、transient 失敗で ack すると接続が
+                            # untested に固着し WF 有効化が詰まる（レビュー確定）。失敗時は
+                            # PEL に残し autoclaim(60s) の再配信で再試行。重複実行は
+                            # source_cursors claim で冪等
+                            gdrive_sync_consumer.ack(msg_id)
                         except Exception:  # noqa: BLE001 - 同期失敗でループを止めない
                             logging.getLogger(__name__).exception("[gdrive] 今すぐ同期に失敗")
-                        # 同期は毎ポーリングでも到達するため at-most-once で ack（重複実行の害が無い）
-                        gdrive_sync_consumer.ack(msg_id)
                 except Exception:  # noqa: BLE001 - gdrive 区画の失敗で抽出/実行を殺さない
                     logging.getLogger(__name__).exception("[gdrive] ポーリング区画で例外")
     print("[worker] SIGTERM 受信: 停止しました")

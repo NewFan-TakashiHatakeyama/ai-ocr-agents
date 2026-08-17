@@ -1115,12 +1115,23 @@ def create_connection(
             details={"secret_ref": body.secret_ref},
         )
     # gdrive は監視フォルダが無いと何も検知できない（サイレント故障）ため作成時に要求する
-    if body.type == "gdrive" and not str(body.config.get("folder_id") or "").strip():
-        raise ApiError(
-            "E4001",
-            "gdrive 接続には config.folder_id（監視する Drive フォルダの ID）が必要です",
-            details={"config_keys": sorted(body.config.keys())},
-        )
+    if body.type == "gdrive":
+        folder_id = str(body.config.get("folder_id") or "").strip()
+        if not folder_id:
+            raise ApiError(
+                "E4001",
+                "gdrive 接続には config.folder_id（監視する Drive フォルダの ID）が必要です",
+                details={"config_keys": sorted(body.config.keys())},
+            )
+        # コピペ由来の改行・クォート等は Drive クエリ（'<id>' in parents）を破壊し、
+        # 同期がサイレントに失敗し続ける（レビュー確定）。作成時に断り、値は正規化して保存
+        if len(folder_id) > 200 or any(ch in folder_id for ch in ("'", '"', "\n", "\r", "\t")):
+            raise ApiError(
+                "E4001",
+                "folder_id に使えない文字が含まれています（クォート・改行・タブ不可、200文字以内）",
+                details={"folder_id_length": len(folder_id)},
+            )
+        body.config = {**body.config, "folder_id": folder_id}
     table_re = r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$"
     bad_tables = [t for t in body.allowed_tables if not re.match(table_re, t)]
     if bad_tables:
@@ -1192,6 +1203,14 @@ def test_connection(
     return dto.ConnectionTestResult(ok=True, status="tested")
 
 
+# 「今すぐ同期」のプロセス内デバウンス。連打で q.sync が無制限に滞留すると、
+# 共有 worker の主ループと（実構成では）Drive API quota を1テナントが占有できる
+# （レビュー確定major）。ゲートウェイ多重化時はインスタンス毎に上限が付く近似だが、
+# 洪水の桁を落とすには十分（毎ポーリングでも同じ検知に到達するため実害が無い）。
+_SYNC_DEBOUNCE_SEC = 30.0
+_last_sync_enqueue: dict[tuple[str, str], float] = {}
+
+
 @router.post("/connections/{connection_id}/sync", status_code=202, response_model=dto.ConnectionSyncAccepted)
 def sync_connection(
     connection_id: str,
@@ -1206,11 +1225,24 @@ def sync_connection(
     orchestrator-worker 内のポーラー（q.sync 消費）が行う（gateway は Drive に触らない）。
     定期ポーリング（GDRIVE_POLL_INTERVAL_SEC）を待たずに取り込みたいときの導線。
     """
+    import time as _time
+
     rec = admin.get_connection(principal.tenant_id, connection_id)
     if rec is None:
         raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
     if rec.type != "gdrive":
         raise ApiError("E1005", "今すぐ同期は type=gdrive のみ対応です", details={"type": rec.type})
+    if rec.status == "disabled":
+        raise ApiError("E1005", "無効化された接続は同期できません", details={"status": rec.status})
+
+    key = (principal.tenant_id, connection_id)
+    now = _time.monotonic()
+    last = _last_sync_enqueue.get(key)
+    if last is not None and now - last < _SYNC_DEBOUNCE_SEC:
+        # 直前の要求がまだ有効（結果は同じ）なので新規 enqueue しない
+        return dto.ConnectionSyncAccepted(queued=False)
+    _last_sync_enqueue[key] = now
+
     queue.enqueue(
         "q.sync",
         {"tenant_id": principal.tenant_id, "connection_id": connection_id},

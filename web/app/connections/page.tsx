@@ -105,7 +105,7 @@ function CreateGDriveForm({ onCreated }: { onCreated: () => void }) {
         <input
           value={secretRef}
           onChange={(e) => setSecretRef(e.target.value)}
-          placeholder="開発モード（モック）では空のまま。本番は Secrets Manager の conn/<tenant>/… を指定"
+          placeholder="開発モード（モック）では空のまま。本番は ai-ocr/<env>/conn/<テナントID>/<名前> を指定"
           aria-label="secret_ref"
         />
       </label>
@@ -141,14 +141,22 @@ export default function ConnectionsPage() {
 
   const sync = useMutation({
     mutationFn: (id: string) => api.syncConnection(id),
-    onSuccess: () => {
-      push({
-        kind: "ok",
-        message: "同期を開始しました。新しい帳票はドキュメント一覧に数十秒で表示されます。",
-      });
+    onSuccess: (r) => {
+      push(
+        r.queued
+          ? {
+              kind: "ok",
+              message:
+                "同期を要求しました。反映されない場合は数十秒後にドキュメント一覧を更新してください（環境停止中は取り込まれません）。",
+            }
+          : { kind: "warn", message: "直前の同期要求を処理中です。少し待ってから再試行してください。" },
+      );
     },
     onError: (e) => push({ kind: "warn", message: `同期できません（${(e as Error).message}）。` }),
   });
+  // 「今すぐ同期」は行ごとに判定する（単一 mutation の isPending を全行で共有すると
+  // 1行の同期中に他の行まで「同期中…」表示・無効化される）
+  const syncingId = sync.isPending ? (sync.variables as string) : null;
 
   if (error instanceof ApiError && error.status === 403) return <AdminDenied />;
 
@@ -205,10 +213,10 @@ export default function ConnectionsPage() {
                       {c.type === "gdrive" && (
                         <button
                           className="btn sm"
-                          disabled={sync.isPending}
+                          disabled={syncingId === c.id}
                           onClick={() => sync.mutate(c.id)}
                         >
-                          {sync.isPending ? "同期中…" : "今すぐ同期"}
+                          {syncingId === c.id ? "同期中…" : "今すぐ同期"}
                         </button>
                       )}
                     </td>

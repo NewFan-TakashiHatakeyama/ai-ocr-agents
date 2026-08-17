@@ -81,6 +81,8 @@ def test_新着ファイルを検知して取込みワークフローを発火�
     assert doc["external_ref"].startswith("gdrive://inbox/")
     assert len(enqueued) == 1 and enqueued[0]["stream"] == "q.workflow"
     assert enqueued[0]["type"] == "start"
+    # 監査で出所を誤認しないよう trigger 種別は gdrive_event（s3_event 固定だった回帰）
+    assert store.runs[0]["trigger_type"] == "gdrive_event"
 
 
 def test_同じ内容の再検知はclaimでskipされる(tmp_path) -> None:
@@ -137,6 +139,32 @@ def test_sync_nowは指定接続だけを即時同期する(tmp_path) -> None:
     n = poller.sync_now(TENANT, "con_gd")
     assert n == 1
     assert len(enqueued) == 1
+
+
+def test_存在しないフォルダはtestedに昇格しない(tmp_path) -> None:
+    # folder_id タイポでも [] が返ると「疎通OK」扱いで tested に昇格し、検知ゼロのまま
+    # 「テスト済」表示になるサイレント故障（レビュー確定）。Fake は不存在で例外を投げる
+    store = InMemoryTriggerStore()
+    store.seed_workflow(TENANT, "wf_gd", 1, _graph())
+    store.seed_gdrive_connection(TENANT, "con_gd", "typo-folder")  # 実体を作らない
+    poller, _ = _poller(store, str(tmp_path))
+    assert poller.poll_all() == 0  # _poll_tenant が接続単位で例外を握って継続
+    assert (TENANT, "con_gd") not in getattr(store, "tested_connections", set())
+
+
+def test_1回のポーリングは件数上限で打ち切り残りは次回(tmp_path) -> None:
+    # 無制限だと大量バックログで worker 主ループが長時間停止し、全テナントの抽出停止と
+    # schedule 発火の恒久喪失（LOOKBACK 5分超）を招く（レビュー確定major）
+    store = InMemoryTriggerStore()
+    _seed(store, tmp_path)
+    for i in range(12):
+        (tmp_path / "inbox" / f"doc_{i:02d}.pdf").write_bytes(f"body-{i}".encode())
+
+    poller, enqueued = _poller(store, str(tmp_path))
+    assert poller.poll_all() == 10  # MAX_FILES_PER_POLL
+    assert poller.poll_all() == 2  # 続きは次の tick（claim 済みは飛ばす）
+    assert len(store.documents) == 12
+    assert len(enqueued) == 12
 
 
 def test_同期成功で接続がtestedへ昇格する(tmp_path) -> None:

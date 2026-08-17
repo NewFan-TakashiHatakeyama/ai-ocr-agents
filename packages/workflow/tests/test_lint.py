@@ -216,3 +216,57 @@ def test_errorがwarningより先に並ぶ() -> None:
 
 def test_指摘ゼロならhas_errorsはFalse() -> None:
     assert has_errors([]) is False
+
+
+# ---- ⑤⑥ L011: gdrive トリガーの重複（2026-08-17 レビュー確定） ----
+
+
+def _gd_graph(nodes, edges):
+    from newfan_workflow import WorkflowGraph
+
+    return WorkflowGraph.model_validate({"version": 1, "nodes": nodes, "edges": edges})
+
+
+def test_L011_同一接続の重複gdriveトリガーはerror() -> None:
+    from newfan_workflow import lint
+
+    g = _gd_graph(
+        [
+            {"id": "t1", "type": "source.gdrive_event", "config": {"connection_id": "con_gd"}},
+            {"id": "t2", "type": "source.gdrive_event", "config": {"connection_id": "con_gd"}},
+            {"id": "x1", "type": "process.extract", "config": {"schema_id": "s1"}},
+        ],
+        [{"from": "t1", "to": "x1"}, {"from": "t2", "to": "x1"}],
+    )
+    findings = lint(g)
+    assert any(f.rule == "L011" and f.severity == "error" for f in findings)
+
+
+def test_L011_接続が別なら重複ではない() -> None:
+    from newfan_workflow import lint
+
+    g = _gd_graph(
+        [
+            {"id": "t1", "type": "source.gdrive_event", "config": {"connection_id": "con_a"}},
+            {"id": "t2", "type": "source.gdrive_event", "config": {"connection_id": "con_b"}},
+            {"id": "x1", "type": "process.extract", "config": {"schema_id": "s1"}},
+        ],
+        [{"from": "t1", "to": "x1"}, {"from": "t2", "to": "x1"}],
+    )
+    assert not any(f.rule == "L011" for f in lint(g))
+
+
+def test_L011_拡張子が重ならなければ許容() -> None:
+    from newfan_workflow import lint
+
+    g = _gd_graph(
+        [
+            {"id": "t1", "type": "source.gdrive_event",
+             "config": {"connection_id": "con_gd", "extensions": [".pdf"]}},
+            {"id": "t2", "type": "source.gdrive_event",
+             "config": {"connection_id": "con_gd", "extensions": [".png"]}},
+            {"id": "x1", "type": "process.extract", "config": {"schema_id": "s1"}},
+        ],
+        [{"from": "t1", "to": "x1"}, {"from": "t2", "to": "x1"}],
+    )
+    assert not any(f.rule == "L011" for f in lint(g))

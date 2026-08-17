@@ -77,6 +77,7 @@ class TriggerStore(Protocol):
         document: dict[str, Any],
         pages: list[dict[str, Any]],
         matches: list[TriggerMatch],
+        trigger_type: str = "s3_event",
     ) -> list[str]: ...
     def list_tenant_ids(self) -> list[str]: ...
     def register_scheduled_run(
@@ -355,7 +356,15 @@ class GDrivePoller:
 
     resolve_secret: secret_ref → リフレッシュトークン。FakeGDriveProvider は
     secret を使わないため未解決（None）でも動く。
+
+    1 回のポーリングで取り込むのは接続あたり MAX_FILES_PER_POLL 件まで。worker の
+    主ループ（q.extract/q.workflow/ScheduleTicker と直列）を長時間占有すると、
+    全テナントの抽出が止まり、5 分を超えると schedule 発火が遡り上限を超えて
+    恒久喪失する（レビュー確定major）。残りは claim 済みでないため次の tick で続きから
+    取り込まれる（兄弟実装と同じ上限型: S3=10件/poll, runner=count10）。
     """
+
+    MAX_FILES_PER_POLL = 10
 
     def __init__(
         self,
@@ -449,6 +458,12 @@ class GDrivePoller:
         self._store.mark_connection_tested(tenant_id, connection_id)
         processed = 0
         for f in files:
+            if processed >= self.MAX_FILES_PER_POLL:
+                logger.info(
+                    "[gdrive] 1回のポーリング上限（%d件）に達したため残りは次回: tenant=%s connection=%s",
+                    self.MAX_FILES_PER_POLL, tenant_id, connection_id,
+                )
+                break
             matches = match_gdrive_event(workflows, connection_id, f.name)
             if not matches:
                 continue
@@ -499,6 +514,7 @@ class GDrivePoller:
                     for p in result.pages
                 ],
                 matches=matches,
+                trigger_type="gdrive_event",
             )
             if not run_ids:
                 continue  # claim 競合（別 consumer が先に取込済み）
@@ -585,7 +601,8 @@ class InMemoryTriggerStore:
         return run_id
 
     def register_ingested(
-        self, tenant_id, *, source_key, content_hash, document, pages, matches
+        self, tenant_id, *, source_key, content_hash, document, pages, matches,
+        trigger_type="s3_event",
     ) -> list[str]:
         claimed: set[str] = set()
         for m in matches:
@@ -610,6 +627,7 @@ class InMemoryTriggerStore:
                     "workflow_id": m.workflow_id,
                     "document_id": document["id"],
                     "source_key": source_key,
+                    "trigger_type": trigger_type,
                 }
             )
             run_ids.append(run_id)
