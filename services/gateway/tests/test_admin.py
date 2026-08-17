@@ -41,6 +41,36 @@ def test_schemas_require_admin(ctx: SimpleNamespace) -> None:
     assert ctx.client.get("/v1/schemas", headers=auth("reviewer")).status_code == 403
 
 
+def test_put_schema_create_rejects_duplicate(ctx: SimpleNamespace) -> None:
+    """新規作成モード（create=true）は既存 doc_type を E1005 で拒否する。
+
+    クライアントの重複チェックは一覧が陳腐化していると素通りし、既存スキーマを
+    黙って新版で置換してしまう（敵対的レビュー確定）。作成の意図はサーバ側で守る。
+    """
+    body = {
+        "doc_type": "invoice",  # conftest が seed 済み
+        "fields": [{"name": "x", "type": "string"}],
+        "create": True,
+    }
+    r = ctx.client.put("/v1/schemas", headers=auth("admin"), json=body)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "E1005"
+    # 版が増えていない（黙った置換が起きていない）こと
+    latest = ctx.client.get("/v1/schemas/invoice", headers=auth("admin")).json()
+    assert latest["version"] == 4
+
+
+def test_put_schema_create_allows_new_doc_type(ctx: SimpleNamespace) -> None:
+    body = {
+        "doc_type": "purchase_order",
+        "fields": [{"name": "order_no", "label": "発注番号", "type": "string"}],
+        "create": True,
+    }
+    r = ctx.client.put("/v1/schemas", headers=auth("admin"), json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["version"] == 1
+
+
 # ---- ルール（SCR-05） ----
 
 

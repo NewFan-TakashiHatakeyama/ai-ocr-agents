@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, U
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
-from newfan_workflow import WorkflowGraph, catalog, has_errors, lint
+from newfan_workflow import WorkflowGraph, build_candidate, catalog, classify_text, has_errors, lint
 from newfan_workflow.lint import Finding
 from pydantic import ValidationError
 
@@ -51,6 +51,7 @@ from newfan_gateway.records import (
     DocumentRecord,
     JobRecord,
     PageRecord,
+    RuleRecord,
     RunRecord,
     SchemaFieldDef,
     WorkflowRecord,
@@ -171,6 +172,64 @@ def get_document(
         doc_type=doc.doc_type,
         external_ref=doc.external_ref,
         page_count=doc.page_count,
+    )
+
+
+@router.post("/documents/{document_id}/classify", response_model=dto.ClassifyResponse)
+def classify_document(
+    document_id: str,
+    principal: Principal = Depends(require_role("viewer")),
+    repo: Repository = Depends(get_repo),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.ClassifyResponse:
+    """帳票種別を推定し、最も近い登録スキーマを提案する（⑦ 抽出UIサジェスト）。
+
+    抽出前はファイル名を信号にした決定論分類（純ロジック newfan_workflow.classify_text）。
+    アップロード時に doc_type が明示されていればそれを最優先する。
+    """
+    doc = _require_document(repo, principal.tenant_id, document_id)
+    schemas = admin.list_schemas(principal.tenant_id)
+    if not schemas:
+        return dto.ClassifyResponse()
+
+    # list_schemas は doc_type ごとの最新版のみを返す（§7.2）
+    latest: dict[str, str] = {s.doc_type: s.id for s in schemas}
+
+    # アップロード時に種別指定済みなら、推測より確実なのでそれを採用する
+    if doc.doc_type and doc.doc_type in latest:
+        return dto.ClassifyResponse(
+            suggested_schema_id=latest[doc.doc_type],
+            doc_type=doc.doc_type,
+            confidence=1.0,
+            reason="アップロード時に指定された種別",
+            method="declared",
+            candidates=[
+                dto.ClassifyCandidateDto(schema_id=sid, doc_type=dt, score=0.0)
+                for dt, sid in latest.items()
+            ],
+        )
+
+    candidates = [
+        build_candidate(s.doc_type, [f.label or f.name for f in s.fields]) for s in schemas
+    ]
+    filename = doc.original_name or ""
+    outcome = classify_text(text="", filename=filename, candidates=candidates)
+    method = "filename" if filename else "heuristic"
+    cand_dtos = sorted(
+        (
+            dto.ClassifyCandidateDto(schema_id=latest.get(dt, ""), doc_type=dt, score=sc)
+            for dt, sc in outcome.scores.items()
+        ),
+        key=lambda c: c.score,
+        reverse=True,
+    )
+    return dto.ClassifyResponse(
+        suggested_schema_id=latest.get(outcome.doc_type) if outcome.doc_type else None,
+        doc_type=outcome.doc_type,
+        confidence=outcome.confidence,
+        reason=outcome.reason,
+        method=method,
+        candidates=cand_dtos,
     )
 
 
@@ -527,7 +586,12 @@ def _rule_dto(rec: Any) -> dto.RuleDto:
         validation_report=rec.validation_report,
         source_correction_ids=rec.source_correction_ids,
         created_by=rec.created_by,
-        activatable=is_activatable(rec.validation_report),
+        # llm_hint の検証免除は「人が明示的に書いた指示」に限る。学習エージェント生成の
+        # llm_hint（created_by="agent"）まで免除すると、検証不合格のルールが1クリックで
+        # 全 KIE プロンプトに注入される（レビュー保留所見）。regex/vocab は従来どおり
+        # 再現率ゲートが必要。
+        activatable=(rec.rule_type == "llm_hint" and rec.created_by != "agent")
+        or is_activatable(rec.validation_report),
     )
 
 
@@ -557,6 +621,14 @@ def put_schema(
     principal: Principal = Depends(require_role("admin")),
     admin: AdminRepository = Depends(get_admin),
 ) -> dto.SchemaDto:
+    # 新規作成モードはサーバ側で重複を拒否する。クライアントの重複チェックは一覧が
+    # 陳腐化していると素通りし、既存スキーマを黙って新版で置換してしまう（レビュー確定）。
+    if body.create and admin.get_schema(principal.tenant_id, body.doc_type) is not None:
+        raise ApiError(
+            "E1005",
+            "同名のスキーマが既に存在します。既存スキーマを選んで編集してください",
+            details={"doc_type": body.doc_type},
+        )
     fields = [SchemaFieldDef(**f.model_dump()) for f in body.fields]
     rec = admin.put_schema(principal.tenant_id, body.doc_type, fields)  # 常に新版
     return _schema_dto(rec)
@@ -954,7 +1026,7 @@ def pause_workflow(
     return _workflow_dto(updated)
 
 
-_CONNECTION_TYPES = {"postgres", "webhook", "s3"}
+_CONNECTION_TYPES = {"postgres", "webhook", "s3", "gdrive"}
 # 秘密らしいキーの部分一致判定に使う（完全一致だと passwd/secret_access_key 等が抜ける）
 _SECRETY_SUBSTRINGS = ("secret", "password", "passwd", "pwd", "token", "api_key", "apikey",
                        "credential")
@@ -1042,6 +1114,24 @@ def create_connection(
             f"（ai-ocr/<env>/conn/{principal.tenant_id}/<名前> で登録して ARN か名前を渡す）",
             details={"secret_ref": body.secret_ref},
         )
+    # gdrive は監視フォルダが無いと何も検知できない（サイレント故障）ため作成時に要求する
+    if body.type == "gdrive":
+        folder_id = str(body.config.get("folder_id") or "").strip()
+        if not folder_id:
+            raise ApiError(
+                "E4001",
+                "gdrive 接続には config.folder_id（監視する Drive フォルダの ID）が必要です",
+                details={"config_keys": sorted(body.config.keys())},
+            )
+        # コピペ由来の改行・クォート等は Drive クエリ（'<id>' in parents）を破壊し、
+        # 同期がサイレントに失敗し続ける（レビュー確定）。作成時に断り、値は正規化して保存
+        if len(folder_id) > 200 or any(ch in folder_id for ch in ("'", '"', "\n", "\r", "\t")):
+            raise ApiError(
+                "E4001",
+                "folder_id に使えない文字が含まれています（クォート・改行・タブ不可、200文字以内）",
+                details={"folder_id_length": len(folder_id)},
+            )
+        body.config = {**body.config, "folder_id": folder_id}
     table_re = r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$"
     bad_tables = [t for t in body.allowed_tables if not re.match(table_re, t)]
     if bad_tables:
@@ -1111,6 +1201,57 @@ def test_connection(
         target_id=connection_id, detail={"ok": True},
     )
     return dto.ConnectionTestResult(ok=True, status="tested")
+
+
+# 「今すぐ同期」のプロセス内デバウンス。連打で q.sync が無制限に滞留すると、
+# 共有 worker の主ループと（実構成では）Drive API quota を1テナントが占有できる
+# （レビュー確定major）。ゲートウェイ多重化時はインスタンス毎に上限が付く近似だが、
+# 洪水の桁を落とすには十分（毎ポーリングでも同じ検知に到達するため実害が無い）。
+_SYNC_DEBOUNCE_SEC = 30.0
+_last_sync_enqueue: dict[tuple[str, str], float] = {}
+
+
+@router.post("/connections/{connection_id}/sync", status_code=202, response_model=dto.ConnectionSyncAccepted)
+def sync_connection(
+    connection_id: str,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+    queue: Queue = Depends(get_queue),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.ConnectionSyncAccepted:
+    """「今すぐ同期」（⑤⑥ SaaS連携）。
+
+    gdrive 接続の監視フォルダを即時に差分検知する。実際の検知・取込は
+    orchestrator-worker 内のポーラー（q.sync 消費）が行う（gateway は Drive に触らない）。
+    定期ポーリング（GDRIVE_POLL_INTERVAL_SEC）を待たずに取り込みたいときの導線。
+    """
+    import time as _time
+
+    rec = admin.get_connection(principal.tenant_id, connection_id)
+    if rec is None:
+        raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
+    if rec.type != "gdrive":
+        raise ApiError("E1005", "今すぐ同期は type=gdrive のみ対応です", details={"type": rec.type})
+    if rec.status == "disabled":
+        raise ApiError("E1005", "無効化された接続は同期できません", details={"status": rec.status})
+
+    key = (principal.tenant_id, connection_id)
+    now = _time.monotonic()
+    last = _last_sync_enqueue.get(key)
+    if last is not None and now - last < _SYNC_DEBOUNCE_SEC:
+        # 直前の要求がまだ有効（結果は同じ）なので新規 enqueue しない
+        return dto.ConnectionSyncAccepted(queued=False)
+    _last_sync_enqueue[key] = now
+
+    queue.enqueue(
+        "q.sync",
+        {"tenant_id": principal.tenant_id, "connection_id": connection_id},
+    )
+    wf.record_audit(
+        principal.tenant_id, actor_id=principal.sub, action="connection.sync",
+        target_id=connection_id, detail={"type": rec.type},
+    )
+    return dto.ConnectionSyncAccepted(queued=True)
 
 
 @router.post("/webhooks/endpoints", status_code=201, response_model=dto.WebhookEndpointDto)
@@ -1195,6 +1336,53 @@ def list_memory(
     return dto.MemoryList(items=[dto.MemoryDto(**r.model_dump(exclude={"tenant_id"})) for r in rows])
 
 
+@router.post("/rules", response_model=dto.RuleDto, status_code=201)
+def create_llm_hint(
+    body: dto.CreateLlmHintRequest,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.RuleDto:
+    """LLM最適化ヒント（llm_hint）を人が直接オーサリングする（③）。
+
+    抽出LLMへの自然言語指示。draft で作られ、承認（PATCH active）で有効化される。
+    有効化後は memory_lookup が doc_type 単位で拾い、KIE プロンプトの rule_hints に注入される。
+    """
+    hint = (body.hint_text or "").strip()
+    if not hint:
+        raise ApiError("E1003", "ヒント本文（hint_text）を入力してください")
+    # 上限なしだと1件の巨大ヒントが当該 doc_type の全 KIE プロンプトを恒久的に
+    # 肥大化させ、抽出をコンテキスト超過で全件失敗させ得る（レビュー確定）
+    if len(hint) > 2000:
+        raise ApiError("E1003", "ヒント本文が長すぎます（2000文字以内）")
+    doc_type = (body.doc_type or "").strip()
+    if not doc_type:
+        raise ApiError("E1003", "対象の帳票種別（doc_type）を指定してください")
+    # 未登録 doc_type は memory_lookup の等値一致に一度もヒットせず「有効なのに
+    # 適用されない」サイレント故障になる（レビュー確定）。作成時に存在を検証する
+    if admin.get_schema(principal.tenant_id, doc_type) is None:
+        raise ApiError("E1001", "スキーマ未登録の帳票種別です", details={"doc_type": doc_type})
+    desc = (body.description or "").strip()
+    if len(desc) > 200:
+        raise ApiError("E1003", "メモが長すぎます（200文字以内）")
+    rule_json: dict[str, Any] = {"hint_text": hint}
+    if desc:
+        rule_json["description"] = desc
+    rec = admin.create_rule(
+        RuleRecord(
+            id=new_id("rule"),
+            tenant_id=principal.tenant_id,
+            doc_type=doc_type,
+            field_name=(body.field_name or None),
+            rule_type="llm_hint",
+            rule_json=rule_json,
+            status="draft",
+            source_correction_ids=[],
+            created_by=principal.sub,
+        )
+    )
+    return _rule_dto(rec)
+
+
 @router.get("/rules", response_model=dto.RuleList)
 def list_rules(
     status: Optional[str] = None,
@@ -1218,8 +1406,16 @@ def patch_rule(
     rec = admin.get_rule(principal.tenant_id, rule_id)
     if rec is None:
         raise ApiError("E1001", "ルールが見つかりません", details={"rule_id": rule_id})
-    # 有効化は検証合格（再現率≥90%・回帰0件）が条件（§5.8.4）
-    if body.status == "active" and not is_activatable(rec.validation_report):
+    # 有効化は検証合格（再現率≥90%・回帰0件）が条件（§5.8.4）。ただし「人が明示的に
+    # 書いた」llm_hint は決定論変換の検証対象ではないため、この条件を課さない。
+    # 学習エージェント生成の llm_hint（created_by="agent"）は従来どおりゲート対象
+    # （無検証ルールの1クリック注入を防ぐ。レビュー保留所見）。
+    human_hint = rec.rule_type == "llm_hint" and rec.created_by != "agent"
+    if (
+        body.status == "active"
+        and not human_hint
+        and not is_activatable(rec.validation_report)
+    ):
         raise ApiError("E1006", "検証未達のため有効化できません（再現率≥90%・回帰0件が必要）")
     updated = admin.set_rule_status(principal.tenant_id, rule_id, body.status)
     assert updated is not None

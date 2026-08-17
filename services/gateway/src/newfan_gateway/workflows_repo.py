@@ -25,6 +25,7 @@ IMPLEMENTED_NODE_TYPES: frozenset[str] = frozenset(
     {
         "source.manual",
         "source.s3_event",  # P4: EventBridge→SQS→trigger consumer
+        "source.gdrive_event",  # ⑤⑥: worker 内ポーラー（常駐ゼロ）+ source_cursors dedup
         "branch.hitl_gate",  # P5: needs_review でだけ待つ人手ゲート
         "process.extract",
         "branch.condition",

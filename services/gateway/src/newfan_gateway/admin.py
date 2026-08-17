@@ -39,6 +39,7 @@ class AdminRepository(Protocol):
     ) -> SchemaRecord: ...
 
     # ルール（§5.8.4）
+    def create_rule(self, rec: RuleRecord) -> RuleRecord: ...
     def list_rules(
         self, tenant_id: str, *, status: Optional[str] = None, doc_type: Optional[str] = None
     ) -> list[RuleRecord]: ...
@@ -134,6 +135,10 @@ class InMemoryAdminRepository:
     # --- rules ---
     def seed_rule(self, rec: RuleRecord) -> None:
         self._rules[rec.id] = rec
+
+    def create_rule(self, rec: RuleRecord) -> RuleRecord:
+        self._rules[rec.id] = rec
+        return rec
 
     def list_rules(
         self, tenant_id: str, *, status: Optional[str] = None, doc_type: Optional[str] = None

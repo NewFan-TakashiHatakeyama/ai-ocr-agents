@@ -28,8 +28,18 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
 
   const schemas = useQuery({ queryKey: ["schemas"], queryFn: () => api.listSchemas() });
   const items = schemas.data?.items ?? [];
-  // 未選択なら先頭スキーマを既定に（項目を出すにはスキーマ指定が要る）
-  const effectiveSchema = touched ? schemaId : (schemaId || items[0]?.id || "");
+
+  // 帳票種別を自動推定してスキーマを既定選択（⑦）。ユーザーが触るまでは推定を尊重する。
+  const classify = useQuery({
+    queryKey: ["classify", documentId],
+    queryFn: () => api.classifyDocument(documentId),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const suggested = classify.data?.suggested_schema_id || "";
+
+  // 優先度: ユーザー選択 > 自動推定 > 先頭スキーマ（項目を出すにはスキーマ指定が要る）
+  const effectiveSchema = touched ? schemaId : (schemaId || suggested || items[0]?.id || "");
 
   // ジョブ完了まで命令的にポーリング（react-query の refetchInterval より確実）。
   // 締切・dead 終端・恒久エラーで必ず止める（停滞ジョブでの無限ループを防ぐ）。
@@ -93,6 +103,17 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
       <div className="emoji">📄</div>
       <h2>まだ抽出していません</h2>
       <p>この帳票の AI-OCR 抽出を開始します。使用するスキーマ（抽出する項目の定義）を選んでください。</p>
+
+      {suggested && !touched && classify.data?.doc_type && (
+        <div className="extract-suggest" role="status">
+          🔎 推定: <b>{classify.data.doc_type}</b>
+          {classify.data.method !== "declared" && (
+            <span className="sub"> · 信頼度 {Math.round((classify.data.confidence ?? 0) * 100)}%</span>
+          )}
+          <span className="sub">（{classify.data.reason}）</span>
+          <span className="sub">— 違う場合は下で選び直せます</span>
+        </div>
+      )}
 
       <label className="extract-field">
         <span>スキーマ</span>

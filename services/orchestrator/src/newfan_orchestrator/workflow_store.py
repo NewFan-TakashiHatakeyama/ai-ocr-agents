@@ -419,7 +419,7 @@ class PgWorkflowRunStore:
             self._rls(c, tenant_id)
             head = c.execute(
                 text(
-                    "SELECT d.doc_type FROM extraction_runs r JOIN documents d"
+                    "SELECT d.doc_type, d.original_name FROM extraction_runs r JOIN documents d"
                     " ON d.id = r.document_id WHERE r.tenant_id=:t AND r.id=:r"
                 ),
                 {"t": tenant_id, "r": run_id},
@@ -435,6 +435,7 @@ class PgWorkflowRunStore:
         confs = [f["confidence"] for f in fields.values()]
         return {
             "doc_type": head[0] if head else None,
+            "original_name": head[1] if head else None,
             "fields": fields,
             # run 全体の確度は最弱フィールドで代表する（保守的。値が無ければ None → 条件 False）
             "run_confidence": min(confs) if confs else None,
@@ -550,6 +551,42 @@ class PgTriggerStore:
             ).first()
         return row[0] if row else None
 
+    def get_gdrive_connection(self, tenant_id: str, connection_id: str):
+        from sqlalchemy import text
+
+        from newfan_orchestrator.workflow_trigger import GDriveConnection
+
+        # ソース接続は取込のみでデータ流出面が無く、疎通テスト（test_connection）も
+        # postgres 専用のため、untested を弾かない（疎通は同期の成否で確認する）。
+        # disabled だけは尊重する。
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            row = c.execute(
+                text(
+                    "SELECT config->>'folder_id', secret_ref FROM connections"
+                    " WHERE tenant_id=:t AND id=:i AND type='gdrive'"
+                    " AND status <> 'disabled'"
+                ),
+                {"t": tenant_id, "i": connection_id},
+            ).first()
+        if row is None or not row[0]:
+            return None
+        return GDriveConnection(folder_id=row[0], secret_ref=row[1])
+
+    def mark_connection_tested(self, tenant_id: str, connection_id: str) -> None:
+        from sqlalchemy import text
+
+        # untested からのみ昇格（active を巻き戻さない）。同期成功＝疎通OK の記録
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            c.execute(
+                text(
+                    "UPDATE connections SET status='tested'"
+                    " WHERE tenant_id=:t AND id=:i AND status='untested'"
+                ),
+                {"t": tenant_id, "i": connection_id},
+            )
+
     def already_claimed(self, tenant_id, connection_id, source_key, content_hash) -> bool:
         from sqlalchemy import text
 
@@ -630,7 +667,8 @@ class PgTriggerStore:
         return run_id
 
     def register_ingested(
-        self, tenant_id, *, source_key, content_hash, document, pages, matches
+        self, tenant_id, *, source_key, content_hash, document, pages, matches,
+        trigger_type="s3_event",
     ):
         import uuid
 
@@ -717,7 +755,9 @@ class PgTriggerStore:
                         "v": m.workflow_version,
                         "tr": json.dumps(
                             {
-                                "type": "s3_event",
+                                # 取込元の実種別（s3_event / gdrive_event）。監査で
+                                # 出所を誤認しないよう呼び出し元が渡す（レビュー確定）
+                                "type": trigger_type,
                                 "source_key": source_key,
                                 "etag": content_hash,
                                 "node_id": m.node_id,

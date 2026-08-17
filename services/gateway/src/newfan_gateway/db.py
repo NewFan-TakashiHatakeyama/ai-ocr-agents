@@ -485,6 +485,34 @@ class PgAdminRepository:
             created_by=r.created_by,
         )
 
+    def create_rule(self, rec):
+        import json
+
+        with self._engine.begin() as c:
+            self._rls(c, rec.tenant_id)
+            c.execute(
+                text(
+                    "INSERT INTO tenant_rules (id, tenant_id, doc_type, supplier_key, field_name,"
+                    " rule_type, rule_json, status, validation_report, source_correction_ids, created_by)"
+                    " VALUES (:id, :t, :dt, :sk, :fn, :rt, CAST(:rj AS jsonb), :st,"
+                    " CAST(:vr AS jsonb), CAST(:sc AS jsonb), :cb)"
+                ),
+                {
+                    "id": rec.id,
+                    "t": rec.tenant_id,
+                    "dt": rec.doc_type,
+                    "sk": rec.supplier_key,
+                    "fn": rec.field_name,
+                    "rt": rec.rule_type,
+                    "rj": json.dumps(rec.rule_json or {}),
+                    "st": rec.status,
+                    "vr": json.dumps(rec.validation_report) if rec.validation_report else None,
+                    "sc": json.dumps(rec.source_correction_ids or []),
+                    "cb": rec.created_by,
+                },
+            )
+        return self.get_rule(rec.tenant_id, rec.id)
+
     def list_rules(self, tenant_id: str, *, status=None, doc_type=None):
         with self._engine.begin() as c:
             self._rls(c, tenant_id)

@@ -38,6 +38,98 @@ function AdminDenied() {
   );
 }
 
+function LlmHintForm({ onCreated }: { onCreated: () => void }) {
+  const push = useToasts((s) => s.push);
+  const [open, setOpen] = useState(false);
+  const schemas = useQuery({ queryKey: ["schemas"], queryFn: () => api.listSchemas() });
+  const docTypes = schemas.data?.items.map((s) => s.doc_type) ?? [];
+  const [docType, setDocType] = useState("");
+  const [fieldName, setFieldName] = useState("");
+  const [hint, setHint] = useState("");
+  const [desc, setDesc] = useState("");
+
+  const effectiveDoc = docType || docTypes[0] || "";
+  const create = useMutation({
+    mutationFn: () =>
+      api.createLlmHint({
+        doc_type: effectiveDoc,
+        field_name: fieldName.trim() || null,
+        hint_text: hint.trim(),
+        description: desc.trim() || null,
+      }),
+    onSuccess: () => {
+      push({ kind: "ok", message: "LLM最適化ヒントを作成しました（承認待ち）。「有効化」で抽出に反映されます。" });
+      setHint("");
+      setDesc("");
+      setFieldName("");
+      setOpen(false);
+      onCreated();
+    },
+    onError: (e) => push({ kind: "warn", message: `作成できません（${(e as Error).message}）。` }),
+  });
+
+  if (!open) {
+    return (
+      <button className="btn sm primary" onClick={() => setOpen(true)}>
+        ＋ LLM最適化を追加
+      </button>
+    );
+  }
+
+  return (
+    <div className="hint-form">
+      <div className="hint-row">
+        <label>
+          対象の帳票種別
+          <select value={effectiveDoc} onChange={(e) => setDocType(e.target.value)} aria-label="帳票種別">
+            {docTypes.length === 0 && <option value="">（スキーマ未登録）</option>}
+            {docTypes.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          対象項目（任意）
+          <input
+            value={fieldName}
+            onChange={(e) => setFieldName(e.target.value)}
+            placeholder="例: issuer_name（空欄=全項目）"
+            aria-label="対象項目"
+          />
+        </label>
+      </div>
+      <label className="hint-full">
+        指示（LLMへの自然言語ヒント）
+        <textarea
+          value={hint}
+          onChange={(e) => setHint(e.target.value)}
+          rows={3}
+          placeholder="例: 取引先名は右上の会社名を優先し、敬称『御中』は除去する。"
+          aria-label="指示"
+        />
+      </label>
+      <label className="hint-full">
+        メモ（任意・一覧の表示名）
+        <input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="例: 取引先名の取り違え対策" aria-label="メモ" />
+      </label>
+      <div className="hint-actions">
+        <button
+          className="btn sm primary"
+          disabled={create.isPending || !hint.trim() || !effectiveDoc}
+          onClick={() => create.mutate()}
+        >
+          {create.isPending ? "作成中…" : "作成（承認待ちに追加）"}
+        </button>
+        <button className="btn sm ghost" onClick={() => setOpen(false)} disabled={create.isPending}>
+          閉じる
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function RulesPage() {
   const qc = useQueryClient();
   const push = useToasts((s) => s.push);
@@ -72,6 +164,10 @@ export default function RulesPage() {
         <span className="ttl">ルール管理</span>
         {pending > 0 && <span className="chip st-review">承認待ち {pending}</span>}
         <span className="spacer" />
+      </div>
+
+      <div style={{ padding: "14px 22px 0" }}>
+        <LlmHintForm onCreated={() => qc.invalidateQueries({ queryKey: ["rules"] })} />
       </div>
 
       <div style={{ padding: "14px 22px", display: "grid", gridTemplateColumns: "1.55fr 1fr", gap: 14 }}>
@@ -134,7 +230,8 @@ export default function RulesPage() {
               {rules.length === 0 && (
                 <tr>
                   <td colSpan={6} className="sub">
-                    ルールはまだありません。修正学習エージェントが抽出すると承認待ちで表示されます。
+                    ルールはまだありません。修正学習エージェントが抽出するか、上の「＋ LLM最適化を追加」で
+                    抽出LLMへの指示を登録すると、承認待ちで表示されます。
                   </td>
                 </tr>
               )}

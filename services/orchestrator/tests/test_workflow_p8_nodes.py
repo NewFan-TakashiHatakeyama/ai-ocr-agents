@@ -49,7 +49,8 @@ class Sinks:
 
 
 def _run(graph: dict[str, Any], *, fields: Optional[dict[str, Any]] = None,
-         doc_type: str = "invoice") -> tuple[str, InMemoryWorkflowRunStore, Sinks]:
+         doc_type: str = "invoice",
+         original_name: Optional[str] = None) -> tuple[str, InMemoryWorkflowRunStore, Sinks]:
     store = InMemoryWorkflowRunStore()
     store.seed_run("wfrun_p8", tenant_id=TENANT, workflow_id="workflow_p8", graph_json=graph)
     store.seed_webhook(TENANT, "con_slack", "https://hooks.example/slack", "")
@@ -64,15 +65,15 @@ def _run(graph: dict[str, Any], *, fields: Optional[dict[str, Any]] = None,
         checkpointer=MemorySaver(),
     )
     runner.process({"type": "start", "tenant_id": TENANT, "workflow_run_id": "wfrun_p8"})
-    store.seed_extract_result(
-        "run_wf_1",
-        {
-            "doc_type": doc_type,
-            "fields": fields
-            or {"invoice_no": {"value": "GS0001", "confidence": 1.0},
-                "total_amount": {"value": "7003", "confidence": 1.0}},
-        },
-    )
+    result = {
+        "doc_type": doc_type,
+        "fields": fields
+        or {"invoice_no": {"value": "GS0001", "confidence": 1.0},
+            "total_amount": {"value": "7003", "confidence": 1.0}},
+    }
+    if original_name is not None:
+        result["original_name"] = original_name
+    store.seed_extract_result("run_wf_1", result)
     status = runner.process({
         "type": "resume", "tenant_id": TENANT, "workflow_run_id": "wfrun_p8",
         "event": {"kind": "extract_done", "run_id": "run_wf_1", "status": "confirmed"},
@@ -118,6 +119,87 @@ def test_classifyのdefault_routeは対象外でも継続する() -> None:
     status, store, _ = _run(g)
     assert status == "succeeded"
     assert store.node_runs[("wfrun_p8", "c1")]["output"]["known"] is False
+
+
+def test_classifyは内容がスキーマと食い違えば取り違えを止める() -> None:
+    # スキーマは invoice を返すが、ファイル名は発注書 → 内容分類が purchase_order。
+    # 許可リストは invoice のみなので halt する（請求ワークフローへの発注書混入検知）。
+    g = _graph(
+        [*_extract_nodes(),
+         {"id": "c1", "type": "process.classify",
+          "config": {"doc_types": ["invoice"], "on_unknown": "halt"}}],
+        [{"from": "t1", "to": "x1"}, {"from": "x1", "to": "c1"}],
+    )
+    status, store, _ = _run(g, doc_type="invoice", original_name="発注書_ABC商事_0001.pdf")
+    assert status == "failed"
+    assert "分類対象外" in store.runs["wfrun_p8"]["error"]["message"]
+
+
+def test_classifyは内容が許可種別と一致すれば通す() -> None:
+    # ファイル名が請求書 → 内容分類 invoice。許可リストにあるので通す＋観測値を残す。
+    g = _graph(
+        [*_extract_nodes(),
+         {"id": "c1", "type": "process.classify",
+          "config": {"doc_types": ["invoice"], "on_unknown": "halt"}}],
+        [{"from": "t1", "to": "x1"}, {"from": "x1", "to": "c1"}],
+    )
+    status, store, _ = _run(g, doc_type="invoice", original_name="請求書_ABC_2026.pdf")
+    assert status == "succeeded"
+    out = store.node_runs[("wfrun_p8", "c1")]["output"]
+    assert out["known"] is True
+    assert out["content_doc_type"] == "invoice"
+
+
+# ---- 敵対的レビュー確定所見の回帰（2026-08-17） ----
+
+
+def test_classifyは抽出値の他種別語では止めない() -> None:
+    # 請求書の備考が「見積書No…」を引用するのは常態。値を分類信号に使うと
+    # 正当な run が halt した（確定major）。信号はファイル名のみに限定。
+    g = _graph(
+        [*_extract_nodes(),
+         {"id": "c1", "type": "process.classify",
+          "config": {"doc_types": ["invoice"], "on_unknown": "halt"}}],
+        [{"from": "t1", "to": "x1"}, {"from": "x1", "to": "c1"}],
+    )
+    status, store, _ = _run(
+        g,
+        doc_type="invoice",
+        original_name="scan_001.pdf",
+        fields={"note": {"value": "見積書No.Q-1に基づく", "confidence": 1.0}},
+    )
+    assert status == "succeeded"
+    assert store.node_runs[("wfrun_p8", "c1")]["output"]["known"] is True
+
+
+def test_classifyは日本語doc_typesを正準名で同一視する() -> None:
+    # doc_types=["請求書"] のワークフローに正当な請求書（英語系ファイル名）を投入しても
+    # halt しない。従来は内容分類が invoice を返し「請求書」と生文字列比較で不一致→
+    # 恒久 failed だった（確定major）。
+    g = _graph(
+        [*_extract_nodes(),
+         {"id": "c1", "type": "process.classify",
+          "config": {"doc_types": ["請求書"], "on_unknown": "halt"}}],
+        [{"from": "t1", "to": "x1"}, {"from": "x1", "to": "c1"}],
+    )
+    status, store, _ = _run(g, doc_type="invoice", original_name="御請求_8月分.pdf")
+    assert status == "succeeded"
+    out = store.node_runs[("wfrun_p8", "c1")]["output"]
+    assert out["known"] is True
+
+
+def test_classifyは語境界のない埋没ヒットで止めない() -> None:
+    # "order"⊂"Border" の埋没ヒットが confidence 1.0 を出し正当な請求書を
+    # halt させた（確定major）。語境界必須化で発火しない。
+    g = _graph(
+        [*_extract_nodes(),
+         {"id": "c1", "type": "process.classify",
+          "config": {"doc_types": ["invoice"], "on_unknown": "halt"}}],
+        [{"from": "t1", "to": "x1"}, {"from": "x1", "to": "c1"}],
+    )
+    status, store, _ = _run(g, doc_type="invoice", original_name="Border_Inc_2026.pdf")
+    assert status == "succeeded"
+    assert store.node_runs[("wfrun_p8", "c1")]["output"]["known"] is True
 
 
 # ---------- sink.file ----------

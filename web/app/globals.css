@@ -590,6 +590,13 @@ a {
   color: var(--ink2);
 }
 
+/* ワークフロー手動投入（ドキュメント詳細ヘッダ） */
+.run-wf { display: flex; align-items: center; gap: 6px; }
+.run-wf select {
+  padding: 6px 8px; font-size: 12px; border: 1px solid var(--line-strong);
+  border-radius: 8px; background: var(--surface); color: inherit; max-width: 200px;
+}
+
 /* 抽出開始（run 無しの帳票） */
 .extract-start {
   max-width: 460px; margin: 48px auto; text-align: center;
@@ -604,6 +611,17 @@ a {
   background: var(--surface); color: inherit; font-size: 13px; min-width: 200px;
 }
 .extract-hint { color: var(--ink3); font-size: 12px; }
+.extract-suggest {
+  background: #f6fbfa;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  color: var(--ink2);
+  line-height: 1.7;
+}
+.extract-suggest b { color: var(--brand-deep); }
+.extract-suggest .sub { color: var(--ink3); }
 
 /* SCR-02 アップロードのドラッグ&ドロップ */
 .doc-dropzone { position: relative; }
@@ -1206,6 +1224,99 @@ a {
   text-align: center;
   padding: 70px 20px;
   color: var(--ink2);
+}
+
+/* LLM最適化ヒントのオーサリング（③） */
+.hint-form {
+  background: #f6fbfa;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.hint-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink2);
+}
+.hint-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.hint-row label {
+  flex: 1;
+  min-width: 200px;
+}
+.hint-form select,
+.hint-form input,
+.hint-form textarea {
+  font-size: 12.5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 500;
+  font-family: inherit;
+}
+.hint-form textarea {
+  resize: vertical;
+}
+.hint-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* スキーマ新規作成（③ ゼロから項目定義） */
+.schema-newhead {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #f6fbfa;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.schema-newhead label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink2);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.schema-in {
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 9px;
+  background: #fff;
+  color: var(--ink);
+  min-width: 0;
+}
+.schema-newhead .schema-in {
+  flex: 1;
+  max-width: 320px;
+  font-weight: 600;
+}
+.srow .nm.nm-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.srow .nm-edit .schema-in {
+  width: 100%;
+}
+.srow .nm-edit .sub-in {
+  font-size: 10.5px;
+  font-weight: 500;
 }
 
 /* ============ SCR-01 チャットホーム ============ */

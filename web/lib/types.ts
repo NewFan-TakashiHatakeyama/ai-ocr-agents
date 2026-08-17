@@ -115,6 +115,22 @@ export interface ExtractAccepted {
   run_id: string;
 }
 
+export interface ClassifyCandidate {
+  schema_id: string;
+  doc_type: string;
+  score: number;
+}
+
+// 帳票自動分類（⑦）。抽出前にファイル名等から最も近いスキーマを提案する。
+export interface ClassifyResult {
+  suggested_schema_id?: string | null;
+  doc_type?: string | null;
+  confidence: number;
+  reason: string;
+  method: string; // declared / content / filename / heuristic
+  candidates: ClassifyCandidate[];
+}
+
 export interface JobStatus {
   job_id: string;
   kind: string;

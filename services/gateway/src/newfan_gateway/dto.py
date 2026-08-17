@@ -148,6 +148,10 @@ class SchemaList(BaseModel):
 class PutSchemaRequest(BaseModel):
     doc_type: str
     fields: list[SchemaFieldDto]
+    # 新規作成モード: 既存 doc_type があれば E1005 で拒否する。クライアントの重複チェックは
+    # 一覧が陳腐化していると素通りし、既存スキーマを黙って新版で置換してしまうため、
+    # 「作成のつもり」はサーバ側で守る。省略時（false）は従来どおり常に新版作成（§7.2）。
+    create: bool = False
 
 
 class RuleDto(BaseModel):
@@ -356,6 +360,19 @@ class PatchRuleRequest(BaseModel):
     status: str  # "active"（有効化）/ "retired"（退役）
 
 
+class CreateLlmHintRequest(BaseModel):
+    """LLM最適化ヒント（llm_hint）を人が直接オーサリングする（③）。
+
+    決定論変換（regex/vocab）と違い、抽出LLMへの自然言語指示。ゴールデン再現率の
+    検証対象ではなく、admin が明示的に書いた指示として draft で作られ、承認で有効化する。
+    """
+
+    doc_type: str
+    field_name: Optional[str] = None
+    hint_text: str
+    description: Optional[str] = None
+
+
 class ChatRequest(BaseModel):
     message: str
 
@@ -369,6 +386,30 @@ class ChatConfirmResult(BaseModel):
     ok: bool
     message: str
     detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConnectionSyncAccepted(BaseModel):
+    """「今すぐ同期」（⑤⑥）。検知・取込は worker 側ポーラーが q.sync 経由で行う。"""
+
+    queued: bool
+
+
+class ClassifyCandidateDto(BaseModel):
+    schema_id: str
+    doc_type: str
+    score: float
+
+
+class ClassifyResponse(BaseModel):
+    """帳票自動分類（⑦）。抽出前にファイル名等から最も近いスキーマを提案する。"""
+
+    suggested_schema_id: Optional[str] = None
+    doc_type: Optional[str] = None
+    confidence: float = 0.0
+    reason: str = ""
+    # 判定の根拠種別: declared(指定済)/content(本文)/filename(ファイル名)/heuristic
+    method: str = "heuristic"
+    candidates: list[ClassifyCandidateDto] = Field(default_factory=list)
 
 
 class MetricsResponse(BaseModel):

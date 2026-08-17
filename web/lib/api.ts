@@ -2,6 +2,7 @@
 
 import type {
   CatalogDto,
+  ClassifyResult,
   ConnectionDto,
   DryRunResultDto,
   ExtractAccepted,
@@ -102,6 +103,17 @@ export const api = {
 
   getJob: (jobId: string) => request<JobStatus>(`/jobs/${jobId}`),
 
+  // 帳票種別を推定して最も近いスキーマを提案する（⑦, 抽出前サジェスト）
+  classifyDocument: (documentId: string) =>
+    request<ClassifyResult>(`/documents/${documentId}/classify`, { method: "POST" }),
+
+  // 手元の帳票を active なワークフローに手動投入する（source.manual, §7.1）
+  startWorkflowRun: (workflowId: string, documentId: string) =>
+    request<{ workflow_run_id: string; workflow_version: number }>(
+      `/workflows/${workflowId}/runs`,
+      { method: "POST", body: JSON.stringify({ document_id: documentId }) },
+    ),
+
   pageImage: (documentId: string, pageNo: number) =>
     request<SignedUrl>(`/documents/${documentId}/pages/${pageNo}/image`),
 
@@ -127,12 +139,25 @@ export const api = {
 
   // 管理画面（SCR-04/05/06, admin）
   listSchemas: () => request<{ items: SchemaDto[] }>(`/schemas`),
-  putSchema: (docType: string, fields: SchemaFieldDto[]) =>
+  // create=true は新規作成モード: 既存 doc_type ならサーバが E1005(409) で拒否する
+  //（クライアントの重複チェックは一覧が陳腐化していると素通りするため）
+  putSchema: (docType: string, fields: SchemaFieldDto[], opts?: { create?: boolean }) =>
     request<SchemaDto>(`/schemas`, {
       method: "PUT",
-      body: JSON.stringify({ doc_type: docType, fields }),
+      body: JSON.stringify({ doc_type: docType, fields, create: opts?.create ?? false }),
     }),
   listConnections: () => request<{ items: ConnectionDto[] }>(`/connections`),
+  // 接続の登録（⑤⑥ SaaS連携）。秘密は config に入れず secret_ref で渡す（§16.5）
+  createConnection: (input: {
+    type: string;
+    name: string;
+    config: Record<string, unknown>;
+    secret_ref?: string | null;
+  }) =>
+    request<ConnectionDto>(`/connections`, { method: "POST", body: JSON.stringify(input) }),
+  // 「今すぐ同期」: gdrive 接続の監視フォルダを即時に差分検知する（worker が実行）
+  syncConnection: (connectionId: string) =>
+    request<{ queued: boolean }>(`/connections/${connectionId}/sync`, { method: "POST" }),
   listRules: (status?: string) =>
     request<{ items: RuleDto[] }>(`/rules${status ? `?status=${status}` : ""}`),
   patchRule: (ruleId: string, status: string) =>
@@ -140,6 +165,14 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ status }),
     }),
+  // LLM最適化ヒント（llm_hint）を人が直接オーサリングする（③）
+  createLlmHint: (input: {
+    doc_type: string;
+    field_name?: string | null;
+    hint_text: string;
+    description?: string | null;
+  }) =>
+    request<RuleDto>(`/rules`, { method: "POST", body: JSON.stringify(input) }),
   metrics: () => request<MetricsResponse>(`/metrics/summary`),
 
   // チャットホーム（SCR-01）。SSE を fetch ストリームで購読する。

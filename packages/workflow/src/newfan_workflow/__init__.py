@@ -6,6 +6,14 @@ orchestrator（workflow-runner）は実行時の解釈に、それぞれこの�
 乖離を構造的に無くすため。
 """
 
+from newfan_workflow.classify import (
+    ClassifyCandidate,
+    ClassifyOutcome,
+    build_candidate,
+    canonical_doc_type,
+    classify_text,
+    synonyms_for,
+)
 from newfan_workflow.expr import (
     Condition,
     EvalContext,
@@ -26,6 +34,8 @@ from newfan_workflow.models import (
 )
 
 __all__ = [
+    "ClassifyCandidate",
+    "ClassifyOutcome",
     "Condition",
     "Edge",
     "EvalContext",
@@ -33,6 +43,10 @@ __all__ = [
     "FieldView",
     "Finding",
     "NODE_CONFIG_MODELS",
+    "build_candidate",
+    "canonical_doc_type",
+    "classify_text",
+    "synonyms_for",
     "Severity",
     "WorkflowGraph",
     "WorkflowNode",
