@@ -373,11 +373,13 @@ class GDrivePoller:
         self._enqueue = enqueue
         self._resolve_secret = resolve_secret
         self._interval = poll_interval_sec
-        self._last_poll = 0.0
+        # 「未実行」は None。0.0 を番兵にすると、起動直後のホスト（monotonic が
+        # interval 未満）で初回ポーリングまで間引かれる（CI の Linux VM で実際に発生）
+        self._last_poll: Optional[float] = None
 
     def run_once(self) -> int:
         now = time.monotonic()
-        if now - self._last_poll < self._interval:
+        if self._last_poll is not None and now - self._last_poll < self._interval:
             return 0
         self._last_poll = now
         return self.poll_all()
