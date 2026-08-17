@@ -48,6 +48,17 @@ class ContextStore(Protocol):
         """extraction_runs.metrics へ数値を**加算**で追記する（LLM トークン等）。"""
         ...
 
+    def mark_run_failed(self, tenant_id: str, run_id: str) -> None:
+        """processing のまま失敗した run を failed 終端へ落とす（§9）。
+
+        extract は run を processing で作る。graph 実行が例外で落ちると job は failed に
+        なるが run は processing のまま残り、has_active_run（processing/needs_review を
+        active 判定）がそれを掴んで再抽出が E1005 で塞がれる＝帳票が行き止まりになる。
+        WHERE status='processing' 限定なので、再配信が成功して needs_review になった run は
+        触らない（自己回復）。
+        """
+        ...
+
     def set_job_status(
         self, tenant_id: str, job_id: str, status: str, *, error_code: Optional[str] = None
     ) -> None:
@@ -139,6 +150,13 @@ class InMemoryContextStore:
         m = self.run_metrics.setdefault(run_id, {})
         for k, v in patch.items():
             m[k] = m.get(k, 0) + v
+
+    def mark_run_failed(self, tenant_id: str, run_id: str) -> None:
+        if self._run_status.get(run_id) == "processing":
+            self._run_status[run_id] = "failed"
+            seed = self._runs.get(run_id)
+            if seed is not None:
+                self._document_status[seed.document_id] = "failed"
 
     def set_job_status(
         self, tenant_id: str, job_id: str, status: str, *, error_code: Optional[str] = None

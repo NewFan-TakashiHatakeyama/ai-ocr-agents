@@ -2,7 +2,10 @@
 
 import type {
   CatalogDto,
+  ConnectionDto,
   DryRunResultDto,
+  ExtractAccepted,
+  JobStatus,
   LintResultDto,
   WorkflowDto,
   WorkflowGraphDto,
@@ -82,6 +85,23 @@ export const api = {
   getResult: (documentId: string) =>
     request<ResultResponse>(`/documents/${documentId}/result`),
 
+  // 抽出（AI-OCR）を開始する。schema_id 未指定でも走るが、項目を出すにはスキーマ指定を推奨。
+  // Idempotency-Key で連打・再送の二重 run を防ぐ（gateway が同キーをキャッシュ応答する）。
+  extract: (
+    documentId: string,
+    opts?: { schema_id?: string; force_vl?: boolean; idempotencyKey?: string },
+  ) =>
+    request<ExtractAccepted>(`/documents/${documentId}/extract`, {
+      method: "POST",
+      headers: opts?.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : undefined,
+      body: JSON.stringify({
+        schema_id: opts?.schema_id ?? null,
+        options: { force_vl: opts?.force_vl ?? false },
+      }),
+    }),
+
+  getJob: (jobId: string) => request<JobStatus>(`/jobs/${jobId}`),
+
   pageImage: (documentId: string, pageNo: number) =>
     request<SignedUrl>(`/documents/${documentId}/pages/${pageNo}/image`),
 
@@ -112,6 +132,7 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ doc_type: docType, fields }),
     }),
+  listConnections: () => request<{ items: ConnectionDto[] }>(`/connections`),
   listRules: (status?: string) =>
     request<{ items: RuleDto[] }>(`/rules${status ? `?status=${status}` : ""}`),
   patchRule: (ruleId: string, status: string) =>

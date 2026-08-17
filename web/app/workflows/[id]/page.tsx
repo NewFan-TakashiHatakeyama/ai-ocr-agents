@@ -41,7 +41,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import Form from "@rjsf/core";
-import type { RJSFSchema } from "@rjsf/utils";
+import type { RJSFSchema, UiSchema } from "@rjsf/utils";
 import validator from "@rjsf/validator-ajv8";
 
 import { AppShell } from "@/components/AppShell";
@@ -56,6 +56,13 @@ import type {
 } from "@/lib/types";
 
 import { CATEGORY, NodeIcon, TYPE_LABEL } from "../node-icons";
+import { fieldLabel, injectPickers, jaTranslateString, localizeSchema, pruneEmpty } from "../field-labels";
+
+// 複数行で書くフィールドは textarea にする（1行 input だと窮屈で読みにくい）
+const UI_SCHEMA_BY_TYPE: Record<string, UiSchema> = {
+  "sink.notify": { template: { "ui:widget": "textarea", "ui:options": { rows: 3 } } },
+  "sink.webhook": { payload_template: { "ui:widget": "textarea", "ui:options": { rows: 4 } } },
+};
 
 // ---------- ノードの見た目 ----------
 
@@ -176,6 +183,12 @@ function WorkflowEditor({ id }: { id: string }) {
     queryKey: ["workflow-catalog"],
     queryFn: () => api.workflowCatalog(),
   });
+  // schema_id / connection_id を手打ちさせず選ばせるための候補
+  const { data: schemaList } = useQuery({ queryKey: ["schemas"], queryFn: () => api.listSchemas() });
+  const { data: connList } = useQuery({
+    queryKey: ["connections"],
+    queryFn: () => api.listConnections(),
+  });
 
   // エディタのローカル状態（保存で PUT）。wf 到着時に一度だけ流し込む
   const [name, setName] = useState("");
@@ -223,6 +236,8 @@ function WorkflowEditor({ id }: { id: string }) {
       version: 1,
       nodes: rfNodes.map((rn) => ({
         ...rn.data.wf,
+        // 空欄の Optional 項目（""）は送らない（未入力=None として扱う）
+        config: pruneEmpty(rn.data.wf.config),
         pos: [Math.round(rn.position.x), Math.round(rn.position.y)] as [number, number],
       })),
       edges,
@@ -392,6 +407,37 @@ function WorkflowEditor({ id }: { id: string }) {
       ns.map((n) => (n.selected !== (n.id === nid) ? { ...n, selected: n.id === nid } : n)),
     );
 
+  // E4001（config スキーマ不正）を「どのノードのどの項目か」の日本語文へ。
+  // 保存・点検が失敗したとき、原因が分からないと利用者は直しようがない。
+  const schemaErrorMessage = (e: unknown, prefix: string): string => {
+    const errs =
+      (e instanceof ApiError &&
+        (e.details as { errors?: { loc?: string; msg?: string }[] } | undefined)?.errors) ||
+      null;
+    if (errs?.length) {
+      const g = graph();
+      const parts = errs.slice(0, 2).map((er) => {
+        const loc = er.loc ?? "";
+        const m = /^nodes\.(\d+)\./.exec(loc);
+        const node = m ? g.nodes[Number(m[1])] : undefined;
+        const nid = node?.id ?? loc;
+        const nodeName = node ? nodeLabelById.get(node.id) : undefined;
+        // フィールド名も日本語ラベルへ（フォームと一致させる）。array 添字は1つ上を使う
+        const segs = loc.split(".");
+        const rawField = /^\d+$/.test(segs[segs.length - 1] ?? "")
+          ? (segs[segs.length - 2] ?? "")
+          : (segs[segs.length - 1] ?? "");
+        const schemaTitle = node
+          ? ((catalog?.types[node.type] as { title?: string } | undefined)?.title)
+          : undefined;
+        const field = fieldLabel(schemaTitle, rawField) ?? rawField;
+        return `${nodeName ? `${nodeName}（${nid}）` : nid} の「${field}」: ${er.msg}`;
+      });
+      return `${prefix} — ${parts.join(" / ")}`;
+    }
+    return `${prefix}（${(e as Error).message}）。`;
+  };
+
   const save = useMutation({
     mutationFn: () => api.putWorkflow(id, name, graph()),
     onSuccess: async (w) => {
@@ -404,25 +450,7 @@ function WorkflowEditor({ id }: { id: string }) {
       setFindings(lint.findings);
       setActivatable(lint.activatable);
     },
-    onError: (e) => {
-      // E4001（config スキーマ不正）は「どのノードのどの項目か」まで示す。
-      // トーストが原因を伝えないと、利用者は保存できない理由を探せない。
-      const errs = (e instanceof ApiError &&
-        (e.details as { errors?: { loc?: string; msg?: string }[] } | undefined)?.errors) || null;
-      if (errs?.length) {
-        const g = graph();
-        const parts = errs.slice(0, 2).map((er) => {
-          const loc = er.loc ?? "";
-          const m = /^nodes\.(\d+)\./.exec(loc);
-          const nid = m ? (g.nodes[Number(m[1])]?.id ?? loc) : loc;
-          const field = loc.split(".").pop() ?? "";
-          return `${nid} の ${field}: ${er.msg}`;
-        });
-        push({ kind: "warn", message: `保存できません — ${parts.join(" / ")}` });
-        return;
-      }
-      push({ kind: "warn", message: `保存に失敗しました（${(e as Error).message}）。` });
-    },
+    onError: (e) => push({ kind: "warn", message: schemaErrorMessage(e, "保存できません") }),
   });
 
   const runLint = useMutation({
@@ -430,18 +458,25 @@ function WorkflowEditor({ id }: { id: string }) {
     onSuccess: (r) => {
       setFindings(r.findings);
       setActivatable(r.activatable && !dirty);
+      const errN = r.findings.filter((f) => f.severity === "error").length;
+      const warnN = r.findings.filter((f) => f.severity === "warning").length;
       push({
-        kind: r.findings.some((f) => f.severity === "error") ? "warn" : "ok",
-        message: `lint: エラー ${r.findings.filter((f) => f.severity === "error").length} / 警告 ${r.findings.filter((f) => f.severity === "warning").length}`,
+        kind: errN > 0 ? "warn" : "ok",
+        message:
+          errN + warnN === 0
+            ? "点検しました。問題は見つかりませんでした。"
+            : `点検しました。エラー ${errN} 件 / 警告 ${warnN} 件`,
       });
     },
+    // config が未入力などでグラフ自体が検証を通らないと 422。何も反応しないと
+    // 利用者は原因が分からないため、どのノードのどの項目かを保存と同じ形で示す
+    onError: (e) => push({ kind: "warn", message: schemaErrorMessage(e, "点検できません") }),
   });
 
   const runDryRun = useMutation({
     mutationFn: () => api.dryRunWorkflow(id),
     onSuccess: (r) => setDryRun(r),
-    onError: (e) =>
-      push({ kind: "warn", message: `dry-run に失敗しました（${(e as Error).message}）。` }),
+    onError: (e) => push({ kind: "warn", message: schemaErrorMessage(e, "出力を確認できません") }),
   });
 
   const activate = useMutation({
@@ -467,9 +502,79 @@ function WorkflowEditor({ id }: { id: string }) {
   });
 
   const selected = rfNodes.find((n) => n.selected)?.data.wf ?? null;
-  const selectedSchema = selected
+  const rawSchema = selected
     ? ((catalog?.types[selected.type] ?? null) as RJSFSchema | null)
     : null;
+  const selSchemaId = selected?.config?.schema_id;
+  const selConnId = selected?.config?.connection_id;
+  // 日本語化 + schema_id/connection_id を実在候補のドロップダウンへ差し替える。
+  // 現在値を候補に残すため、その値も依存に含める（無関係な編集では再計算しない）。
+  const selectedSchema = useMemo(() => {
+    if (!rawSchema || !selected) return null;
+    const localized = localizeSchema(rawSchema);
+    return injectPickers(localized, {
+      nodeType: selected.type,
+      config: selected.config,
+      schemas: schemaList?.items ?? [],
+      connections: connList?.items ?? [],
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawSchema, selected?.type, selSchemaId, selConnId, schemaList, connList]);
+  const selectedUiSchema = selected ? UI_SCHEMA_BY_TYPE[selected.type] : undefined;
+
+  // 点検結果・出力プレビューで node_id を日本語ノード名に読み替えるための表
+  const nodeLabelById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const n of rfNodes) m.set(n.id, TYPE_LABEL[n.data.wf.type] ?? n.data.wf.type);
+    return m;
+  }, [rfNodes]);
+
+  // DB 格納の「どの列にどんな値が入るか」を、直前の map_fields からテーブル用に組む。
+  // dry-run（プレビュー=実 SQL）と同じ前段走査（_map_preds）に合わせる。
+  const dbWriteTable = (
+    sinkId: string,
+  ): { rows: { column: string; source: string; note?: string }[]; target?: string; method: string } | null => {
+    const sink = rfNodes.find((n) => n.id === sinkId)?.data.wf;
+    if (!sink || sink.type !== "sink.db_write") return null;
+    const cfg = sink.config as { table?: string; mode?: string; keys?: string[] };
+    const preds = new Set<string>();
+    for (const e of edges) if (e.to === sinkId) preds.add(e.from);
+    for (const n of rfNodes) {
+      if (n.data.wf.type !== "branch.condition") continue;
+      const c = n.data.wf.config as { branches?: { to: string }[]; else?: string };
+      const targets = new Set([...(c.branches ?? []).map((b) => b.to), ...(c.else ? [c.else] : [])]);
+      if (targets.has(sinkId)) preds.add(n.id);
+    }
+    const rows: { column: string; source: string; note?: string }[] = [];
+    for (const pid of [...preds].sort()) {
+      const p = rfNodes.find((n) => n.id === pid)?.data.wf;
+      if (p?.type !== "transform.map_fields") continue;
+      const mc = p.config as {
+        mappings?: { from?: string; to: string; const?: string; format?: string; mask?: boolean }[];
+      };
+      for (const mp of mc.mappings ?? []) {
+        if (rows.some((r) => r.column === mp.to)) continue;
+        const source =
+          mp.const != null && mp.const !== ""
+            ? `固定値「${mp.const}」`
+            : mp.from
+              ? `抽出値「${mp.from}」`
+              : "（未設定）";
+        const notes: string[] = [];
+        if (mp.format) notes.push(`書式: ${mp.format}`);
+        if (mp.mask) notes.push("マスク");
+        rows.push({ column: mp.to, source, note: notes.join(" / ") || undefined });
+      }
+    }
+    if ((cfg.mode ?? "") === "insert") {
+      rows.push({ column: "nf_write_key", source: "自動（重複防止キー）" });
+    }
+    const method =
+      cfg.mode === "upsert"
+        ? `追加または更新（重複判定: ${(cfg.keys ?? []).join(", ") || "―"}）`
+        : "新規追加";
+    return { rows, target: cfg.table, method };
+  };
 
   if (error instanceof ApiError && error.status === 403) {
     return (
@@ -511,8 +616,12 @@ function WorkflowEditor({ id }: { id: string }) {
         {wf && <span className="sub">v{wf.version}</span>}
         {dirty && <span className="sub" style={{ color: "var(--warn, #d98a1f)" }}>未保存</span>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <button className="btn" onClick={() => runLint.mutate()}>
-            lint
+          <button
+            className="btn"
+            onClick={() => runLint.mutate()}
+            title="設定の不備や配線ミスを点検します"
+          >
+            設定を点検
           </button>
           <button className="btn" onClick={() => save.mutate()} disabled={save.isPending}>
             保存
@@ -521,9 +630,9 @@ function WorkflowEditor({ id }: { id: string }) {
             className="btn"
             onClick={() => runDryRun.mutate()}
             disabled={dirty}
-            title={dirty ? "先に保存してください" : "sink のプレビュー（実 SQL / ペイロード）"}
+            title={dirty ? "先に保存してください" : "出力ノードが実際に書き込む・送信する内容を、実行せずに確認します"}
           >
-            dry-run
+            出力を確認
           </button>
           {wf?.status === "active" ? (
             <button className="btn" onClick={() => pause.mutate()}>
@@ -538,11 +647,11 @@ function WorkflowEditor({ id }: { id: string }) {
                 dirty
                   ? "先に保存してください"
                   : activatable
-                    ? "有効化（版の固定）"
-                    : "lint（保存後）が error 0 になると有効化できます"
+                    ? "このワークフローを有効にして自動実行を開始します"
+                    : "「設定を点検」でエラーが 0 件になると有効にできます"
               }
             >
-              有効化
+              有効にする
             </button>
           )}
         </div>
@@ -635,12 +744,14 @@ function WorkflowEditor({ id }: { id: string }) {
           {selected && selectedSchema ? (
             <div className="wf-config">
               <div className="wf-pane-title">
-                {TYPE_LABEL[selected.type] ?? selected.type}
+                設定：{TYPE_LABEL[selected.type] ?? selected.type}
                 <span className="sub" style={{ marginLeft: 6 }}>{selected.id}</span>
               </div>
               <Form
                 key={selected.id}
                 schema={selectedSchema}
+                uiSchema={selectedUiSchema}
+                translateString={jaTranslateString}
                 validator={validator}
                 formData={selected.config}
                 liveValidate={false}
@@ -674,32 +785,111 @@ function WorkflowEditor({ id }: { id: string }) {
               </Form>
             </div>
           ) : (
-            <div className="wf-config empty">ノードを選択すると設定フォームが出ます。</div>
+            <div className="wf-config empty">
+              キャンバスのノードを選ぶと、ここに設定が表示されます。
+            </div>
           )}
 
           <div className="wf-findings">
-            <div className="wf-pane-title">lint 指摘</div>
-            {findings.length === 0 && <div className="sub">指摘はありません。</div>}
+            <div className="wf-pane-title">点検結果</div>
+            {findings.length === 0 && (
+              <div className="sub">まだ点検していません（「設定を点検」を押してください）。</div>
+            )}
             {findings.map((f, i) => (
               <button
                 key={i}
                 className={`wf-finding ${f.severity}`}
                 onClick={() => f.node_id && selectNode(f.node_id)}
+                title={f.node_id ? "クリックで該当ノードを選択" : undefined}
               >
-                <b>{f.rule}</b> {f.message}
-                {f.node_id ? `（${f.node_id}）` : ""}
+                <span className={`wf-sev ${f.severity}`}>
+                  {f.severity === "error" ? "エラー" : "警告"}
+                </span>
+                {f.message}
+                {f.node_id && <span className="wf-nodetag">{nodeLabelById.get(f.node_id) ?? f.node_id}</span>}
               </button>
             ))}
           </div>
 
           {dryRun && (
             <div className="wf-findings">
-              <div className="wf-pane-title">dry-run（プレビュー = 実 SQL）</div>
+              <div className="wf-pane-title">出力プレビュー</div>
+              <div className="sub" style={{ marginBottom: 6 }}>
+                実行はせず、DB 格納・Webhook が書き込む・送信する内容を確認できます
+                （通知・ファイル出力はプレビュー対象外）。
+              </div>
+              {dryRun.sinks.length === 0 && (
+                <div className="sub">
+                  {rfNodes.some((n) =>
+                    ["sink.notify", "sink.file"].includes(n.data.wf.type),
+                  )
+                    ? "通知・ファイル出力ノードは、このプレビューの対象外です（DB 格納・Webhook のみ表示します）。"
+                    : "プレビュー対象の出力ノード（DB 格納・Webhook）がありません。"}
+                </div>
+              )}
               {dryRun.sinks.map((s2) => (
-                <div key={s2.node_id} className={`wf-finding ${s2.ok ? "warning" : "error"}`}>
-                  <b>{s2.node_id}</b> {s2.node_type} {s2.ok ? "OK" : `NG: ${s2.error}`}
-                  {s2.sql && <pre className="wf-sql">{s2.sql}</pre>}
-                  {s2.payload && <pre className="wf-sql">{JSON.stringify(s2.payload, null, 1)}</pre>}
+                <div key={s2.node_id} className={`wf-preview ${s2.ok ? "ok" : "ng"}`}>
+                  <div className="wf-preview-head">
+                    <span className="wf-preview-node">
+                      {TYPE_LABEL[s2.node_type] ?? s2.node_type}
+                      <span className="wf-nodetag">{s2.node_id}</span>
+                    </span>
+                    <span className={`wf-sev ${s2.ok ? "ok" : "error"}`}>
+                      {s2.ok ? "OK" : "エラー"}
+                    </span>
+                  </div>
+                  {!s2.ok && s2.error && <div className="wf-preview-err">{s2.error}</div>}
+                  {(() => {
+                    // DB 格納は SQL ではなくテーブル形式で「どの列に何が入るか」を見せる
+                    const t = s2.ok && s2.node_type === "sink.db_write" ? dbWriteTable(s2.node_id) : null;
+                    if (!t) return null;
+                    return (
+                      <>
+                        <div className="wf-preview-target">
+                          書き込み先：<b>{t.target ?? "（未設定）"}</b>
+                          <span className="wf-nodetag">{t.method}</span>
+                        </div>
+                        <table className="wf-dbtable">
+                          <thead>
+                            <tr>
+                              <th>列（テーブルの項目）</th>
+                              <th>入る値</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {t.rows.map((r) => (
+                              <tr key={r.column}>
+                                <td className="wf-dbcol">{r.column}</td>
+                                <td>
+                                  {r.source}
+                                  {r.note && <span className="wf-dbnote">{r.note}</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {s2.sql && (
+                          <details className="wf-sqldetails">
+                            <summary>SQL を表示（上級者向け）</summary>
+                            <pre className="wf-sql">{s2.sql}</pre>
+                          </details>
+                        )}
+                      </>
+                    );
+                  })()}
+                  {/* db_write 以外（webhook 等）は従来どおり SQL / ペイロードを表示 */}
+                  {s2.sql && s2.node_type !== "sink.db_write" && (
+                    <>
+                      <div className="wf-preview-label">書き込まれる SQL</div>
+                      <pre className="wf-sql">{s2.sql}</pre>
+                    </>
+                  )}
+                  {s2.payload && (
+                    <>
+                      <div className="wf-preview-label">送信・出力される内容</div>
+                      <pre className="wf-sql">{JSON.stringify(s2.payload, null, 2)}</pre>
+                    </>
+                  )}
                 </div>
               ))}
             </div>

@@ -133,6 +133,9 @@ class SchemaFieldDto(BaseModel):
 
 
 class SchemaDto(BaseModel):
+    # id（field_schemas.id）は抽出やワークフローの schema_id に使う。UI がスキーマを
+    # 選ばせるには id が要る（従来は doc_type しか返しておらず ID を手転記していた）。
+    id: str
     doc_type: str
     version: int
     fields: list[SchemaFieldDto]
