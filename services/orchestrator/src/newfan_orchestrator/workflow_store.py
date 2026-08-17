@@ -573,6 +573,20 @@ class PgTriggerStore:
             return None
         return GDriveConnection(folder_id=row[0], secret_ref=row[1])
 
+    def mark_connection_tested(self, tenant_id: str, connection_id: str) -> None:
+        from sqlalchemy import text
+
+        # untested からのみ昇格（active を巻き戻さない）。同期成功＝疎通OK の記録
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            c.execute(
+                text(
+                    "UPDATE connections SET status='tested'"
+                    " WHERE tenant_id=:t AND id=:i AND status='untested'"
+                ),
+                {"t": tenant_id, "i": connection_id},
+            )
+
     def already_claimed(self, tenant_id, connection_id, source_key, content_hash) -> bool:
         from sqlalchemy import text
 

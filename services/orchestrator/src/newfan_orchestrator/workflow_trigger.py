@@ -64,6 +64,7 @@ class TriggerStore(Protocol):
     def get_gdrive_connection(
         self, tenant_id: str, connection_id: str
     ) -> Optional[GDriveConnection]: ...
+    def mark_connection_tested(self, tenant_id: str, connection_id: str) -> None: ...
     def already_claimed(
         self, tenant_id: str, connection_id: str, source_key: str, content_hash: str
     ) -> bool: ...
@@ -440,6 +441,10 @@ class GDrivePoller:
         if conn.secret_ref and self._resolve_secret is not None:
             secret = self._resolve_secret(conn.secret_ref)
         files = self._provider.list_files(folder_id=conn.folder_id, secret=secret)
+        # フォルダの一覧取得に成功＝疎通OK。gdrive の疎通テストは gateway からは
+        # できない（プロバイダは worker 側にしか無い）ため、同期の成功をもって
+        # untested → tested に昇格させる（lint L010 / connection_ok が要求する状態）。
+        self._store.mark_connection_tested(tenant_id, connection_id)
         processed = 0
         for f in files:
             matches = match_gdrive_event(workflows, connection_id, f.name)
@@ -545,6 +550,10 @@ class InMemoryTriggerStore:
         self, tenant_id: str, connection_id: str
     ) -> Optional[GDriveConnection]:
         return self.gdrive_connections.get((tenant_id, connection_id))
+
+    def mark_connection_tested(self, tenant_id: str, connection_id: str) -> None:
+        self.tested_connections = getattr(self, "tested_connections", set())
+        self.tested_connections.add((tenant_id, connection_id))
 
     def already_claimed(self, tenant_id, connection_id, source_key, content_hash) -> bool:
         return (tenant_id, connection_id, source_key, content_hash) in self.claims

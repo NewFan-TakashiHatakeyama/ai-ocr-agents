@@ -292,17 +292,24 @@ def main() -> None:
                 trigger.run_once()  # 5 秒間隔で SQS をポーリング（内部で間引く）
             ticker.run_once()  # source.schedule の分ティック（分が変わった時だけ動く）
             if gdrive_poller is not None:
-                gdrive_poller.run_once()  # interval おきに Drive を差分検知（内部で間引く）
-                for msg_id, payload in gdrive_sync_consumer.consume(count=5, block_ms=0):
-                    try:
-                        n = gdrive_poller.sync_now(
-                            payload.get("tenant_id", ""), payload.get("connection_id", "")
-                        )
-                        print(f"[worker] gdrive 今すぐ同期: {payload.get('connection_id')} → {n} 件")
-                    except Exception:  # noqa: BLE001 - 同期失敗でループを止めない
-                        logging.getLogger(__name__).exception("[gdrive] 今すぐ同期に失敗")
-                    # 同期は毎ポーリングでも到達するため at-most-once で ack（重複実行の害が無い）
-                    gdrive_sync_consumer.ack(msg_id)
+                try:
+                    gdrive_poller.run_once()  # interval おきに Drive を差分検知（内部で間引く）
+                    # 注意: Redis の BLOCK 0 は「無限ブロック」。空キューで主ループが
+                    # 固まりソケットタイムアウトで落ちる（実 compose で検出）→ 1ms
+                    for msg_id, payload in gdrive_sync_consumer.consume(count=5, block_ms=1):
+                        try:
+                            n = gdrive_poller.sync_now(
+                                payload.get("tenant_id", ""), payload.get("connection_id", "")
+                            )
+                            print(
+                                f"[worker] gdrive 今すぐ同期: {payload.get('connection_id')} → {n} 件"
+                            )
+                        except Exception:  # noqa: BLE001 - 同期失敗でループを止めない
+                            logging.getLogger(__name__).exception("[gdrive] 今すぐ同期に失敗")
+                        # 同期は毎ポーリングでも到達するため at-most-once で ack（重複実行の害が無い）
+                        gdrive_sync_consumer.ack(msg_id)
+                except Exception:  # noqa: BLE001 - gdrive 区画の失敗で抽出/実行を殺さない
+                    logging.getLogger(__name__).exception("[gdrive] ポーリング区画で例外")
     print("[worker] SIGTERM 受信: 停止しました")
 
 

@@ -139,6 +139,16 @@ def test_sync_nowは指定接続だけを即時同期する(tmp_path) -> None:
     assert len(enqueued) == 1
 
 
+def test_同期成功で接続がtestedへ昇格する(tmp_path) -> None:
+    # gdrive の疎通テストは gateway からできない（プロバイダは worker 側）ため、
+    # フォルダ一覧の取得成功をもって untested→tested に昇格させる（lint L010 対応）
+    store = InMemoryTriggerStore()
+    _seed(store, tmp_path)
+    poller, _ = _poller(store, str(tmp_path))
+    poller.sync_now(TENANT, "con_gd")  # ファイルが無くても一覧成功＝疎通OK
+    assert (TENANT, "con_gd") in store.tested_connections
+
+
 def test_run_onceはinterval内の再実行を間引く(tmp_path) -> None:
     store = InMemoryTriggerStore()
     _seed(store, tmp_path)

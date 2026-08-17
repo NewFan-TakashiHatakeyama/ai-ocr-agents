@@ -112,6 +112,8 @@ function CreateGDriveForm({ onCreated }: { onCreated: () => void }) {
       <p className="sub" style={{ margin: 0 }}>
         フォルダに追加されたファイルは自動で取り込まれ、Google Drive
         トリガーのワークフローが起動します（環境稼働中のみ・数分間隔）。
+        作成後に「今すぐ同期」を1回実行すると疎通確認（テスト済）になり、
+        ワークフローの有効化に使えるようになります。
       </p>
       <div className="hint-actions">
         <button
