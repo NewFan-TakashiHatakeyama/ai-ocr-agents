@@ -40,6 +40,16 @@ const SCHEMA_LABELS: Record<string, SchemaLabels> = {
       help: "取り込むファイルの拡張子（.pdf など。ドット始まり）",
     },
   },
+  GDriveEventConfig: {
+    connection_id: {
+      label: "接続先（Google Drive）",
+      help: "監視するドライブフォルダの接続を選びます（フォルダは接続側で設定）",
+    },
+    extensions: {
+      label: "対象の拡張子",
+      help: "取り込むファイルの拡張子（.pdf など。ドット始まり）",
+    },
+  },
   EmailAttachmentConfig: {
     connection_id: { label: "接続先（メール）" },
     from_filter: { label: "差出人で絞り込み", help: "任意。指定した差出人のメールだけ対象にします" },
@@ -220,6 +230,7 @@ function localizeObject(obj: SchemaNode): void {
 // 該当 type の接続だけを選ばせる（DD-12: db_write は postgres 限定 等）。
 const CONNECTION_TYPE_BY_NODE: Record<string, string> = {
   "source.s3_event": "s3",
+  "source.gdrive_event": "gdrive",
   "sink.db_write": "postgres",
   "sink.webhook": "webhook",
   "sink.notify": "webhook",

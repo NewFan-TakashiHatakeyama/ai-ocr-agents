@@ -193,10 +193,47 @@ def test_scheduleのcronは5フィールド() -> None:
 
 
 def test_catalogは全ノード種別のJSONSchemaを返す() -> None:
-    # SCR-07 の設定フォームはここから自動生成する（13 種を手書きしない）
+    # SCR-07 の設定フォームはここから自動生成する（手書きしない）
     schemas = catalog()
     assert set(schemas) == set(NODE_CONFIG_MODELS)
-    assert len(schemas) == 13
+    assert len(schemas) == 14  # 13 + source.gdrive_event（⑤⑥）
     assert "schema_id" in schemas["process.extract"]["required"]
     # extra=forbid が JSON Schema にも出る（フォーム側で未知キーを出さない）
     assert schemas["process.extract"]["additionalProperties"] is False
+
+
+# ---- ⑤⑥ SaaS連携: source.gdrive_event（2026-08-17） ----
+
+
+def test_gdrive_eventノードを読める() -> None:
+    from newfan_workflow import WorkflowGraph
+
+    g = WorkflowGraph.model_validate(
+        {
+            "version": 1,
+            "nodes": [
+                {"id": "t1", "type": "source.gdrive_event",
+                 "config": {"connection_id": "con_gd"}},
+                {"id": "x1", "type": "process.extract", "config": {"schema_id": "s1"}},
+            ],
+            "edges": [{"from": "t1", "to": "x1"}],
+        }
+    )
+    node = g.get("t1")
+    assert node is not None and node.type == "source.gdrive_event"
+    # 既定の拡張子フィルタ（S3 トリガーと同じ）
+    assert ".pdf" in node.config.extensions
+
+
+def test_gdrive_eventはカタログに載る() -> None:
+    from newfan_workflow import catalog
+
+    assert "source.gdrive_event" in catalog()
+
+
+def test_gdrive_eventの拡張子はドット始まり必須() -> None:
+    import pytest
+    from newfan_workflow.models import GDriveEventConfig
+
+    with pytest.raises(Exception):
+        GDriveEventConfig(connection_id="c", extensions=["pdf"])

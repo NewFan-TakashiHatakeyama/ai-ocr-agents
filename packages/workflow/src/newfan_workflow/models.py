@@ -58,6 +58,32 @@ class EmailAttachmentConfig(_Cfg):
     subject_filter: Optional[str] = None
 
 
+class GDriveEventConfig(_Cfg):
+    """Google Drive フォルダ監視トリガー（⑤⑥ SaaS連携）。
+
+    常駐は増やさない: orchestrator-worker 内のポーラーが up の間だけ
+    GDRIVE_POLL_INTERVAL_SEC おきに新着を検知する（source.schedule の分ティックと同型）。
+    down 中の新着はファイルが Drive 側に残っているため、次の up のポーリングで
+    遡って取り込まれる（s3_event の SQS 滞留 drain と同じ「後追い」保証）。
+
+    接続は type=gdrive（config.folder_id、OAuth リフレッシュトークンは secret_ref）。
+    どのフォルダを見るかは接続側が持つ（テナントは自分の folder_id を意識しない）。
+    """
+
+    connection_id: str = Field(min_length=1)
+    extensions: list[str] = Field(
+        default_factory=lambda: [".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"]
+    )
+
+    @field_validator("extensions")
+    @classmethod
+    def _dot_prefixed(cls, v: list[str]) -> list[str]:
+        bad = [e for e in v if not e.startswith(".")]
+        if bad:
+            raise ValueError(f"拡張子は '.' 始まりで書いてください: {bad}")
+        return [e.lower() for e in v]
+
+
 class ManualConfig(_Cfg):
     """POST /documents / UI アップロード起点。設定は無い。"""
 
@@ -205,6 +231,11 @@ class S3EventNode(_NodeBase):
     config: S3EventConfig
 
 
+class GDriveEventNode(_NodeBase):
+    type: Literal["source.gdrive_event"]
+    config: GDriveEventConfig
+
+
 class EmailAttachmentNode(_NodeBase):
     type: Literal["source.email_attachment"]
     config: EmailAttachmentConfig
@@ -268,6 +299,7 @@ class NotifyNode(_NodeBase):
 WorkflowNode = Annotated[
     Union[
         S3EventNode,
+        GDriveEventNode,
         EmailAttachmentNode,
         ManualNode,
         ScheduleNode,
@@ -337,6 +369,7 @@ def is_sink(node: WorkflowNode) -> bool:
 # 自動生成する（13 種を手書きすると UI の工数がエンジンを超える）。
 NODE_CONFIG_MODELS: dict[str, type[BaseModel]] = {
     "source.s3_event": S3EventConfig,
+    "source.gdrive_event": GDriveEventConfig,
     "source.email_attachment": EmailAttachmentConfig,
     "source.manual": ManualConfig,
     "source.schedule": ScheduleConfig,

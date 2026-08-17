@@ -551,6 +551,28 @@ class PgTriggerStore:
             ).first()
         return row[0] if row else None
 
+    def get_gdrive_connection(self, tenant_id: str, connection_id: str):
+        from sqlalchemy import text
+
+        from newfan_orchestrator.workflow_trigger import GDriveConnection
+
+        # ソース接続は取込のみでデータ流出面が無く、疎通テスト（test_connection）も
+        # postgres 専用のため、untested を弾かない（疎通は同期の成否で確認する）。
+        # disabled だけは尊重する。
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            row = c.execute(
+                text(
+                    "SELECT config->>'folder_id', secret_ref FROM connections"
+                    " WHERE tenant_id=:t AND id=:i AND type='gdrive'"
+                    " AND status <> 'disabled'"
+                ),
+                {"t": tenant_id, "i": connection_id},
+            ).first()
+        if row is None or not row[0]:
+            return None
+        return GDriveConnection(folder_id=row[0], secret_ref=row[1])
+
     def already_claimed(self, tenant_id, connection_id, source_key, content_hash) -> bool:
         from sqlalchemy import text
 

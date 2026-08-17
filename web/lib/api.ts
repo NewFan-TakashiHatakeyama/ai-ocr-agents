@@ -147,6 +147,17 @@ export const api = {
       body: JSON.stringify({ doc_type: docType, fields, create: opts?.create ?? false }),
     }),
   listConnections: () => request<{ items: ConnectionDto[] }>(`/connections`),
+  // 接続の登録（⑤⑥ SaaS連携）。秘密は config に入れず secret_ref で渡す（§16.5）
+  createConnection: (input: {
+    type: string;
+    name: string;
+    config: Record<string, unknown>;
+    secret_ref?: string | null;
+  }) =>
+    request<ConnectionDto>(`/connections`, { method: "POST", body: JSON.stringify(input) }),
+  // 「今すぐ同期」: gdrive 接続の監視フォルダを即時に差分検知する（worker が実行）
+  syncConnection: (connectionId: string) =>
+    request<{ queued: boolean }>(`/connections/${connectionId}/sync`, { method: "POST" }),
   listRules: (status?: string) =>
     request<{ items: RuleDto[] }>(`/rules${status ? `?status=${status}` : ""}`),
   patchRule: (ruleId: string, status: string) =>

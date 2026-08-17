@@ -228,6 +228,62 @@ def main() -> None:
             )
             print("[worker] trigger consumer 有効: " + os.environ["TRIGGER_SQS_URL"])
 
+        # Google Drive ポーリングトリガー（⑤⑥ SaaS連携 / 常駐ゼロ方針）。
+        # 常駐プロセスは増やさず、この主ループが up の間だけ interval おきに差分検知する。
+        # 選択: GDRIVE_FAKE_ROOT（開発: ローカル dir を Drive に見立てる）
+        #     → GOOGLE_OAUTH_CLIENT_ID/SECRET（実 Drive API。モックファースト方針のため
+        #       実アカウント E2E は未了）→ どちらも無ければ無効。
+        gdrive_poller = None
+        gdrive_sync_consumer = None
+        gdrive_provider: Any = None
+        if os.environ.get("GDRIVE_FAKE_ROOT"):
+            from newfan_orchestrator.gdrive import FakeGDriveProvider
+
+            gdrive_provider = FakeGDriveProvider(os.environ["GDRIVE_FAKE_ROOT"])
+            print("[worker] gdrive: FakeGDriveProvider 有効 root=" + os.environ["GDRIVE_FAKE_ROOT"])
+        elif os.environ.get("GOOGLE_OAUTH_CLIENT_ID") and os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET"):
+            from newfan_orchestrator.gdrive import GoogleDriveProvider
+
+            gdrive_provider = GoogleDriveProvider(
+                os.environ["GOOGLE_OAUTH_CLIENT_ID"], os.environ["GOOGLE_OAUTH_CLIENT_SECRET"]
+            )
+            print("[worker] gdrive: GoogleDriveProvider 有効")
+        if gdrive_provider is not None:
+            from newfan_ingest import IngestService
+            from newfan_ingest.rasterize import AutoRasterizer
+
+            from newfan_orchestrator.workflow_trigger import GDrivePoller
+
+            # 保存先は gateway と同じ規約: S3_BUCKET があれば S3、無ければローカル FS
+            if os.environ.get("S3_BUCKET"):
+                from newfan_ingest.storage import S3ObjectStore
+
+                object_store: Any = S3ObjectStore(
+                    os.environ["S3_BUCKET"],
+                    kms_key_id=os.environ.get("S3_KMS_KEY_ID") or None,
+                )
+            else:
+                from pathlib import Path
+
+                from newfan_ingest.storage import LocalObjectStore
+
+                object_store = LocalObjectStore(Path(os.environ.get("STORAGE_ROOT", "/data")))
+            gdrive_poller = GDrivePoller(
+                store=trigger_store,
+                provider=gdrive_provider,
+                ingest=IngestService(object_store, AutoRasterizer()).ingest,
+                enqueue=export_queue.enqueue,
+                resolve_secret=resolve_secret,
+                poll_interval_sec=float(os.environ.get("GDRIVE_POLL_INTERVAL_SEC", "300")),
+            )
+            # 「今すぐ同期」（gateway の POST /connections/{id}/sync → q.sync）
+            gdrive_sync_consumer = RedisStreamConsumer(
+                os.environ["REDIS_URL"],
+                "q.sync",
+                "gdrive-sync",
+                os.environ.get("CONSUMER_NAME", socket.gethostname()),
+            )
+
         print("[worker] orchestrator-svc 起動: q.extract / q.workflow を消費します")
         while not _STOP:
             worker.run_once()  # consume は block_ms 待機するため busy-loop にならない
@@ -235,6 +291,18 @@ def main() -> None:
             if trigger is not None:
                 trigger.run_once()  # 5 秒間隔で SQS をポーリング（内部で間引く）
             ticker.run_once()  # source.schedule の分ティック（分が変わった時だけ動く）
+            if gdrive_poller is not None:
+                gdrive_poller.run_once()  # interval おきに Drive を差分検知（内部で間引く）
+                for msg_id, payload in gdrive_sync_consumer.consume(count=5, block_ms=0):
+                    try:
+                        n = gdrive_poller.sync_now(
+                            payload.get("tenant_id", ""), payload.get("connection_id", "")
+                        )
+                        print(f"[worker] gdrive 今すぐ同期: {payload.get('connection_id')} → {n} 件")
+                    except Exception:  # noqa: BLE001 - 同期失敗でループを止めない
+                        logging.getLogger(__name__).exception("[gdrive] 今すぐ同期に失敗")
+                    # 同期は毎ポーリングでも到達するため at-most-once で ack（重複実行の害が無い）
+                    gdrive_sync_consumer.ack(msg_id)
     print("[worker] SIGTERM 受信: 停止しました")
 
 

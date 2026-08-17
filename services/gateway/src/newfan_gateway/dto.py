@@ -388,6 +388,12 @@ class ChatConfirmResult(BaseModel):
     detail: dict[str, Any] = Field(default_factory=dict)
 
 
+class ConnectionSyncAccepted(BaseModel):
+    """「今すぐ同期」（⑤⑥）。検知・取込は worker 側ポーラーが q.sync 経由で行う。"""
+
+    queued: bool
+
+
 class ClassifyCandidateDto(BaseModel):
     schema_id: str
     doc_type: str

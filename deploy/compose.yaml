@@ -142,8 +142,16 @@ services:
       # sink.db_write のローカル用秘密（secret_ref "env:SINK_DB_PASSWORD" が読む。
       # AWS では Secrets Manager を使うためこの変数は使われない）
       SINK_DB_PASSWORD: ${SINK_DB_PASSWORD:-}
+      # ⑤⑥ SaaS連携（GDrive）。ローカルは FakeGDriveProvider＝下記マウントの
+      # ディレクトリを Drive フォルダに見立てる（./gdrive-fake/<folder_id>/ にファイルを
+      # 置くと検知→取込→ワークフロー発火）。実 API は GOOGLE_OAUTH_CLIENT_ID/SECRET
+      # を設定して GDRIVE_FAKE_ROOT を外す（.env 差し替えのみで切替）。
+      GDRIVE_FAKE_ROOT: ${GDRIVE_FAKE_ROOT:-/gdrive-fake}
+      GDRIVE_POLL_INTERVAL_SEC: ${GDRIVE_POLL_INTERVAL_SEC:-15}
+      STORAGE_ROOT: /data
     volumes:
       - appdata:/data
+      - ./gdrive-fake:/gdrive-fake
     depends_on:
       postgres:
         condition: service_healthy

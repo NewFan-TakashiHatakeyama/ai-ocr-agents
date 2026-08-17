@@ -52,6 +52,7 @@ const ICON = {
   rule: "M4 6h16M4 12h10M4 18h7",
   schema: "M4 4h16v6H4zM4 14h7v6H4zM14 14h6v6h-6z",
   flow: "M3 5h6v5H3zM15 14h6v5h-6zM9 7.5h9M18 7.5V14M6 10v6.5h9",
+  conn: "M9 12a3 3 0 0 1 3-3h1M15 12a3 3 0 0 1-3 3h-1M7 12H4M20 12h-3",
 };
 
 function NavIcon({ d }: { d: string }) {
@@ -108,9 +109,10 @@ export function AppShell({ active, children }: { active: string; children: React
         </Link>
 
         <div className="nav-sec">管理{!isAdmin && "（admin）"}</div>
-        {(["flow", "dash", "rule", "schema"] as const).map((k) => {
+        {(["flow", "conn", "dash", "rule", "schema"] as const).map((k) => {
           const meta = {
             flow: { label: "ワークフロー", href: "/workflows", key: "workflows" },
+            conn: { label: "接続管理", href: "/connections", key: "connections" },
             dash: { label: "ダッシュボード", href: "/dashboard", key: "dashboard" },
             rule: { label: "ルール管理", href: "/rules", key: "rules" },
             schema: { label: "スキーマ管理", href: "/schemas", key: "schemas" },

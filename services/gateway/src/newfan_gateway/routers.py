@@ -1026,7 +1026,7 @@ def pause_workflow(
     return _workflow_dto(updated)
 
 
-_CONNECTION_TYPES = {"postgres", "webhook", "s3"}
+_CONNECTION_TYPES = {"postgres", "webhook", "s3", "gdrive"}
 # 秘密らしいキーの部分一致判定に使う（完全一致だと passwd/secret_access_key 等が抜ける）
 _SECRETY_SUBSTRINGS = ("secret", "password", "passwd", "pwd", "token", "api_key", "apikey",
                        "credential")
@@ -1114,6 +1114,13 @@ def create_connection(
             f"（ai-ocr/<env>/conn/{principal.tenant_id}/<名前> で登録して ARN か名前を渡す）",
             details={"secret_ref": body.secret_ref},
         )
+    # gdrive は監視フォルダが無いと何も検知できない（サイレント故障）ため作成時に要求する
+    if body.type == "gdrive" and not str(body.config.get("folder_id") or "").strip():
+        raise ApiError(
+            "E4001",
+            "gdrive 接続には config.folder_id（監視する Drive フォルダの ID）が必要です",
+            details={"config_keys": sorted(body.config.keys())},
+        )
     table_re = r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$"
     bad_tables = [t for t in body.allowed_tables if not re.match(table_re, t)]
     if bad_tables:
@@ -1183,6 +1190,36 @@ def test_connection(
         target_id=connection_id, detail={"ok": True},
     )
     return dto.ConnectionTestResult(ok=True, status="tested")
+
+
+@router.post("/connections/{connection_id}/sync", status_code=202, response_model=dto.ConnectionSyncAccepted)
+def sync_connection(
+    connection_id: str,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+    queue: Queue = Depends(get_queue),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.ConnectionSyncAccepted:
+    """「今すぐ同期」（⑤⑥ SaaS連携）。
+
+    gdrive 接続の監視フォルダを即時に差分検知する。実際の検知・取込は
+    orchestrator-worker 内のポーラー（q.sync 消費）が行う（gateway は Drive に触らない）。
+    定期ポーリング（GDRIVE_POLL_INTERVAL_SEC）を待たずに取り込みたいときの導線。
+    """
+    rec = admin.get_connection(principal.tenant_id, connection_id)
+    if rec is None:
+        raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
+    if rec.type != "gdrive":
+        raise ApiError("E1005", "今すぐ同期は type=gdrive のみ対応です", details={"type": rec.type})
+    queue.enqueue(
+        "q.sync",
+        {"tenant_id": principal.tenant_id, "connection_id": connection_id},
+    )
+    wf.record_audit(
+        principal.tenant_id, actor_id=principal.sub, action="connection.sync",
+        target_id=connection_id, detail={"type": rec.type},
+    )
+    return dto.ConnectionSyncAccepted(queued=True)
 
 
 @router.post("/webhooks/endpoints", status_code=201, response_model=dto.WebhookEndpointDto)
