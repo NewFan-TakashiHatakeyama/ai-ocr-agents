@@ -78,6 +78,7 @@ class WorkflowState(TypedDict, total=False):
     run_status: str
     doc_type: Optional[str]
     original_name: Optional[str]  # 元ファイル名（classify ゲートの内容信号）
+    fired_trigger: Optional[str]  # 発火したトリガーノード id（複数トリガー時の経路選択）
     run_confidence: Optional[float]
     fields: dict[str, Any]  # field名 → {"value": str|None, "confidence": float}
     node_outputs: Annotated[dict[str, Any], _merge_dicts]
@@ -582,9 +583,26 @@ def build_workflow_app(
             sg.add_conditional_edges(node.id, _make_router(node), {t: t for t in targets})
             outgoing[node.id] |= targets
 
+    # トリガーが 1 つなら従来どおり無条件エントリ。複数ある場合は「発火した
+    # トリガーの経路だけ」を実行する（敵対的レビュー確定: 全トリガーへ無条件に
+    # START 辺を張ると、1 発火で全経路が実行され DB 二重書込み・webhook 二重送信になる）。
+    # fired_trigger が無い旧 run・旧形式トリガーは従来どおり全経路（後方互換）。
+    trigger_ids = [n.id for n in wf.nodes if is_trigger(n)]
+    if len(trigger_ids) <= 1:
+        for tid in trigger_ids:
+            sg.add_edge(START, tid)
+    else:
+        trigger_id_set = set(trigger_ids)
+
+        def _entry(state: WorkflowState) -> list[str]:
+            fired = state.get("fired_trigger")
+            if fired in trigger_id_set:
+                return [fired]
+            return trigger_ids
+
+        sg.add_conditional_edges(START, _entry, {t: t for t in trigger_ids})
+
     for node in wf.nodes:
-        if is_trigger(node):
-            sg.add_edge(START, node.id)
         if not outgoing[node.id] and not isinstance(node, ConditionNode):
             sg.add_edge(node.id, END)
 

@@ -674,6 +674,16 @@ def start_workflow_run(
         )
     _require_document(repo, principal.tenant_id, body.document_id)
 
+    # 発火トリガー＝グラフの source.manual ノード。複数トリガーの WF では runner が
+    # この node_id の経路だけを実行する（無い場合は従来どおり全経路＝後方互換）
+    manual_node_id = next(
+        (
+            n.get("id")
+            for n in (rec.graph_json or {}).get("nodes", [])
+            if n.get("type") == "source.manual"
+        ),
+        None,
+    )
     run = wf.create_run(
         WorkflowRunRecord(
             id=new_id("wfrun"),
@@ -683,7 +693,12 @@ def start_workflow_run(
             document_id=body.document_id,
             # graph_json のスナップショットで版を固定する（§11.1）。以後 workflows 側が
             # 更新されても、この run は開始時点の定義で最後まで走る
-            trigger={"type": "manual", "by": principal.sub, "graph_json": rec.graph_json},
+            trigger={
+                "type": "manual",
+                "by": principal.sub,
+                "node_id": manual_node_id,
+                "graph_json": rec.graph_json,
+            },
         )
     )
     queue.enqueue(

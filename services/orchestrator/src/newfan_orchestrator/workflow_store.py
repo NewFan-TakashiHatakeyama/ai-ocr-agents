@@ -38,6 +38,10 @@ class LockedRun:
     document_id: Optional[str]
     status: str
     graph_json: dict[str, Any]
+    # 発火したトリガーノード（workflow_runs.trigger.node_id）。複数トリガーの
+    # ワークフローで「発火した経路だけ」を実行するために runner が初期 state へ載せる。
+    # 無い（旧run・手動旧形式）場合は全経路実行（後方互換）
+    trigger_node_id: Optional[str] = None
     _update: Callable[..., None] = field(repr=False, default=lambda **kw: None)
 
     def update(
@@ -127,12 +131,14 @@ class InMemoryWorkflowRunStore:
         graph_json: dict[str, Any],
         document_id: str = "doc_1",
         workflow_version: int = 1,
+        trigger_node_id: Optional[str] = None,
     ) -> None:
         self.runs[workflow_run_id] = {
             "tenant_id": tenant_id,
             "workflow_id": workflow_id,
             "workflow_version": workflow_version,
             "document_id": document_id,
+            "trigger_node_id": trigger_node_id,
             "graph_json": graph_json,
             "status": "running",
             "waiting": None,
@@ -171,6 +177,7 @@ class InMemoryWorkflowRunStore:
                 document_id=row["document_id"],
                 status=row["status"],
                 graph_json=row["graph_json"],
+                trigger_node_id=row.get("trigger_node_id"),
                 _update=_update,
             )
         finally:
@@ -303,6 +310,7 @@ class PgWorkflowRunStore:
                 document_id=row["document_id"],
                 status=row["status"],
                 graph_json=(row["trigger"] or {}).get("graph_json") or {},
+                trigger_node_id=(row["trigger"] or {}).get("node_id"),
                 _update=_update,
             )
 
