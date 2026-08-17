@@ -284,3 +284,29 @@ def test_gdriveノードはm365ポーラーにmatchしない(tmp_path) -> None:
     poller, enqueued = _typed_poller(store, str(tmp_path), "m365", M365EventNode)
     assert poller.poll_all() == 0
     assert enqueued == []
+
+
+# ---- チップ2: 同期結果の記録（サイレント失敗の可視化） ----
+
+
+def test_同期成功はok結果を記録する(tmp_path) -> None:
+    store = InMemoryTriggerStore()
+    _seed(store, tmp_path)
+    (tmp_path / "inbox" / "z.pdf").write_bytes(b"z")
+    poller, _ = _poller(store, str(tmp_path))
+    poller.sync_now(TENANT, "con_gd")
+    assert store.sync_results[(TENANT, "con_gd")] == {"ok": True, "error": None}
+
+
+def test_同期失敗はerror結果を記録して例外を伝える(tmp_path) -> None:
+    import pytest as _pytest
+
+    store = InMemoryTriggerStore()
+    store.seed_workflow(TENANT, "wf_gd", 1, _graph())
+    store.seed_gdrive_connection(TENANT, "con_gd", "typo-folder")  # 実体なし → Fake が例外
+    poller, _ = _poller(store, str(tmp_path))
+    with _pytest.raises(FileNotFoundError):
+        poller.sync_now(TENANT, "con_gd")
+    rec = store.sync_results[(TENANT, "con_gd")]
+    assert rec["ok"] is False
+    assert "typo-folder" in (rec["error"] or "")

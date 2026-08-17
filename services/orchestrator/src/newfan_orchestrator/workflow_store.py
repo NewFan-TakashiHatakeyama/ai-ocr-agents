@@ -595,6 +595,27 @@ class PgTriggerStore:
                 {"t": tenant_id, "i": connection_id},
             )
 
+    def record_sync_result(self, tenant_id: str, connection_id: str, *, ok: bool, error):
+        from sqlalchemy import text
+
+        # 最終同期の結果を UI で可視化する（レビュー確定: 202/成功トーストと実際の
+        # 失敗が乖離し、folder_id 誤設定や API 失敗に利用者が気付けなかった）
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            c.execute(
+                text(
+                    "UPDATE connections SET last_synced_at=now(),"
+                    " last_sync_status=:s, last_sync_error=:e"
+                    " WHERE tenant_id=:t AND id=:i"
+                ),
+                {
+                    "s": "ok" if ok else "error",
+                    "e": error,
+                    "t": tenant_id,
+                    "i": connection_id,
+                },
+            )
+
     def already_claimed(self, tenant_id, connection_id, source_key, content_hash) -> bool:
         from sqlalchemy import text
 

@@ -653,6 +653,9 @@ class PgAdminRepository:
             config=r["config"] or {}, secret_ref=r["secret_ref"],
             allowed_tables=list(r["allowed_tables"] or []), status=r["status"],
             created_at=r["created_at"].isoformat() if r["created_at"] else None,
+            last_synced_at=r["last_synced_at"].isoformat() if r["last_synced_at"] else None,
+            last_sync_status=r["last_sync_status"],
+            last_sync_error=r["last_sync_error"],
         )
 
     def list_connections(self, tenant_id):
@@ -661,7 +664,8 @@ class PgAdminRepository:
             rows = c.execute(
                 text(
                     "SELECT id, tenant_id, type, name, config, secret_ref,"
-                    " allowed_tables, status, created_at"
+                    " allowed_tables, status, created_at,"
+                    " last_synced_at, last_sync_status, last_sync_error"
                     " FROM connections WHERE tenant_id=:t ORDER BY created_at DESC"
                 ),
                 {"t": tenant_id},
@@ -674,7 +678,8 @@ class PgAdminRepository:
             r = c.execute(
                 text(
                     "SELECT id, tenant_id, type, name, config, secret_ref,"
-                    " allowed_tables, status, created_at"
+                    " allowed_tables, status, created_at,"
+                    " last_synced_at, last_sync_status, last_sync_error"
                     " FROM connections WHERE tenant_id=:t AND id=:i"
                 ),
                 {"t": tenant_id, "i": connection_id},

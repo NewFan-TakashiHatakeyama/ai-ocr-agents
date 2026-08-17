@@ -147,6 +147,10 @@ export interface ConnectionDto {
   allowed_tables: string[];
   status: string;
   created_at?: string | null;
+  // 最終同期の結果（⑤⑥ フォルダ監視系。サイレント失敗の可視化）
+  last_synced_at?: string | null;
+  last_sync_status?: string | null; // ok / error
+  last_sync_error?: string | null;
 }
 
 export interface RuleDto {

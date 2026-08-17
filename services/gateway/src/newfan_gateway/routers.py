@@ -1091,6 +1091,9 @@ def list_connections(
                 config=_redact_config(r.config or {}),
                 secret_ref=r.secret_ref, allowed_tables=r.allowed_tables,
                 status=r.status, created_at=r.created_at,
+                last_synced_at=r.last_synced_at,
+                last_sync_status=r.last_sync_status,
+                last_sync_error=r.last_sync_error,
             )
             for r in rows
         ]

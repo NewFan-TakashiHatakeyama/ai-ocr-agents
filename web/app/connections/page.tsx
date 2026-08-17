@@ -29,6 +29,17 @@ const FOLDER_ID_HINT: Record<string, string> = {
   box: "Box フォルダの ID（数値）",
 };
 
+function relTime(iso?: string | null): string {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  const min = Math.max(0, Math.floor(ms / 60_000));
+  if (min < 1) return "1分以内";
+  if (min < 60) return `${min}分前`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}時間前`;
+  return `${Math.floor(h / 24)}日前`;
+}
+
 const STATUS_LABEL: Record<string, { cls: string; label: string }> = {
   untested: { cls: "st-uploaded", label: "未テスト" },
   tested: { cls: "st-confirmed", label: "テスト済" },
@@ -207,6 +218,7 @@ export default function ConnectionsPage() {
                 <th>種別</th>
                 <th>設定</th>
                 <th>状態</th>
+                <th>最終同期</th>
                 <th></th>
               </tr>
             </thead>
@@ -231,6 +243,22 @@ export default function ConnectionsPage() {
                     <td>
                       <span className={`chip ${st.cls}`}>{st.label}</span>
                     </td>
+                    <td className="sub">
+                      {c.last_sync_status == null ? (
+                        (FOLDER_TYPES as readonly string[]).includes(c.type) ? "—" : ""
+                      ) : c.last_sync_status === "ok" ? (
+                        <span style={{ color: "var(--green, #2e9e6b)" }}>
+                          ✓ {relTime(c.last_synced_at)}
+                        </span>
+                      ) : (
+                        <span
+                          style={{ color: "var(--red, #c0392b)" }}
+                          title={c.last_sync_error ?? undefined}
+                        >
+                          ✗ 失敗（{relTime(c.last_synced_at)}）
+                        </span>
+                      )}
+                    </td>
                     <td>
                       {(FOLDER_TYPES as readonly string[]).includes(c.type) && (
                         <button
@@ -247,7 +275,7 @@ export default function ConnectionsPage() {
               })}
               {items.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="sub">
+                  <td colSpan={6} className="sub">
                     接続はまだありません。「＋ フォルダ連携を追加」で Google Drive / Microsoft 365 /
                     Box のフォルダ監視を始められます。
                   </td>

@@ -74,6 +74,9 @@ class TriggerStore(Protocol):
         self, tenant_id: str, connection_id: str, conn_type: str
     ) -> Optional[FolderConnection]: ...
     def mark_connection_tested(self, tenant_id: str, connection_id: str) -> None: ...
+    def record_sync_result(
+        self, tenant_id: str, connection_id: str, *, ok: bool, error: Optional[str]
+    ) -> None: ...
     def already_claimed(
         self, tenant_id: str, connection_id: str, source_key: str, content_hash: str
     ) -> bool: ...
@@ -463,6 +466,23 @@ class FolderEventPoller:
                 self._conn_type, tenant_id, connection_id,
             )
             return 0
+        # 同期の成否は connections に記録して UI で可視化する（レビュー確定:
+        # 202/成功トーストと実際の失敗が乖離し、利用者が失敗を知る手段が無かった）
+        try:
+            return self._poll_connection_inner(tenant_id, connection_id, workflows, conn)
+        except Exception as exc:
+            self._store.record_sync_result(
+                tenant_id, connection_id, ok=False, error=str(exc)[:500]
+            )
+            raise
+
+    def _poll_connection_inner(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        workflows: list[tuple[str, int, dict[str, Any]]],
+        conn: FolderConnection,
+    ) -> int:
         secret: Optional[str] = None
         if conn.secret_ref and self._resolve_secret is not None:
             secret = self._resolve_secret(conn.secret_ref)
@@ -544,6 +564,7 @@ class FolderEventPoller:
                 "[%s] 取込完了: tenant=%s file=%s document=%s runs=%s",
                 self._conn_type, tenant_id, f.name, document_id, run_ids,
             )
+        self._store.record_sync_result(tenant_id, connection_id, ok=True, error=None)
         return processed
 
 
@@ -607,6 +628,14 @@ class InMemoryTriggerStore:
 
     def mark_connection_tested(self, tenant_id: str, connection_id: str) -> None:
         self.tested_connections.add((tenant_id, connection_id))
+
+    def record_sync_result(
+        self, tenant_id: str, connection_id: str, *, ok: bool, error: Optional[str]
+    ) -> None:
+        self.sync_results = getattr(self, "sync_results", {})
+        self.sync_results[(tenant_id, connection_id)] = {
+            "ok": ok, "error": error,
+        }
 
     def already_claimed(self, tenant_id, connection_id, source_key, content_hash) -> bool:
         return (tenant_id, connection_id, source_key, content_hash) in self.claims

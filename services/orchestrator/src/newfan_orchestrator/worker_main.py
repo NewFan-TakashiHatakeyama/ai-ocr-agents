@@ -329,6 +329,11 @@ def main() -> None:
                 "gdrive-sync",  # 既存グループ名を維持（デプロイ跨ぎの PEL 引継ぎ）
                 os.environ.get("CONSUMER_NAME", socket.gethostname()),
             )
+        # 同期失敗の再試行上限。transient は autoclaim 再配信で回復させるが、
+        # 恒久失敗（folder_id タイポ等）を無限再試行する毒メッセージにしない。
+        # 失敗結果は connections.last_sync_* に記録済みで UI から見える
+        saas_sync_fail_counts: dict[str, int] = {}
+        SAAS_SYNC_MAX_ATTEMPTS = 3
 
         print("[worker] orchestrator-svc 起動: q.extract / q.workflow を消費します")
         while not _STOP:
@@ -367,8 +372,20 @@ def main() -> None:
                             # PEL に残し autoclaim(60s) の再配信で再試行。重複実行は
                             # source_cursors claim で冪等
                             saas_sync_consumer.ack(msg_id)
+                            saas_sync_fail_counts.pop(msg_id, None)
                         except Exception:  # noqa: BLE001 - 同期失敗でループを止めない
                             logging.getLogger(__name__).exception("[%s] 今すぐ同期に失敗", kind)
+                            n_fail = saas_sync_fail_counts.get(msg_id, 0) + 1
+                            saas_sync_fail_counts[msg_id] = n_fail
+                            if n_fail >= SAAS_SYNC_MAX_ATTEMPTS:
+                                # 恒久失敗（folder_id タイポ等）の毒メッセージ化を防ぐ。
+                                # 失敗結果は connections.last_sync_* に記録済み（UI で可視）
+                                logging.getLogger(__name__).warning(
+                                    "[%s] 同期が %d 回失敗したため破棄: %s",
+                                    kind, n_fail, payload.get("connection_id"),
+                                )
+                                saas_sync_consumer.ack(msg_id)
+                                saas_sync_fail_counts.pop(msg_id, None)
                 except Exception:  # noqa: BLE001 - SaaS 区画の失敗で抽出/実行を殺さない
                     logging.getLogger(__name__).exception("[saas] ポーリング区画で例外")
     print("[worker] SIGTERM 受信: 停止しました")
