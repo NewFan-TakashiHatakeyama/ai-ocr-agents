@@ -371,6 +371,24 @@ class ChatConfirmResult(BaseModel):
     detail: dict[str, Any] = Field(default_factory=dict)
 
 
+class ClassifyCandidateDto(BaseModel):
+    schema_id: str
+    doc_type: str
+    score: float
+
+
+class ClassifyResponse(BaseModel):
+    """帳票自動分類（⑦）。抽出前にファイル名等から最も近いスキーマを提案する。"""
+
+    suggested_schema_id: Optional[str] = None
+    doc_type: Optional[str] = None
+    confidence: float = 0.0
+    reason: str = ""
+    # 判定の根拠種別: declared(指定済)/content(本文)/filename(ファイル名)/heuristic
+    method: str = "heuristic"
+    candidates: list[ClassifyCandidateDto] = Field(default_factory=list)
+
+
 class MetricsResponse(BaseModel):
     total_documents: int
     status_counts: dict[str, int]

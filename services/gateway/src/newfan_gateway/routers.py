@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, U
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
-from newfan_workflow import WorkflowGraph, catalog, has_errors, lint
+from newfan_workflow import WorkflowGraph, build_candidate, catalog, classify_text, has_errors, lint
 from newfan_workflow.lint import Finding
 from pydantic import ValidationError
 
@@ -171,6 +171,64 @@ def get_document(
         doc_type=doc.doc_type,
         external_ref=doc.external_ref,
         page_count=doc.page_count,
+    )
+
+
+@router.post("/documents/{document_id}/classify", response_model=dto.ClassifyResponse)
+def classify_document(
+    document_id: str,
+    principal: Principal = Depends(require_role("viewer")),
+    repo: Repository = Depends(get_repo),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.ClassifyResponse:
+    """帳票種別を推定し、最も近い登録スキーマを提案する（⑦ 抽出UIサジェスト）。
+
+    抽出前はファイル名を信号にした決定論分類（純ロジック newfan_workflow.classify_text）。
+    アップロード時に doc_type が明示されていればそれを最優先する。
+    """
+    doc = _require_document(repo, principal.tenant_id, document_id)
+    schemas = admin.list_schemas(principal.tenant_id)
+    if not schemas:
+        return dto.ClassifyResponse()
+
+    # list_schemas は doc_type ごとの最新版のみを返す（§7.2）
+    latest: dict[str, str] = {s.doc_type: s.id for s in schemas}
+
+    # アップロード時に種別指定済みなら、推測より確実なのでそれを採用する
+    if doc.doc_type and doc.doc_type in latest:
+        return dto.ClassifyResponse(
+            suggested_schema_id=latest[doc.doc_type],
+            doc_type=doc.doc_type,
+            confidence=1.0,
+            reason="アップロード時に指定された種別",
+            method="declared",
+            candidates=[
+                dto.ClassifyCandidateDto(schema_id=sid, doc_type=dt, score=0.0)
+                for dt, sid in latest.items()
+            ],
+        )
+
+    candidates = [
+        build_candidate(s.doc_type, [f.label or f.name for f in s.fields]) for s in schemas
+    ]
+    filename = doc.original_name or ""
+    outcome = classify_text(text="", filename=filename, candidates=candidates)
+    method = "filename" if filename else "heuristic"
+    cand_dtos = sorted(
+        (
+            dto.ClassifyCandidateDto(schema_id=latest.get(dt, ""), doc_type=dt, score=sc)
+            for dt, sc in outcome.scores.items()
+        ),
+        key=lambda c: c.score,
+        reverse=True,
+    )
+    return dto.ClassifyResponse(
+        suggested_schema_id=latest.get(outcome.doc_type) if outcome.doc_type else None,
+        doc_type=outcome.doc_type,
+        confidence=outcome.confidence,
+        reason=outcome.reason,
+        method=method,
+        candidates=cand_dtos,
     )
 
 

@@ -2,6 +2,7 @@
 
 import type {
   CatalogDto,
+  ClassifyResult,
   ConnectionDto,
   DryRunResultDto,
   ExtractAccepted,
@@ -101,6 +102,10 @@ export const api = {
     }),
 
   getJob: (jobId: string) => request<JobStatus>(`/jobs/${jobId}`),
+
+  // 帳票種別を推定して最も近いスキーマを提案する（⑦, 抽出前サジェスト）
+  classifyDocument: (documentId: string) =>
+    request<ClassifyResult>(`/documents/${documentId}/classify`, { method: "POST" }),
 
   // 手元の帳票を active なワークフローに手動投入する（source.manual, §7.1）
   startWorkflowRun: (workflowId: string, documentId: string) =>
