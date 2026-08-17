@@ -33,19 +33,29 @@ export default function SchemasPage() {
   const { data, error, isLoading } = useQuery({ queryKey: ["schemas"], queryFn: () => api.listSchemas() });
   const [docType, setDocType] = useState<string | null>(null);
   const [fields, setFields] = useState<SchemaFieldDto[]>([]);
+  // 新規スキーマ作成モード（③）: 既存 doc_type の編集ではなく、ゼロから項目を定義する。
+  const [creating, setCreating] = useState(false);
+  const [newDocType, setNewDocType] = useState("");
 
-  const current = data?.items.find((s) => s.doc_type === docType) ?? data?.items[0];
+  const current = creating ? undefined : data?.items.find((s) => s.doc_type === docType) ?? data?.items[0];
   useEffect(() => {
-    if (current) {
+    if (!creating && current) {
       setDocType(current.doc_type);
       setFields(current.fields.map((f) => ({ ...f })));
     }
   }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = useMutation({
-    mutationFn: () => api.putSchema(current!.doc_type, fields),
+    mutationFn: () => api.putSchema(creating ? newDocType.trim() : current!.doc_type, fields),
     onSuccess: (rec) => {
-      push({ kind: "ok", message: `新しい版として保存しました（${rec.doc_type} v${rec.version}）。進行中のRunには影響しません。` });
+      push({
+        kind: "ok",
+        message: creating
+          ? `スキーマ「${rec.doc_type}」を作成しました（v${rec.version}）。抽出のスキーマ選択に表示されます。`
+          : `新しい版として保存しました（${rec.doc_type} v${rec.version}）。進行中のRunには影響しません。`,
+      });
+      setCreating(false);
+      setDocType(rec.doc_type);
       qc.invalidateQueries({ queryKey: ["schemas"] });
     },
     onError: (e) => push({ kind: "err", message: `保存に失敗しました（${(e as Error).message}）。` }),
@@ -57,15 +67,78 @@ export default function SchemasPage() {
     setFields((fs) => fs.map((f, j) => (j === i ? { ...f, ...patch } : f)));
   }
 
+  function startCreate() {
+    setCreating(true);
+    setNewDocType("");
+    setFields([]);
+  }
+
+  function cancelCreate() {
+    setCreating(false);
+    // 既存選択に戻す（useEffect が current から fields を復元）
+    const first = data?.items.find((s) => s.doc_type === docType) ?? data?.items[0];
+    if (first) {
+      setDocType(first.doc_type);
+      setFields(first.fields.map((f) => ({ ...f })));
+    }
+  }
+
+  // 新規作成時のみ課す検証。既存編集は従来どおり（name は不変・版管理で担保）。
+  function createIssue(): string | null {
+    const dt = newDocType.trim();
+    if (!dt) return "帳票タイプ名（doc_type）を入力してください。";
+    if (data?.items.some((s) => s.doc_type === dt))
+      return `「${dt}」は既に存在します。別名にするか、既存スキーマを選んで編集してください。`;
+    if (fields.length === 0) return "項目を1つ以上追加してください。";
+    const names = fields.map((f) => (f.name ?? "").trim());
+    if (names.some((n) => !n)) return "すべての項目に項目名（name）を付けてください。";
+    if (names.some((n) => !/^[A-Za-z][\w]*$/.test(n)))
+      return "項目名（name）は半角英字で始まる英数字・_ のみで指定してください（例: total_amount）。";
+    const dup = names.find((n, i) => names.indexOf(n) !== i);
+    if (dup) return `項目名「${dup}」が重複しています。`;
+    return null;
+  }
+
+  function onSave() {
+    if (creating) {
+      const issue = createIssue();
+      if (issue) {
+        push({ kind: "warn", message: issue });
+        return;
+      }
+    }
+    save.mutate();
+  }
+
+  const saveLabel = creating
+    ? save.isPending
+      ? "作成中…"
+      : "スキーマを作成"
+    : save.isPending
+      ? "保存中…"
+      : `新しい版として保存${current ? `（v${current.version + 1}）` : ""}`;
+
   return (
     <AppShell active="schemas">
       <div className="topbar">
-        <span className="ttl">スキーマ{current ? `: ${current.doc_type}` : ""}</span>
-        {current && <StatusChip status="confirmed" />}
-        {current && <span className="sub">v{current.version} · 有効</span>}
+        <span className="ttl">
+          スキーマ{creating ? ": 新規作成" : current ? `: ${current.doc_type}` : ""}
+        </span>
+        {!creating && current && <StatusChip status="confirmed" />}
+        {!creating && current && <span className="sub">v{current.version} · 有効</span>}
+        {creating && <span className="sub">まだ保存されていません</span>}
         <span className="spacer" />
-        <button className="btn sm primary" disabled={!current || save.isPending} onClick={() => save.mutate()}>
-          {save.isPending ? "保存中…" : `新しい版として保存${current ? `（v${current.version + 1}）` : ""}`}
+        {creating && (
+          <button className="btn sm ghost" disabled={save.isPending} onClick={cancelCreate}>
+            キャンセル
+          </button>
+        )}
+        <button
+          className="btn sm primary"
+          disabled={(creating ? false : !current) || save.isPending}
+          onClick={onSave}
+        >
+          {saveLabel}
         </button>
       </div>
 
@@ -73,24 +146,84 @@ export default function SchemasPage() {
         {data?.items.map((s) => (
           <button
             key={s.doc_type}
-            className={`filter${s.doc_type === current?.doc_type ? " on" : ""}`}
-            style={s.doc_type === current?.doc_type ? { borderColor: "var(--brand)", color: "var(--brand-deep)" } : undefined}
-            onClick={() => setDocType(s.doc_type)}
+            className={`filter${!creating && s.doc_type === current?.doc_type ? " on" : ""}`}
+            style={
+              !creating && s.doc_type === current?.doc_type
+                ? { borderColor: "var(--brand)", color: "var(--brand-deep)" }
+                : undefined
+            }
+            onClick={() => {
+              setCreating(false);
+              setDocType(s.doc_type);
+              setFields(s.fields.map((f) => ({ ...f })));
+            }}
           >
             {s.doc_type}（v{s.version}）
           </button>
         ))}
+        <button
+          className={`filter${creating ? " on" : ""}`}
+          style={creating ? { borderColor: "var(--brand)", color: "var(--brand-deep)" } : undefined}
+          onClick={startCreate}
+        >
+          ＋ 新規スキーマ
+        </button>
       </div>
 
       <div style={{ padding: "4px 22px 22px" }}>
         {isLoading && <p>読み込み中…</p>}
-        {current && fields.length === 0 && <p className="sub">項目がありません。「＋ 項目を追加」で定義します。</p>}
+
+        {creating && (
+          <div className="schema-newhead">
+            <label>
+              帳票タイプ名（doc_type）
+              <input
+                className="schema-in"
+                value={newDocType}
+                onChange={(e) => setNewDocType(e.target.value)}
+                placeholder="例: purchase_order / 発注書"
+                autoFocus
+                aria-label="帳票タイプ名"
+              />
+            </label>
+            <span className="sub">
+              抽出時のスキーマ選択に表示されます。既存の名前とは重複できません。
+            </span>
+          </div>
+        )}
+
+        {!creating && current && fields.length === 0 && (
+          <p className="sub">項目がありません。「＋ 項目を追加」で定義します。</p>
+        )}
+        {creating && fields.length === 0 && (
+          <p className="sub">「＋ 項目を追加」で、抽出したい項目を1つずつ定義します。</p>
+        )}
+
         {fields.map((f, i) => (
           <div key={i} className="srow">
-            <span className="nm">
-              {f.label || f.name || "（無題）"}
-              <span className="sub">{f.name}</span>
-            </span>
+            {creating ? (
+              <span className="nm nm-edit">
+                <input
+                  className="schema-in"
+                  value={f.name}
+                  onChange={(e) => setField(i, { name: e.target.value })}
+                  placeholder="項目名 name（例: total_amount）"
+                  aria-label={`項目${i + 1} の name`}
+                />
+                <input
+                  className="schema-in sub-in"
+                  value={f.label ?? ""}
+                  onChange={(e) => setField(i, { label: e.target.value })}
+                  placeholder="表示名（日本語・任意）"
+                  aria-label={`項目${i + 1} の表示名`}
+                />
+              </span>
+            ) : (
+              <span className="nm">
+                {f.label || f.name || "（無題）"}
+                <span className="sub">{f.name}</span>
+              </span>
+            )}
             <select
               className="typepill"
               value={f.type}
@@ -125,7 +258,10 @@ export default function SchemasPage() {
           <button
             className="btn sm"
             onClick={() =>
-              setFields((fs) => [...fs, { name: `field_${fs.length + 1}`, label: "", type: "string", required: false, critical: false }])
+              setFields((fs) => [
+                ...fs,
+                { name: `field_${fs.length + 1}`, label: "", type: "string", required: false, critical: false },
+              ])
             }
           >
             ＋ 項目を追加
