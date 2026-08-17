@@ -152,6 +152,14 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ status }),
     }),
+  // LLM最適化ヒント（llm_hint）を人が直接オーサリングする（③）
+  createLlmHint: (input: {
+    doc_type: string;
+    field_name?: string | null;
+    hint_text: string;
+    description?: string | null;
+  }) =>
+    request<RuleDto>(`/rules`, { method: "POST", body: JSON.stringify(input) }),
   metrics: () => request<MetricsResponse>(`/metrics/summary`),
 
   // チャットホーム（SCR-01）。SSE を fetch ストリームで購読する。

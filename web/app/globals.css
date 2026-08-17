@@ -1226,6 +1226,53 @@ a {
   color: var(--ink2);
 }
 
+/* LLM最適化ヒントのオーサリング（③） */
+.hint-form {
+  background: #f6fbfa;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.hint-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink2);
+}
+.hint-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.hint-row label {
+  flex: 1;
+  min-width: 200px;
+}
+.hint-form select,
+.hint-form input,
+.hint-form textarea {
+  font-size: 12.5px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 500;
+  font-family: inherit;
+}
+.hint-form textarea {
+  resize: vertical;
+}
+.hint-actions {
+  display: flex;
+  gap: 10px;
+}
+
 /* スキーマ新規作成（③ ゼロから項目定義） */
 .schema-newhead {
   display: flex;

@@ -51,6 +51,7 @@ from newfan_gateway.records import (
     DocumentRecord,
     JobRecord,
     PageRecord,
+    RuleRecord,
     RunRecord,
     SchemaFieldDef,
     WorkflowRecord,
@@ -585,7 +586,9 @@ def _rule_dto(rec: Any) -> dto.RuleDto:
         validation_report=rec.validation_report,
         source_correction_ids=rec.source_correction_ids,
         created_by=rec.created_by,
-        activatable=is_activatable(rec.validation_report),
+        # llm_hint は決定論変換でなく人が書いた指示。ゴールデン再現率の検証対象外なので
+        # 検証レポート無しでも有効化できる（regex/vocab は従来どおり再現率ゲートが必要）。
+        activatable=rec.rule_type == "llm_hint" or is_activatable(rec.validation_report),
     )
 
 
@@ -1253,6 +1256,41 @@ def list_memory(
     return dto.MemoryList(items=[dto.MemoryDto(**r.model_dump(exclude={"tenant_id"})) for r in rows])
 
 
+@router.post("/rules", response_model=dto.RuleDto, status_code=201)
+def create_llm_hint(
+    body: dto.CreateLlmHintRequest,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.RuleDto:
+    """LLM最適化ヒント（llm_hint）を人が直接オーサリングする（③）。
+
+    抽出LLMへの自然言語指示。draft で作られ、承認（PATCH active）で有効化される。
+    有効化後は memory_lookup が doc_type 単位で拾い、KIE プロンプトの rule_hints に注入される。
+    """
+    hint = (body.hint_text or "").strip()
+    if not hint:
+        raise ApiError("E1003", "ヒント本文（hint_text）を入力してください")
+    if not (body.doc_type or "").strip():
+        raise ApiError("E1003", "対象の帳票種別（doc_type）を指定してください")
+    rule_json: dict[str, Any] = {"hint_text": hint}
+    if body.description:
+        rule_json["description"] = body.description.strip()
+    rec = admin.create_rule(
+        RuleRecord(
+            id=new_id("rule"),
+            tenant_id=principal.tenant_id,
+            doc_type=body.doc_type.strip(),
+            field_name=(body.field_name or None),
+            rule_type="llm_hint",
+            rule_json=rule_json,
+            status="draft",
+            source_correction_ids=[],
+            created_by=principal.sub,
+        )
+    )
+    return _rule_dto(rec)
+
+
 @router.get("/rules", response_model=dto.RuleList)
 def list_rules(
     status: Optional[str] = None,
@@ -1276,8 +1314,13 @@ def patch_rule(
     rec = admin.get_rule(principal.tenant_id, rule_id)
     if rec is None:
         raise ApiError("E1001", "ルールが見つかりません", details={"rule_id": rule_id})
-    # 有効化は検証合格（再現率≥90%・回帰0件）が条件（§5.8.4）
-    if body.status == "active" and not is_activatable(rec.validation_report):
+    # 有効化は検証合格（再現率≥90%・回帰0件）が条件（§5.8.4）。ただし llm_hint は
+    # 人が書いた指示で決定論変換の検証対象ではないため、この条件を課さない。
+    if (
+        body.status == "active"
+        and rec.rule_type != "llm_hint"
+        and not is_activatable(rec.validation_report)
+    ):
         raise ApiError("E1006", "検証未達のため有効化できません（再現率≥90%・回帰0件が必要）")
     updated = admin.set_rule_status(principal.tenant_id, rule_id, body.status)
     assert updated is not None

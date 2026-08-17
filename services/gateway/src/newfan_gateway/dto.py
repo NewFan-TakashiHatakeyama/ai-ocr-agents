@@ -356,6 +356,19 @@ class PatchRuleRequest(BaseModel):
     status: str  # "active"（有効化）/ "retired"（退役）
 
 
+class CreateLlmHintRequest(BaseModel):
+    """LLM最適化ヒント（llm_hint）を人が直接オーサリングする（③）。
+
+    決定論変換（regex/vocab）と違い、抽出LLMへの自然言語指示。ゴールデン再現率の
+    検証対象ではなく、admin が明示的に書いた指示として draft で作られ、承認で有効化する。
+    """
+
+    doc_type: str
+    field_name: Optional[str] = None
+    hint_text: str
+    description: Optional[str] = None
+
+
 class ChatRequest(BaseModel):
     message: str
 
