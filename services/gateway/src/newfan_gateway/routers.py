@@ -1126,8 +1126,12 @@ def create_connection(
         )
     # secret_ref はテナントの名前空間（.../conn/<tenant_id>/...）内だけを許す。
     # これが無いと他テナントの秘密名/ARN を自分の接続に張り、自分の config.host へ
-    # パスワードとして送出させられる（クロステナント窃取。レビューで実証）
-    if body.secret_ref and f"/conn/{principal.tenant_id}/" not in body.secret_ref:
+    # パスワードとして送出させられる（クロステナント窃取。レビューで実証）。
+    # 例外: フォルダ監視系（gdrive/m365/box）の `env:NAME` はローカル/compose の
+    # 実 OAuth 検証用に許可する。これらの秘密は固定の各社トークンエンドポイントへ
+    # しか送られない（利用者が宛先を差し替えられる db_write とは攻撃面が異なる）
+    env_ref_ok = body.type in _FOLDER_SOURCE_TYPES and (body.secret_ref or "").startswith("env:")
+    if body.secret_ref and not env_ref_ok and f"/conn/{principal.tenant_id}/" not in body.secret_ref:
         raise ApiError(
             "E4001",
             "secret_ref は自テナントの名前空間にある必要があります"
