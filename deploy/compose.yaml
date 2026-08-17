@@ -142,16 +142,21 @@ services:
       # sink.db_write のローカル用秘密（secret_ref "env:SINK_DB_PASSWORD" が読む。
       # AWS では Secrets Manager を使うためこの変数は使われない）
       SINK_DB_PASSWORD: ${SINK_DB_PASSWORD:-}
-      # ⑤⑥ SaaS連携（GDrive）。ローカルは FakeGDriveProvider＝下記マウントの
-      # ディレクトリを Drive フォルダに見立てる（./gdrive-fake/<folder_id>/ にファイルを
-      # 置くと検知→取込→ワークフロー発火）。実 API は GOOGLE_OAUTH_CLIENT_ID/SECRET
-      # を設定して GDRIVE_FAKE_ROOT を外す（.env 差し替えのみで切替）。
+      # ⑤⑥ SaaS連携（GDrive/M365/Box）。ローカルは Fake＝下記マウントのディレクトリを
+      # SaaS フォルダに見立てる（./<type>-fake/<folder_id>/ にファイルを置くと
+      # 検知→取込→ワークフロー発火）。実 API は各種 env を設定して *_FAKE_ROOT を外す
+      # （gdrive: GOOGLE_OAUTH_CLIENT_ID/SECRET、m365: M365_TENANT_ID/CLIENT_ID/SECRET、
+      #  box: BOX_CLIENT_ID/SECRET/ENTERPRISE_ID。.env 差し替えのみで切替）。
       GDRIVE_FAKE_ROOT: ${GDRIVE_FAKE_ROOT:-/gdrive-fake}
-      GDRIVE_POLL_INTERVAL_SEC: ${GDRIVE_POLL_INTERVAL_SEC:-15}
+      M365_FAKE_ROOT: ${M365_FAKE_ROOT:-/m365-fake}
+      BOX_FAKE_ROOT: ${BOX_FAKE_ROOT:-/box-fake}
+      SAAS_POLL_INTERVAL_SEC: ${SAAS_POLL_INTERVAL_SEC:-15}
       STORAGE_ROOT: /data
     volumes:
       - appdata:/data
       - ./gdrive-fake:/gdrive-fake
+      - ./m365-fake:/m365-fake
+      - ./box-fake:/box-fake
     depends_on:
       postgres:
         condition: service_healthy

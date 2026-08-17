@@ -12,6 +12,8 @@ export const CATEGORY: Record<string, { label: string; color: string }> = {
 export const TYPE_LABEL: Record<string, string> = {
   "source.s3_event": "S3 イベント",
   "source.gdrive_event": "Google Drive",
+  "source.m365_event": "Microsoft 365",
+  "source.box_event": "Box",
   "source.manual": "手動実行",
   "source.schedule": "スケジュール",
   "source.email_attachment": "メール添付",
@@ -35,6 +37,14 @@ const ICON_PATHS: Record<string, { d?: string[]; circle?: [number, number, numbe
   "source.gdrive_event": {
     // Drive 風トライアングル + 取り込み矢印（フォルダ新着でトリガー）
     d: ["M9 4.5h6l5.5 9.5-3 5H6.5l-3-5z", "M12 9v6", "M9.5 12.5 12 15l2.5-2.5"],
+  },
+  "source.m365_event": {
+    // ウィンドウ4分割（Microsoft）+ 取り込み矢印
+    d: ["M4 4.5h16v11H4z", "M12 4.5v11", "M4 10h16", "M12 17v3.5", "M9.5 18.5 12 21l2.5-2.5"],
+  },
+  "source.box_event": {
+    // 箱 + 取り込み矢印（フォルダ新着でトリガー）
+    d: ["M4 8l8-4 8 4v8l-8 4-8-4z", "M4 8l8 4 8-4", "M12 12v6"],
   },
   "source.manual": { d: ["M8.5 5.5v13l10-6.5z"] },
   "source.schedule": { d: ["M12 7.5v4.5l3 2"], circle: [[12, 12, 8.5]] },

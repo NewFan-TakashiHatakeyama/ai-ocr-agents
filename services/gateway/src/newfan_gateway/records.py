@@ -167,6 +167,11 @@ class ConnectionRecord(BaseModel):
     allowed_tables: list[str] = Field(default_factory=list)
     status: str = "untested"
     created_at: Optional[str] = None
+    # 最終同期の結果（⑤⑥ フォルダ監視系。worker のポーラーが書く）。
+    # UI で「取り込まれないのに気付けない」サイレント故障を可視化する
+    last_synced_at: Optional[str] = None
+    last_sync_status: Optional[str] = None  # ok / error
+    last_sync_error: Optional[str] = None
 
 
 class MemoryRecord(BaseModel):

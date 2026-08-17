@@ -297,3 +297,38 @@ def test_load_extract_resultは実DDLからoriginal_nameとfieldsを返す() -> 
             c.execute(text("DELETE FROM extraction_runs WHERE id=:r"), {"r": run_id})
             c.execute(text("DELETE FROM documents WHERE id=:d"), {"d": doc_id})
             c.execute(text("DELETE FROM tenants WHERE id=:t"), {"t": tenant})
+
+
+def test_record_sync_resultは実DDLのconnectionsへ書ける() -> None:
+    """チップ2（同期結果の永続化）の実 DDL 回帰。migration 0003 の列と整合すること。"""
+    from sqlalchemy import create_engine, text
+
+    from newfan_orchestrator.workflow_store import PgTriggerStore
+
+    owner = create_engine(_DSN, future=True)  # type: ignore[arg-type]
+    tenant = "ten_sync_res"
+    cid = f"connection_{uuid.uuid4().hex[:12]}"
+    with owner.begin() as c:
+        c.execute(text("INSERT INTO tenants (id,name) VALUES (:t,'x') ON CONFLICT DO NOTHING"),
+                  {"t": tenant})
+        c.execute(text(
+            "INSERT INTO connections (id, tenant_id, type, name, config)"
+            " VALUES (:i,:t,'gdrive','sync-res','{\"folder_id\":\"f\"}')"), {"i": cid, "t": tenant})
+    store = PgTriggerStore(_DSN)  # type: ignore[arg-type]
+    try:
+        store.record_sync_result(tenant, cid, ok=False, error="Drive API 500")
+        with owner.begin() as c:
+            row = c.execute(text(
+                "SELECT last_sync_status, last_sync_error, last_synced_at IS NOT NULL"
+                " FROM connections WHERE id=:i"), {"i": cid}).first()
+        assert row is not None and row[0] == "error" and row[1] == "Drive API 500" and row[2]
+        store.record_sync_result(tenant, cid, ok=True, error=None)
+        with owner.begin() as c:
+            row = c.execute(text(
+                "SELECT last_sync_status, last_sync_error FROM connections WHERE id=:i"),
+                {"i": cid}).first()
+        assert row is not None and row[0] == "ok" and row[1] is None
+    finally:
+        with owner.begin() as c:
+            c.execute(text("DELETE FROM connections WHERE id=:i"), {"i": cid})
+            c.execute(text("DELETE FROM tenants WHERE id=:t"), {"t": tenant})

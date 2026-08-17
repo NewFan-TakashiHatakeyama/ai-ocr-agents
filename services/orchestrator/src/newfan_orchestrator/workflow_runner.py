@@ -139,6 +139,9 @@ class WorkflowRunner:
                 "workflow_run_id": locked.workflow_run_id,
                 "tenant_id": locked.tenant_id,
                 "document_id": locked.document_id or "",
+                # 複数トリガーの WF で「発火した経路だけ」を実行するための入口情報。
+                # 無い（旧run・旧形式）場合はグラフ側が全経路にフォールバックする
+                "fired_trigger": locked.trigger_node_id,
                 "node_outputs": {},
             }
             return app.invoke(init, config)

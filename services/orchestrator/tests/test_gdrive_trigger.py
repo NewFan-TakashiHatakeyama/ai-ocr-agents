@@ -192,3 +192,121 @@ def test_run_onceはinterval内の再実行を間引く(tmp_path) -> None:
     assert poller.run_once() == 1
     (tmp_path / "inbox" / "d.pdf").write_bytes(b"d")
     assert poller.run_once() == 0  # interval 内は間引かれる（次の tick で拾う）
+
+
+# ---- ⑤⑥ 横展開: m365 / box（FolderEventPoller の種別パラメタ化） ----
+
+
+def _folder_graph(node_type: str, connection_id: str = "con_f") -> dict:
+    return {
+        "version": 1,
+        "nodes": [
+            {"id": "t1", "type": node_type, "config": {"connection_id": connection_id}},
+            {"id": "x1", "type": "process.extract", "config": {"schema_id": "sch_inv"}},
+        ],
+        "edges": [{"from": "t1", "to": "x1"}],
+    }
+
+
+def _typed_poller(store, root: str, conn_type: str, node_cls):
+    from newfan_orchestrator.workflow_trigger import FolderEventPoller
+
+    enqueued: list = []
+    poller = FolderEventPoller(
+        store=store,
+        provider=FakeGDriveProvider(root),
+        ingest=lambda _u: _IngestResult(),
+        enqueue=lambda s, m: enqueued.append({"stream": s, **m}),
+        poll_interval_sec=0.0,
+        conn_type=conn_type,
+        node_cls=node_cls,
+    )
+    return poller, enqueued
+
+
+def test_m365ポーラーは同型に検知しtrigger種別を記録する(tmp_path) -> None:
+    from newfan_workflow.models import M365EventNode
+
+    store = InMemoryTriggerStore()
+    store.seed_workflow(TENANT, "wf_m365", 1, _folder_graph("source.m365_event"))
+    store.seed_folder_connection(TENANT, "con_f", "m365", "inbox")
+    (tmp_path / "inbox").mkdir()
+    (tmp_path / "inbox" / "発注書_XYZ.pdf").write_bytes(b"pdf")
+
+    poller, enqueued = _typed_poller(store, str(tmp_path), "m365", M365EventNode)
+    assert poller.poll_all() == 1
+    assert store.documents[0]["external_ref"].startswith("m365://inbox/")
+    assert store.runs[0]["trigger_type"] == "m365_event"
+    assert store.runs[0]["source_key"].startswith("m365:")
+    assert len(enqueued) == 1
+
+
+def test_boxポーラーは同型に検知する(tmp_path) -> None:
+    from newfan_workflow.models import BoxEventNode
+
+    store = InMemoryTriggerStore()
+    store.seed_workflow(TENANT, "wf_box", 1, _folder_graph("source.box_event"))
+    store.seed_folder_connection(TENANT, "con_f", "box", "inbox")
+    (tmp_path / "inbox").mkdir()
+    (tmp_path / "inbox" / "領収書_01.png").write_bytes(b"png")
+
+    poller, enqueued = _typed_poller(store, str(tmp_path), "box", BoxEventNode)
+    assert poller.poll_all() == 1
+    assert store.runs[0]["trigger_type"] == "box_event"
+    assert len(enqueued) == 1
+
+
+def test_種別が違う接続はポーラーから見えない(tmp_path) -> None:
+    # gdrive ノードが box 接続を指しても（設定ミス）、型不一致で skip され誤取込しない
+    from newfan_workflow.models import GDriveEventNode
+
+    store = InMemoryTriggerStore()
+    store.seed_workflow(TENANT, "wf_gd", 1, _folder_graph("source.gdrive_event"))
+    store.seed_folder_connection(TENANT, "con_f", "box", "inbox")  # 型が違う
+    (tmp_path / "inbox").mkdir()
+    (tmp_path / "inbox" / "a.pdf").write_bytes(b"pdf")
+
+    poller, enqueued = _typed_poller(store, str(tmp_path), "gdrive", GDriveEventNode)
+    assert poller.poll_all() == 0
+    assert enqueued == []
+
+
+def test_gdriveノードはm365ポーラーにmatchしない(tmp_path) -> None:
+    # 同一テナントに gdrive WF だけがある時、m365 ポーラーが誤って拾わない
+    from newfan_workflow.models import M365EventNode
+
+    store = InMemoryTriggerStore()
+    store.seed_workflow(TENANT, "wf_gd", 1, _folder_graph("source.gdrive_event"))
+    store.seed_folder_connection(TENANT, "con_f", "m365", "inbox")
+    (tmp_path / "inbox").mkdir()
+    (tmp_path / "inbox" / "a.pdf").write_bytes(b"pdf")
+
+    poller, enqueued = _typed_poller(store, str(tmp_path), "m365", M365EventNode)
+    assert poller.poll_all() == 0
+    assert enqueued == []
+
+
+# ---- チップ2: 同期結果の記録（サイレント失敗の可視化） ----
+
+
+def test_同期成功はok結果を記録する(tmp_path) -> None:
+    store = InMemoryTriggerStore()
+    _seed(store, tmp_path)
+    (tmp_path / "inbox" / "z.pdf").write_bytes(b"z")
+    poller, _ = _poller(store, str(tmp_path))
+    poller.sync_now(TENANT, "con_gd")
+    assert store.sync_results[(TENANT, "con_gd")] == {"ok": True, "error": None}
+
+
+def test_同期失敗はerror結果を記録して例外を伝える(tmp_path) -> None:
+    import pytest as _pytest
+
+    store = InMemoryTriggerStore()
+    store.seed_workflow(TENANT, "wf_gd", 1, _graph())
+    store.seed_gdrive_connection(TENANT, "con_gd", "typo-folder")  # 実体なし → Fake が例外
+    poller, _ = _poller(store, str(tmp_path))
+    with _pytest.raises(FileNotFoundError):
+        poller.sync_now(TENANT, "con_gd")
+    rec = store.sync_results[(TENANT, "con_gd")]
+    assert rec["ok"] is False
+    assert "typo-folder" in (rec["error"] or "")

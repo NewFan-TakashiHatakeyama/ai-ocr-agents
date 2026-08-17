@@ -305,6 +305,10 @@ class ConnectionDto(BaseModel):
     allowed_tables: list[str] = Field(default_factory=list)
     status: str
     created_at: Optional[str] = None
+    # 最終同期の結果（⑤⑥。サイレント失敗の可視化）
+    last_synced_at: Optional[str] = None
+    last_sync_status: Optional[str] = None  # ok / error
+    last_sync_error: Optional[str] = None
 
 
 class ConnectionList(BaseModel):

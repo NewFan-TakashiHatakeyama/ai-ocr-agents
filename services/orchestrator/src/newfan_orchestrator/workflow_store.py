@@ -38,6 +38,10 @@ class LockedRun:
     document_id: Optional[str]
     status: str
     graph_json: dict[str, Any]
+    # 発火したトリガーノード（workflow_runs.trigger.node_id）。複数トリガーの
+    # ワークフローで「発火した経路だけ」を実行するために runner が初期 state へ載せる。
+    # 無い（旧run・手動旧形式）場合は全経路実行（後方互換）
+    trigger_node_id: Optional[str] = None
     _update: Callable[..., None] = field(repr=False, default=lambda **kw: None)
 
     def update(
@@ -127,12 +131,14 @@ class InMemoryWorkflowRunStore:
         graph_json: dict[str, Any],
         document_id: str = "doc_1",
         workflow_version: int = 1,
+        trigger_node_id: Optional[str] = None,
     ) -> None:
         self.runs[workflow_run_id] = {
             "tenant_id": tenant_id,
             "workflow_id": workflow_id,
             "workflow_version": workflow_version,
             "document_id": document_id,
+            "trigger_node_id": trigger_node_id,
             "graph_json": graph_json,
             "status": "running",
             "waiting": None,
@@ -171,6 +177,7 @@ class InMemoryWorkflowRunStore:
                 document_id=row["document_id"],
                 status=row["status"],
                 graph_json=row["graph_json"],
+                trigger_node_id=row.get("trigger_node_id"),
                 _update=_update,
             )
         finally:
@@ -303,6 +310,7 @@ class PgWorkflowRunStore:
                 document_id=row["document_id"],
                 status=row["status"],
                 graph_json=(row["trigger"] or {}).get("graph_json") or {},
+                trigger_node_id=(row["trigger"] or {}).get("node_id"),
                 _update=_update,
             )
 
@@ -551,27 +559,27 @@ class PgTriggerStore:
             ).first()
         return row[0] if row else None
 
-    def get_gdrive_connection(self, tenant_id: str, connection_id: str):
+    def get_folder_connection(self, tenant_id: str, connection_id: str, conn_type: str):
         from sqlalchemy import text
 
-        from newfan_orchestrator.workflow_trigger import GDriveConnection
+        from newfan_orchestrator.workflow_trigger import FolderConnection
 
         # ソース接続は取込のみでデータ流出面が無く、疎通テスト（test_connection）も
         # postgres 専用のため、untested を弾かない（疎通は同期の成否で確認する）。
-        # disabled だけは尊重する。
+        # disabled だけは尊重する。gdrive/m365/box で同型（フォルダ監視系）。
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
             row = c.execute(
                 text(
                     "SELECT config->>'folder_id', secret_ref FROM connections"
-                    " WHERE tenant_id=:t AND id=:i AND type='gdrive'"
+                    " WHERE tenant_id=:t AND id=:i AND type=:ty"
                     " AND status <> 'disabled'"
                 ),
-                {"t": tenant_id, "i": connection_id},
+                {"t": tenant_id, "i": connection_id, "ty": conn_type},
             ).first()
         if row is None or not row[0]:
             return None
-        return GDriveConnection(folder_id=row[0], secret_ref=row[1])
+        return FolderConnection(folder_id=row[0], secret_ref=row[1])
 
     def mark_connection_tested(self, tenant_id: str, connection_id: str) -> None:
         from sqlalchemy import text
@@ -585,6 +593,27 @@ class PgTriggerStore:
                     " WHERE tenant_id=:t AND id=:i AND status='untested'"
                 ),
                 {"t": tenant_id, "i": connection_id},
+            )
+
+    def record_sync_result(self, tenant_id: str, connection_id: str, *, ok: bool, error):
+        from sqlalchemy import text
+
+        # 最終同期の結果を UI で可視化する（レビュー確定: 202/成功トーストと実際の
+        # 失敗が乖離し、folder_id 誤設定や API 失敗に利用者が気付けなかった）
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            c.execute(
+                text(
+                    "UPDATE connections SET last_synced_at=now(),"
+                    " last_sync_status=:s, last_sync_error=:e"
+                    " WHERE tenant_id=:t AND id=:i"
+                ),
+                {
+                    "s": "ok" if ok else "error",
+                    "e": error,
+                    "t": tenant_id,
+                    "i": connection_id,
+                },
             )
 
     def already_claimed(self, tenant_id, connection_id, source_key, content_hash) -> bool:

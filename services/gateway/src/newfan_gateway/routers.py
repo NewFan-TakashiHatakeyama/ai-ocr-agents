@@ -674,6 +674,16 @@ def start_workflow_run(
         )
     _require_document(repo, principal.tenant_id, body.document_id)
 
+    # 発火トリガー＝グラフの source.manual ノード。複数トリガーの WF では runner が
+    # この node_id の経路だけを実行する（無い場合は従来どおり全経路＝後方互換）
+    manual_node_id = next(
+        (
+            n.get("id")
+            for n in (rec.graph_json or {}).get("nodes", [])
+            if n.get("type") == "source.manual"
+        ),
+        None,
+    )
     run = wf.create_run(
         WorkflowRunRecord(
             id=new_id("wfrun"),
@@ -683,7 +693,12 @@ def start_workflow_run(
             document_id=body.document_id,
             # graph_json のスナップショットで版を固定する（§11.1）。以後 workflows 側が
             # 更新されても、この run は開始時点の定義で最後まで走る
-            trigger={"type": "manual", "by": principal.sub, "graph_json": rec.graph_json},
+            trigger={
+                "type": "manual",
+                "by": principal.sub,
+                "node_id": manual_node_id,
+                "graph_json": rec.graph_json,
+            },
         )
     )
     queue.enqueue(
@@ -1026,7 +1041,9 @@ def pause_workflow(
     return _workflow_dto(updated)
 
 
-_CONNECTION_TYPES = {"postgres", "webhook", "s3", "gdrive"}
+_CONNECTION_TYPES = {"postgres", "webhook", "s3", "gdrive", "m365", "box"}
+# フォルダ監視系（⑤⑥）。config.folder_id と「今すぐ同期」を同型で扱う
+_FOLDER_SOURCE_TYPES = {"gdrive", "m365", "box"}
 # 秘密らしいキーの部分一致判定に使う（完全一致だと passwd/secret_access_key 等が抜ける）
 _SECRETY_SUBSTRINGS = ("secret", "password", "passwd", "pwd", "token", "api_key", "apikey",
                        "credential")
@@ -1074,6 +1091,9 @@ def list_connections(
                 config=_redact_config(r.config or {}),
                 secret_ref=r.secret_ref, allowed_tables=r.allowed_tables,
                 status=r.status, created_at=r.created_at,
+                last_synced_at=r.last_synced_at,
+                last_sync_status=r.last_sync_status,
+                last_sync_error=r.last_sync_error,
             )
             for r in rows
         ]
@@ -1114,17 +1134,18 @@ def create_connection(
             f"（ai-ocr/<env>/conn/{principal.tenant_id}/<名前> で登録して ARN か名前を渡す）",
             details={"secret_ref": body.secret_ref},
         )
-    # gdrive は監視フォルダが無いと何も検知できない（サイレント故障）ため作成時に要求する
-    if body.type == "gdrive":
+    # フォルダ監視系（gdrive/m365/box）は監視フォルダが無いと何も検知できない
+    # （サイレント故障）ため作成時に要求する
+    if body.type in _FOLDER_SOURCE_TYPES:
         folder_id = str(body.config.get("folder_id") or "").strip()
         if not folder_id:
             raise ApiError(
                 "E4001",
-                "gdrive 接続には config.folder_id（監視する Drive フォルダの ID）が必要です",
+                f"{body.type} 接続には config.folder_id（監視するフォルダの ID）が必要です",
                 details={"config_keys": sorted(body.config.keys())},
             )
-        # コピペ由来の改行・クォート等は Drive クエリ（'<id>' in parents）を破壊し、
-        # 同期がサイレントに失敗し続ける（レビュー確定）。作成時に断り、値は正規化して保存
+        # コピペ由来の改行・クォート等は SaaS 側クエリを破壊し、同期がサイレントに
+        # 失敗し続ける（レビュー確定）。作成時に断り、値は正規化して保存
         if len(folder_id) > 200 or any(ch in folder_id for ch in ("'", '"', "\n", "\r", "\t")):
             raise ApiError(
                 "E4001",
@@ -1221,17 +1242,21 @@ def sync_connection(
 ) -> dto.ConnectionSyncAccepted:
     """「今すぐ同期」（⑤⑥ SaaS連携）。
 
-    gdrive 接続の監視フォルダを即時に差分検知する。実際の検知・取込は
-    orchestrator-worker 内のポーラー（q.sync 消費）が行う（gateway は Drive に触らない）。
-    定期ポーリング（GDRIVE_POLL_INTERVAL_SEC）を待たずに取り込みたいときの導線。
+    フォルダ監視系接続（gdrive/m365/box）の監視フォルダを即時に差分検知する。
+    実際の検知・取込は orchestrator-worker 内のポーラー（q.sync 消費）が行う
+    （gateway は SaaS に触らない）。定期ポーリングを待たずに取り込みたいときの導線。
     """
     import time as _time
 
     rec = admin.get_connection(principal.tenant_id, connection_id)
     if rec is None:
         raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
-    if rec.type != "gdrive":
-        raise ApiError("E1005", "今すぐ同期は type=gdrive のみ対応です", details={"type": rec.type})
+    if rec.type not in _FOLDER_SOURCE_TYPES:
+        raise ApiError(
+            "E1005",
+            "今すぐ同期はフォルダ監視系（gdrive/m365/box）のみ対応です",
+            details={"type": rec.type},
+        )
     if rec.status == "disabled":
         raise ApiError("E1005", "無効化された接続は同期できません", details={"status": rec.status})
 
@@ -1245,7 +1270,12 @@ def sync_connection(
 
     queue.enqueue(
         "q.sync",
-        {"tenant_id": principal.tenant_id, "connection_id": connection_id},
+        {
+            "tenant_id": principal.tenant_id,
+            "connection_id": connection_id,
+            # worker が種別毎のポーラーへ振り分けるための実種別
+            "type": rec.type,
+        },
     )
     wf.record_audit(
         principal.tenant_id, actor_id=principal.sub, action="connection.sync",
