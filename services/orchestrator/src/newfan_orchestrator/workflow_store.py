@@ -419,7 +419,7 @@ class PgWorkflowRunStore:
             self._rls(c, tenant_id)
             head = c.execute(
                 text(
-                    "SELECT d.doc_type FROM extraction_runs r JOIN documents d"
+                    "SELECT d.doc_type, d.original_name FROM extraction_runs r JOIN documents d"
                     " ON d.id = r.document_id WHERE r.tenant_id=:t AND r.id=:r"
                 ),
                 {"t": tenant_id, "r": run_id},
@@ -435,6 +435,7 @@ class PgWorkflowRunStore:
         confs = [f["confidence"] for f in fields.values()]
         return {
             "doc_type": head[0] if head else None,
+            "original_name": head[1] if head else None,
             "fields": fields,
             # run 全体の確度は最弱フィールドで代表する（保守的。値が無ければ None → 条件 False）
             "run_confidence": min(confs) if confs else None,

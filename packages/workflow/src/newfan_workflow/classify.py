@@ -15,12 +15,12 @@ import re
 from dataclasses import dataclass, field
 
 # doc_type → 日本語/英語の代表語。ここに無い doc_type は doc_type 名そのものを語彙に使う。
+# 別名（estimate=quotation, order=purchase_order 等）は独立キーにしない。独立させると
+# 同じ日本語（例「発注書」）が複数キーに一致して同点になり、確信度が不当に下がる。
 DOC_TYPE_SYNONYMS: dict[str, list[str]] = {
     "invoice": ["請求書", "御請求", "ご請求", "請求金額", "invoice"],
     "quotation": ["見積書", "御見積", "お見積", "見積", "見積金額", "quotation", "estimate"],
-    "estimate": ["見積書", "御見積", "見積", "estimate"],
-    "purchase_order": ["発注書", "注文書", "ご注文", "purchase order", "purchaseorder"],
-    "order": ["注文書", "発注書", "ご注文", "order"],
+    "purchase_order": ["発注書", "注文書", "ご注文", "purchase order", "purchaseorder", "order"],
     "delivery_note": ["納品書", "納品", "delivery note", "deliverynote"],
     "receipt": ["領収書", "領収", "レシート", "receipt"],
     "statement": ["取引明細", "明細書", "statement"],

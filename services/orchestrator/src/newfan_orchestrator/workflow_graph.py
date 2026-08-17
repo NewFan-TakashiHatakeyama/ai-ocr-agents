@@ -25,6 +25,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 from newfan_metrics import sink_write_rows_total, workflow_node_duration_seconds
 from newfan_workflow import EvalContext, FieldView, WorkflowGraph, evaluate, is_trigger, parse_expr
+from newfan_workflow.classify import DOC_TYPE_SYNONYMS, build_candidate, classify_text
 from newfan_workflow.dbsink import (
     LEDGER_COLUMN,
     build_db_write_sql,
@@ -71,6 +72,7 @@ class WorkflowState(TypedDict, total=False):
     run_id: str
     run_status: str
     doc_type: Optional[str]
+    original_name: Optional[str]  # 元ファイル名（classify ゲートの内容信号）
     run_confidence: Optional[float]
     fields: dict[str, Any]  # field名 → {"value": str|None, "confidence": float}
     node_outputs: Annotated[dict[str, Any], _merge_dicts]
@@ -139,6 +141,7 @@ def _make_extract(node: ExtractNode, deps: RunnerDeps) -> Callable:
             "run_id": event.get("run_id", run_id),
             "run_status": event.get("status", ""),
             "doc_type": event.get("doc_type"),
+            "original_name": event.get("original_name"),
             "run_confidence": event.get("run_confidence"),
             "fields": event.get("fields", {}),
             "node_outputs": {node.id: {"run_id": run_id, "status": event.get("status")}},
@@ -297,22 +300,61 @@ def _make_db_write(node: DbWriteNode, deps: RunnerDeps, map_preds: list[str]) ->
     return run
 
 
-def _make_classify(node: ClassifyNode) -> Callable:
-    """process.classify（P8）。抽出結果の doc_type を許可リストと照合する。
+# 内容分類がスキーマ由来の doc_type を上書きする確信度の下限。誤検知で正当な run を
+# 止めないよう高めに置く（ファイル名 1 語一致で 1.0、拮抗では 0.5 付近に落ちる）。
+_CLASSIFY_MIN_CONFIDENCE = 0.75
 
-    分類そのものは抽出グラフ（§4）が行い doc_type を返す（DD-11: ここで再分類しない）。
+
+def _make_classify(node: ClassifyNode) -> Callable:
+    """process.classify（P8）。帳票種別を許可リストと照合する。
+
+    まずスキーマ由来の doc_type（抽出が返す）を使うが、ファイル名や抽出値から
+    内容分類が確信をもって別種別を示す場合はそれを採用してゲートする（⑦）。
+    これで「請求ワークフローに発注書が紛れ込む」ような取り違えを検知できる。
     on_unknown=halt は対象外帳票で run を止める。default_route は素通り
     （下流の branch.condition が doc.doc_type で経路を分ける前提）。
+
+    信号（ファイル名・抽出値）が無い、または確信が持てない場合は従来どおり
+    スキーマ doc_type をそのまま使う（非破壊）。
     """
+    # 許可種別＋既知の一般種別を候補にする。許可外の種別も認識できるようにして、
+    # 「対象外がすり抜ける」ケースを拾う。
+    doc_types = list(dict.fromkeys([*node.config.doc_types, *DOC_TYPE_SYNONYMS.keys()]))
+    candidates = [build_candidate(dt) for dt in doc_types]
 
     def run(state: WorkflowState) -> dict[str, Any]:
-        dt = state.get("doc_type")
-        known = dt in node.config.doc_types
+        schema_dt = state.get("doc_type")
+        filename = state.get("original_name") or ""
+        fields = state.get("fields") or {}
+        text = " ".join(
+            str(v.get("value") or "") for v in fields.values() if isinstance(v, dict)
+        )
+
+        content = None
+        if filename or text:
+            out = classify_text(
+                text=text,
+                filename=filename,
+                candidates=candidates,
+                min_confidence=_CLASSIFY_MIN_CONFIDENCE,
+            )
+            if out.doc_type is not None:
+                content = out
+
+        effective_dt = content.doc_type if content else schema_dt
+        known = effective_dt in node.config.doc_types
         if not known and node.config.on_unknown == "halt":
             raise RuntimeError(
-                f"doc_type が分類対象外です: {dt!r}（対象: {node.config.doc_types}）"
+                f"doc_type が分類対象外です: {effective_dt!r}（対象: {node.config.doc_types}）"
             )
-        return {"node_outputs": {node.id: {"doc_type": dt, "known": known}}}
+
+        # 信号なし/確信なしのときは従来と同じ最小 output（既存契約・テスト互換）
+        output: dict[str, Any] = {"doc_type": effective_dt, "known": known}
+        if content is not None:
+            output["schema_doc_type"] = schema_dt
+            output["content_doc_type"] = content.doc_type
+            output["confidence"] = content.confidence
+        return {"node_outputs": {node.id: output}}
 
     return run
 
