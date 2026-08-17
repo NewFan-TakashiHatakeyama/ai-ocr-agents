@@ -30,12 +30,7 @@ from typing import Any, Callable, Optional, Protocol
 from newfan_metrics import watch_lag_seconds
 from newfan_workflow import WorkflowGraph
 from newfan_workflow.cron import JST, CronError, cron_matches
-from newfan_workflow.models import (
-    FOLDER_EVENT_NODE_TYPES,
-    GDriveEventNode,
-    S3EventNode,
-    ScheduleNode,
-)
+from newfan_workflow.models import GDriveEventNode, S3EventNode, ScheduleNode
 
 from newfan_orchestrator.gdrive import GDriveProvider
 
