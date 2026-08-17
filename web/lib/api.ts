@@ -102,6 +102,13 @@ export const api = {
 
   getJob: (jobId: string) => request<JobStatus>(`/jobs/${jobId}`),
 
+  // 手元の帳票を active なワークフローに手動投入する（source.manual, §7.1）
+  startWorkflowRun: (workflowId: string, documentId: string) =>
+    request<{ workflow_run_id: string; workflow_version: number }>(
+      `/workflows/${workflowId}/runs`,
+      { method: "POST", body: JSON.stringify({ document_id: documentId }) },
+    ),
+
   pageImage: (documentId: string, pageNo: number) =>
     request<SignedUrl>(`/documents/${documentId}/pages/${pageNo}/image`),
 

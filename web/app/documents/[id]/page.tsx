@@ -7,6 +7,7 @@ import { use, useCallback, useEffect, useMemo, useState } from "react";
 import { DocViewer } from "@/components/DocViewer";
 import { ExtractStart } from "@/components/ExtractStart";
 import { FieldPanel } from "@/components/FieldPanel";
+import { RunWorkflow } from "@/components/RunWorkflow";
 import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
 import { sortFields } from "@/lib/fields";
@@ -203,6 +204,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           確定 {auto} ·{" "}
           <b style={{ color: pend ? "var(--amber-ink)" : "var(--green)" }}>要確認 {pend}</b>
         </div>
+        <RunWorkflow documentId={data.document_id} />
         <button
           className="btn primary"
           disabled={busy || readOnly || data.status === "confirmed"}

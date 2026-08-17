@@ -590,6 +590,13 @@ a {
   color: var(--ink2);
 }
 
+/* ワークフロー手動投入（ドキュメント詳細ヘッダ） */
+.run-wf { display: flex; align-items: center; gap: 6px; }
+.run-wf select {
+  padding: 6px 8px; font-size: 12px; border: 1px solid var(--line-strong);
+  border-radius: 8px; background: var(--surface); color: inherit; max-width: 200px;
+}
+
 /* 抽出開始（run 無しの帳票） */
 .extract-start {
   max-width: 460px; margin: 48px auto; text-align: center;
