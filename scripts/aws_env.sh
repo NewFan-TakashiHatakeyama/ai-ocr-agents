@@ -169,6 +169,15 @@ cmd_push() {
   # 事後検出できないため、web だけは常に再ビルドする）。
   local alb; alb="$(cd "$TF_DIR" && terraform output -raw alb_dns_name 2>/dev/null || echo "")"
 
+  # app 系（コードが頻繁に変わる）は、タグが在っても「リポジトリの最新コミットより
+  # 古い」なら作り直す。image_tag 据え置き + タグ存在スキップの組合せで 7/21 の
+  # 古いイメージを掴み、新機能欠落と migration 未適用が実際に起きた（レビュー確定）。
+  # inference/vl-* は巨大ビルドかつ変更が稀なため従来どおりタグ有無のみ
+  # （変更した時は image_tag を上げるか、タグを手で消して push し直す）。
+  local app_imgs=" gateway orchestrator-worker export-worker migrate "
+  # git -C に MSYS の /c/... パスを渡すと MSYS_NO_PATHCONV=1 のため解決できない
+  # （実測: fatal: cannot change to）。cd してから実行する
+  local repo_epoch; repo_epoch="$(cd "$repo_root" && git log -1 --format=%ct)"
   local missing=()
   for i in gateway orchestrator-worker export-worker migrate inference web vl-pipeline vlm-server; do
     if [ "$i" = "web" ]; then
@@ -176,7 +185,18 @@ cmd_push() {
       echo "  ai-ocr-${i}:${tag} … ALB 依存のため常に再ビルドします"
       missing+=("$i")
     elif _ecr_has_tag "$i" "$tag"; then
-      echo "  ai-ocr-${i}:${tag} … あり"
+      if [[ "$app_imgs" == *" $i "* ]]; then
+        pushed="$(aws ecr describe-images --region "$REGION" --repository-name "ai-ocr-$i" --image-ids "imageTag=$tag" --query "imageDetails[0].imagePushedAt" --output text 2>/dev/null)"
+        pushed_epoch="$(${PY_BIN} -c "import datetime,sys;print(int(datetime.datetime.fromisoformat(sys.argv[1]).timestamp()))" "$pushed" 2>/dev/null || echo 0)"
+        if [ "${pushed_epoch:-0}" -lt "$repo_epoch" ]; then
+          echo "  ai-ocr-${i}:${tag} … あり（最新コミットより古いため再ビルドします）"
+          missing+=("$i")
+        else
+          echo "  ai-ocr-${i}:${tag} … あり（最新）"
+        fi
+      else
+        echo "  ai-ocr-${i}:${tag} … あり"
+      fi
     else
       echo "  ai-ocr-${i}:${tag} … 無し（ビルドします）"
       missing+=("$i")
@@ -184,11 +204,6 @@ cmd_push() {
   done
 
   aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$reg" >/dev/null
-
-  # ECR は imageTagMutability=IMMUTABLE のため同タグへの push が拒否される。
-  # 旧タグが存在すれば明示的に削除してから push し直す（無ければ何もしない）。
-  aws ecr batch-delete-image --region "$REGION" --repository-name ai-ocr-web \
-    --image-ids imageTag="$tag" >/dev/null 2>&1 || true
 
   local i
   for i in "${missing[@]}"; do
@@ -208,7 +223,27 @@ cmd_push() {
     echo "  building ai-ocr-${i}:${tag} …"
     (cd "$repo_root" && docker build -q "${args[@]}" . >/dev/null) || {
       echo "  [!] ${i} のビルドに失敗しました" >&2; return 1; }
-    docker push -q "${reg}/ai-ocr-${i}:${tag}" >/dev/null && echo "  pushed ai-ocr-${i}:${tag}"
+    # ECR は IMMUTABLE のため旧タグを消してから push する。削除は**ビルド成功後・
+    # push 直前**に行う（先に全削除すると、ビルド失敗時に ECR からタグが消えたまま
+    # になり、以後のタスク起動が pull できなくなる）
+    aws ecr batch-delete-image --region "$REGION" --repository-name "ai-ocr-${i}" \
+      --image-ids imageTag="$tag" >/dev/null 2>&1 || true
+    docker push -q "${reg}/ai-ocr-${i}:${tag}" >/dev/null || {
+      echo "  [!] ${i} の push に失敗しました" >&2; return 1; }
+    echo "  pushed ai-ocr-${i}:${tag}"
+  done
+
+  # push しただけでは稼働中タスクは旧イメージのまま残る（実測）。push した app 系
+  # サービスへ force-new-deployment を打って確実に切り替える（クラスタ未作成時は無視）
+  local svc
+  for i in "${missing[@]}"; do
+    case "$i" in
+      gateway|web|orchestrator-worker|export-worker) svc="ai-ocr-${i}" ;;
+      *) continue ;;
+    esac
+    aws ecs update-service --region "$REGION" --cluster "$(_prefix)" \
+      --service "$svc" --force-new-deployment >/dev/null 2>&1 \
+      && echo "  redeploy ${svc}" || true
   done
 }
 

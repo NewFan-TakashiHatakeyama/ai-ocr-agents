@@ -396,6 +396,32 @@ class PgAdminRepository:
         c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
 
     # --- schemas ---
+    def get_schema_by_id(self, tenant_id: str, schema_id: str):
+        """id 直引き（旧版も解決する）。extract の schema_id 検証に使う。
+
+        列は実 DDL（0001: field_schemas に updated_at は無く created_at のみ）に
+        合わせる。存在しない列を書くと InMemory テストは通るのに本番だけ
+        UndefinedColumn → 500 になる（correction_logs の note 事故と同型。実 AWS で再発）。
+        """
+        from newfan_gateway.records import SchemaFieldDef, SchemaRecord
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "SELECT id, tenant_id, doc_type, version, fields"
+                    " FROM field_schemas WHERE tenant_id=:t AND id=:i"
+                ),
+                {"t": tenant_id, "i": schema_id},
+            ).mappings().first()
+        if r is None:
+            return None
+        return SchemaRecord(
+            id=r["id"], tenant_id=r["tenant_id"], doc_type=r["doc_type"],
+            version=r["version"],
+            fields=[SchemaFieldDef(**f) for f in (r["fields"] or [])],
+        )
+
     def list_schemas(self, tenant_id: str):
         from newfan_gateway.records import SchemaFieldDef, SchemaRecord
 

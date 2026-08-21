@@ -65,15 +65,33 @@ class PgContextStore:
                         "INSERT INTO extraction_fields "
                         "(id, tenant_id, run_id, field_name, value_raw, value_normalized, "
                         " final_value, confidence, grounding_score, page_no, bbox, source_quote, "
-                        " span_ids, review_status) "
+                        # correction/validation を落とすと SCR-03 の LLM補正候補・検証結果が
+                        # 本番で一度も出ない（DDL には列があるのに INSERT に無かった）
+                        " span_ids, review_status, correction, validation) "
                         "VALUES (:id,:t,:r,:fn,:vr,:vn,:fv,:cf,:gs,:pg, CAST(:bb AS jsonb), :sq, "
-                        " CAST(:si AS jsonb), :rs) "
+                        " CAST(:si AS jsonb), :rs, CAST(:co AS jsonb), CAST(:va AS jsonb)) "
                         "ON CONFLICT (run_id, field_name) DO UPDATE SET "
+                        # 再配信の再実行では行全体を新抽出で書き直す。一部の列だけ更新すると
+                        # 「correction は新抽出・value_raw/bbox は旧抽出」のキメラ行になり、
+                        # SCR-03 が実在しない対立候補を提示する（敵対的レビュー確定）
+                        " value_raw = EXCLUDED.value_raw, "
                         " value_normalized = EXCLUDED.value_normalized, "
                         " final_value = EXCLUDED.final_value, "
                         " confidence = EXCLUDED.confidence, "
                         " grounding_score = EXCLUDED.grounding_score, "
-                        " review_status = EXCLUDED.review_status"
+                        " page_no = EXCLUDED.page_no, "
+                        " bbox = EXCLUDED.bbox, "
+                        " source_quote = EXCLUDED.source_quote, "
+                        " span_ids = EXCLUDED.span_ids, "
+                        " correction = EXCLUDED.correction, "
+                        " validation = EXCLUDED.validation, "
+                        " review_status = EXCLUDED.review_status "
+                        # 人手確定（corrected/approved）を機械の再抽出（pending/auto）で
+                        # 巻き戻さない。XACK 前クラッシュ→確定→再配信、の順で人手作業が
+                        # 消える経路を閉じる（敵対的レビュー確定）。finalize の再保存
+                        # （EXCLUDED も corrected/approved）は通る
+                        "WHERE NOT (extraction_fields.review_status IN ('corrected','approved')"
+                        " AND EXCLUDED.review_status IN ('pending','auto'))"
                     ),
                     {
                         "id": f"fld_{uuid.uuid4().hex[:20]}",
@@ -90,6 +108,8 @@ class PgContextStore:
                         "sq": f.source_quote,
                         "si": json.dumps(f.span_ids),
                         "rs": f.review_status.value,
+                        "co": json.dumps(f.correction, ensure_ascii=False) if f.correction else None,
+                        "va": json.dumps(f.validation, ensure_ascii=False) if f.validation else None,
                     },
                 )
             # 明細テーブル（構造由来, §5.3）を extraction_tables に永続化。冪等のため run 分を洗替。
@@ -120,10 +140,14 @@ class PgContextStore:
                     },
                 )
             # fallback_pages（VL 露出用, §5.4）は metrics JSONB へマージ（既存キーは保持）。
-            c.execute(
+            # confirmed の run を再配信の再実行が needs_review 等へ巻き戻さない
+            # （フィールドの人手確定ガードと同じ経路対策。confirmed→confirmed の
+            #   再保存は冪等に通す）
+            run_upd = c.execute(
                 text(
                     "UPDATE extraction_runs SET status = :st, finished_at = now(), "
-                    "metrics = COALESCE(metrics, '{}'::jsonb) || CAST(:m AS jsonb) WHERE id = :r"
+                    "metrics = COALESCE(metrics, '{}'::jsonb) || CAST(:m AS jsonb) "
+                    "WHERE id = :r AND NOT (status = 'confirmed' AND :st <> 'confirmed')"
                 ),
                 {
                     "st": status,
@@ -131,13 +155,15 @@ class PgContextStore:
                     "m": json.dumps({"fallback_pages": sorted(set(fallback_pages or []))}),
                 },
             )
-            c.execute(
-                text(
-                    "UPDATE documents SET status = :st, updated_at = now() "
-                    "WHERE id = (SELECT document_id FROM extraction_runs WHERE id = :r)"
-                ),
-                {"st": status, "r": run_id},
-            )
+            if run_upd.rowcount:
+                # ドキュメント状態は run が実際に遷移した時だけ追従させる
+                c.execute(
+                    text(
+                        "UPDATE documents SET status = :st, updated_at = now() "
+                        "WHERE id = (SELECT document_id FROM extraction_runs WHERE id = :r)"
+                    ),
+                    {"st": status, "r": run_id},
+                )
 
     def add_run_metrics(self, tenant_id, run_id, patch) -> None:
         # 加算で追記（resume ジョブでも積み上がる）。metrics 全体の上書きはしない

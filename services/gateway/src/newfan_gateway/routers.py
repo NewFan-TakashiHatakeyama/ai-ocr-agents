@@ -243,12 +243,20 @@ def extract(
     repo: Repository = Depends(get_repo),
     queue: Queue = Depends(get_queue),
     settings: Settings = Depends(get_settings),
+    admin: AdminRepository = Depends(get_admin),
 ) -> dto.ExtractAccepted:
     _require_document(repo, principal.tenant_id, document_id)
 
     cached = _idempotency_hit(request, idempotency_key, principal.tenant_id)
     if cached is not None:
         return dto.ExtractAccepted(**cached)
+
+    # 空文字の schema_id は「未指定」として扱う。そのまま INSERT すると
+    # extraction_runs の FK 違反で 500（E2000 内部エラー）になり、利用者には
+    # 原因が一切見えない（API 直叩きで実際に発生）。存在しない ID も 404 で明示する。
+    schema_id = (body.schema_id or "").strip() or None
+    if schema_id is not None and admin.get_schema_by_id(principal.tenant_id, schema_id) is None:
+        raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
 
     if repo.has_active_run(principal.tenant_id, document_id):
         raise ApiError("E1005", "実行中の Run と競合しています", details={"document_id": document_id})
@@ -260,7 +268,7 @@ def extract(
             id=run_id,
             tenant_id=principal.tenant_id,
             document_id=document_id,
-            schema_id=body.schema_id,
+            schema_id=schema_id,
             status="processing",
             options=body.options.model_dump(),
         )
@@ -1126,8 +1134,12 @@ def create_connection(
         )
     # secret_ref はテナントの名前空間（.../conn/<tenant_id>/...）内だけを許す。
     # これが無いと他テナントの秘密名/ARN を自分の接続に張り、自分の config.host へ
-    # パスワードとして送出させられる（クロステナント窃取。レビューで実証）
-    if body.secret_ref and f"/conn/{principal.tenant_id}/" not in body.secret_ref:
+    # パスワードとして送出させられる（クロステナント窃取。レビューで実証）。
+    # 例外: フォルダ監視系（gdrive/m365/box）の `env:NAME` はローカル/compose の
+    # 実 OAuth 検証用に許可する。これらの秘密は固定の各社トークンエンドポイントへ
+    # しか送られない（利用者が宛先を差し替えられる db_write とは攻撃面が異なる）
+    env_ref_ok = body.type in _FOLDER_SOURCE_TYPES and (body.secret_ref or "").startswith("env:")
+    if body.secret_ref and not env_ref_ok and f"/conn/{principal.tenant_id}/" not in body.secret_ref:
         raise ApiError(
             "E4001",
             "secret_ref は自テナントの名前空間にある必要があります"
