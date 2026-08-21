@@ -175,7 +175,9 @@ cmd_push() {
   # inference/vl-* は巨大ビルドかつ変更が稀なため従来どおりタグ有無のみ
   # （変更した時は image_tag を上げるか、タグを手で消して push し直す）。
   local app_imgs=" gateway orchestrator-worker export-worker migrate "
-  local repo_epoch; repo_epoch="$(git -C "$repo_root" log -1 --format=%ct)"
+  # git -C に MSYS の /c/... パスを渡すと MSYS_NO_PATHCONV=1 のため解決できない
+  # （実測: fatal: cannot change to）。cd してから実行する
+  local repo_epoch; repo_epoch="$(cd "$repo_root" && git log -1 --format=%ct)"
   local missing=()
   for i in gateway orchestrator-worker export-worker migrate inference web vl-pipeline vlm-server; do
     if [ "$i" = "web" ]; then
