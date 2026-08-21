@@ -65,14 +65,18 @@ class PgContextStore:
                         "INSERT INTO extraction_fields "
                         "(id, tenant_id, run_id, field_name, value_raw, value_normalized, "
                         " final_value, confidence, grounding_score, page_no, bbox, source_quote, "
-                        " span_ids, review_status) "
+                        # correction/validation を落とすと SCR-03 の LLM補正候補・検証結果が
+                        # 本番で一度も出ない（DDL には列があるのに INSERT に無かった）
+                        " span_ids, review_status, correction, validation) "
                         "VALUES (:id,:t,:r,:fn,:vr,:vn,:fv,:cf,:gs,:pg, CAST(:bb AS jsonb), :sq, "
-                        " CAST(:si AS jsonb), :rs) "
+                        " CAST(:si AS jsonb), :rs, CAST(:co AS jsonb), CAST(:va AS jsonb)) "
                         "ON CONFLICT (run_id, field_name) DO UPDATE SET "
                         " value_normalized = EXCLUDED.value_normalized, "
                         " final_value = EXCLUDED.final_value, "
                         " confidence = EXCLUDED.confidence, "
                         " grounding_score = EXCLUDED.grounding_score, "
+                        " correction = EXCLUDED.correction, "
+                        " validation = EXCLUDED.validation, "
                         " review_status = EXCLUDED.review_status"
                     ),
                     {
@@ -90,6 +94,8 @@ class PgContextStore:
                         "sq": f.source_quote,
                         "si": json.dumps(f.span_ids),
                         "rs": f.review_status.value,
+                        "co": json.dumps(f.correction, ensure_ascii=False) if f.correction else None,
+                        "va": json.dumps(f.validation, ensure_ascii=False) if f.validation else None,
                     },
                 )
             # 明細テーブル（構造由来, §5.3）を extraction_tables に永続化。冪等のため run 分を洗替。

@@ -8,6 +8,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import { ApiError, api } from "@/lib/api";
+import { newUuid } from "@/lib/uuid";
 import { useToasts } from "@/lib/toast";
 
 type Phase = "idle" | "running" | "error";
@@ -86,7 +87,7 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
     mutationFn: () =>
       api.extract(documentId, {
         schema_id: effectiveSchema || undefined,
-        idempotencyKey: crypto.randomUUID(),
+        idempotencyKey: newUuid(),
       }),
     onSuccess: (r) => {
       setPhase("running");
