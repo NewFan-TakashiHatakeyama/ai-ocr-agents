@@ -205,14 +205,7 @@ cmd_push() {
 
   aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$reg" >/dev/null
 
-  # ECR は imageTagMutability=IMMUTABLE のため同タグへの push が拒否される。
-  # 再ビルド対象（web の常時 + app 系の鮮度落ち）ごとに旧タグを削除してから push する。
   local i
-  for i in "${missing[@]}"; do
-    aws ecr batch-delete-image --region "$REGION" --repository-name "ai-ocr-${i}" \
-      --image-ids imageTag="$tag" >/dev/null 2>&1 || true
-  done
-
   for i in "${missing[@]}"; do
     # -f には相対パスを渡す。MSYS 環境の bash から /c/... 形式の絶対パスを渡すと
     # docker が解釈できず「resolve: CreateFile \c: …」で落ちる（実測）。
@@ -230,7 +223,14 @@ cmd_push() {
     echo "  building ai-ocr-${i}:${tag} …"
     (cd "$repo_root" && docker build -q "${args[@]}" . >/dev/null) || {
       echo "  [!] ${i} のビルドに失敗しました" >&2; return 1; }
-    docker push -q "${reg}/ai-ocr-${i}:${tag}" >/dev/null && echo "  pushed ai-ocr-${i}:${tag}"
+    # ECR は IMMUTABLE のため旧タグを消してから push する。削除は**ビルド成功後・
+    # push 直前**に行う（先に全削除すると、ビルド失敗時に ECR からタグが消えたまま
+    # になり、以後のタスク起動が pull できなくなる）
+    aws ecr batch-delete-image --region "$REGION" --repository-name "ai-ocr-${i}" \
+      --image-ids imageTag="$tag" >/dev/null 2>&1 || true
+    docker push -q "${reg}/ai-ocr-${i}:${tag}" >/dev/null || {
+      echo "  [!] ${i} の push に失敗しました" >&2; return 1; }
+    echo "  pushed ai-ocr-${i}:${tag}"
   done
 
   # push しただけでは稼働中タスクは旧イメージのまま残る（実測）。push した app 系
