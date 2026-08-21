@@ -24,31 +24,11 @@ import psycopg
 from psycopg import sql
 
 # アプリが触る業務テーブル。RLS のポリシーで tenant_id 一致行だけが見える。
-# alembic の _RLS_TABLES と揃えること。
-_TABLES = [
-    "tenants",
-    "users",
-    "field_schemas",
-    "documents",
-    "pages",
-    "extraction_runs",
-    "extraction_fields",
-    "extraction_tables",
-    "correction_logs",
-    "tenant_memories",
-    "tenant_rules",
-    "jobs",
-    "audit_logs",
-    "connections",
-    "workflows",
-    "workflow_runs",
-    # migration 0003 で追加。ここに足し忘れると ALTER DEFAULT PRIVILEGES は
-    # 「以後に作られる表」にしか効かないため GRANT されず、ワークフロー実行が
-    # 最初のノードで permission denied で落ちる（実 AWS の E2E で発生）
-    "workflow_node_runs",
-    "source_cursors",
-]
-
+# GRANT は「public の全テーブルへ一括」+「alembic_version だけ剥奪」で管理する。
+# 以前はテーブルの明示リストを保持していたが、migration 0003 の workflow_node_runs を
+# 足し忘れて本番のワークフロー実行が全滅した（敵対的レビュー確定）。明示リストは
+# 一括 GRANT の導入後は「消しても権限が剥がれない死んだ許可リスト」になるため撤去した。
+# 権限を絞りたいテーブルは下の REVOKE 節に足すこと（それが唯一の絞り口）。
 
 def main() -> int:
     app_url = os.environ.get("APP_DATABASE_URL")
@@ -92,22 +72,22 @@ def main() -> int:
             cur.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
                 sql.Identifier(dbname), ident))
             cur.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(ident))
-            for t in _TABLES:
-                cur.execute(
-                    sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON {} TO {}").format(
-                        sql.Identifier(t), ident)
-                )
-            # 明示リストの更新漏れで本番だけ権限エラーになるのを構造的に防ぐ。
-            # 既存テーブルにも一括で GRANT する（ALTER DEFAULT PRIVILEGES は
-            # 「これから作られる表」にしか効かないため、これが無いと漏れが残る）。
+            # 既存テーブルへ一括 GRANT（ALTER DEFAULT PRIVILEGES は「これから作られる表」に
+            # しか効かない）。明示リスト方式は 0003 の workflow_node_runs 足し忘れで
+            # 本番のワークフロー実行が全滅したため廃止（レビュー確定）
             cur.execute(sql.SQL(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}"
             ).format(ident))
+            # alembic_version はアプリが触る理由が無い。書込権限があると、アプリ接続を
+            # 奪われた際に migration 版数の改竄（無音のダウングレード）が可能になる
+            # （レビュー確定）。SELECT も不要なので全剥奪
+            cur.execute(sql.SQL(
+                "REVOKE ALL ON alembic_version FROM {}"
+            ).format(ident))
             cur.execute(sql.SQL(
                 "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}").format(ident))
-            # 今後 migration が足すテーブルにも自動で GRANT されるようにする。
-            # これが無いと新テーブルを足すたびに本スクリプトの _TABLES 更新が要り、
-            # 忘れるとアプリが権限エラーで落ちる。
+            # 今後 migration が足すテーブルにも自動で GRANT されるようにする
+            # （新テーブル追加のたびに本スクリプトの更新を要さないため）。
             cur.execute(sql.SQL(
                 "ALTER DEFAULT PRIVILEGES IN SCHEMA public"
                 " GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {}").format(ident))
