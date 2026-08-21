@@ -42,6 +42,10 @@ _TABLES = [
     "connections",
     "workflows",
     "workflow_runs",
+    # migration 0003 で追加。ここに足し忘れると ALTER DEFAULT PRIVILEGES は
+    # 「以後に作られる表」にしか効かないため GRANT されず、ワークフロー実行が
+    # 最初のノードで permission denied で落ちる（実 AWS の E2E で発生）
+    "workflow_node_runs",
     "source_cursors",
 ]
 
@@ -93,6 +97,12 @@ def main() -> int:
                     sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON {} TO {}").format(
                         sql.Identifier(t), ident)
                 )
+            # 明示リストの更新漏れで本番だけ権限エラーになるのを構造的に防ぐ。
+            # 既存テーブルにも一括で GRANT する（ALTER DEFAULT PRIVILEGES は
+            # 「これから作られる表」にしか効かないため、これが無いと漏れが残る）。
+            cur.execute(sql.SQL(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}"
+            ).format(ident))
             cur.execute(sql.SQL(
                 "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {}").format(ident))
             # 今後 migration が足すテーブルにも自動で GRANT されるようにする。
