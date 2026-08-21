@@ -142,3 +142,39 @@ def test_create_rule_roundtrips_llm_hint() -> None:
         with admin._engine.begin() as c:  # noqa: SLF001
             c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
             c.execute(text("DELETE FROM tenant_rules WHERE id=:i"), {"i": rid})
+
+
+def test_get_schema_by_id_matches_real_ddl() -> None:
+    """get_schema_by_id が実 DDL（field_schemas に updated_at 無し）と整合すること。
+
+    存在しない列を SELECT すると InMemory テストは通るのに本番だけ UndefinedColumn →
+    抽出 API が 500 になる（実 AWS で発生・correction_logs の note 事故と同型）。
+    """
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_gateway.records import SchemaFieldDef
+
+    admin = PgAdminRepository(_DSN)  # type: ignore[arg-type]
+    tenant = "ten_test"
+    with admin._engine.begin() as c:  # noqa: SLF001 - テスト用の前提データ投入
+        from sqlalchemy import text
+
+        c.execute(
+            text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+            {"i": tenant, "n": "test"},
+        )
+    rec = admin.put_schema(
+        tenant, f"ddl_probe_{uuid.uuid4().hex[:8]}",
+        [SchemaFieldDef(name="total_amount", label="合計", type="money_jpy", required=True, critical=True)],
+    )
+    try:
+        got = admin.get_schema_by_id(tenant, rec.id)
+        assert got is not None and got.id == rec.id and got.doc_type == rec.doc_type
+        assert got.fields[0].name == "total_amount"
+        assert admin.get_schema_by_id(tenant, "sch_nonexistent") is None
+        assert admin.get_schema_by_id("ten_other", rec.id) is None  # テナント境界
+    finally:
+        from sqlalchemy import text
+
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": rec.id})
