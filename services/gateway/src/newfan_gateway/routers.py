@@ -243,12 +243,20 @@ def extract(
     repo: Repository = Depends(get_repo),
     queue: Queue = Depends(get_queue),
     settings: Settings = Depends(get_settings),
+    admin: AdminRepository = Depends(get_admin),
 ) -> dto.ExtractAccepted:
     _require_document(repo, principal.tenant_id, document_id)
 
     cached = _idempotency_hit(request, idempotency_key, principal.tenant_id)
     if cached is not None:
         return dto.ExtractAccepted(**cached)
+
+    # 空文字の schema_id は「未指定」として扱う。そのまま INSERT すると
+    # extraction_runs の FK 違反で 500（E2000 内部エラー）になり、利用者には
+    # 原因が一切見えない（API 直叩きで実際に発生）。存在しない ID も 404 で明示する。
+    schema_id = (body.schema_id or "").strip() or None
+    if schema_id is not None and admin.get_schema_by_id(principal.tenant_id, schema_id) is None:
+        raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
 
     if repo.has_active_run(principal.tenant_id, document_id):
         raise ApiError("E1005", "実行中の Run と競合しています", details={"document_id": document_id})
@@ -260,7 +268,7 @@ def extract(
             id=run_id,
             tenant_id=principal.tenant_id,
             document_id=document_id,
-            schema_id=body.schema_id,
+            schema_id=schema_id,
             status="processing",
             options=body.options.model_dump(),
         )

@@ -34,6 +34,7 @@ class AdminRepository(Protocol):
     # スキーマ（§5.5）
     def list_schemas(self, tenant_id: str) -> list[SchemaRecord]: ...
     def get_schema(self, tenant_id: str, doc_type: str) -> Optional[SchemaRecord]: ...
+    def get_schema_by_id(self, tenant_id: str, schema_id: str) -> Optional[SchemaRecord]: ...
     def put_schema(
         self, tenant_id: str, doc_type: str, fields: list[SchemaFieldDef]
     ) -> SchemaRecord: ...
@@ -113,6 +114,10 @@ class InMemoryAdminRepository:
             if cur is None or s.version > cur.version:
                 latest[s.doc_type] = s
         return sorted(latest.values(), key=lambda s: s.doc_type)
+
+    def get_schema_by_id(self, tenant_id: str, schema_id: str) -> Optional[SchemaRecord]:
+        rec = self._schemas.get(schema_id)
+        return rec if rec and rec.tenant_id == tenant_id else None
 
     def get_schema(self, tenant_id: str, doc_type: str) -> Optional[SchemaRecord]:
         rows = [s for s in self._schemas.values() if s.tenant_id == tenant_id and s.doc_type == doc_type]
