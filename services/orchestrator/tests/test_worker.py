@@ -184,9 +184,38 @@ def test_resumeジョブも_succeeded_になる() -> None:
 
 def test_失敗したジョブは_failed_になる() -> None:
     worker, store, _, _ = _build(conf=0.99)
-    worker._consumer.push({**_JOB, "run_id": "run_missing"})  # type: ignore[attr-defined]
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("boom")
+
+    worker._graph.invoke = _boom  # type: ignore[attr-defined]  # noqa: SLF001
+    worker._consumer.push(dict(_JOB))  # type: ignore[attr-defined]
     assert worker.run_once() == 0  # ACK せず再配信に委ねる（§9）
     assert store.job_status("job_1") == ("failed", "E9001")
+
+
+def test_run_が消えていればdead終端にしてACKする() -> None:
+    """帳票削除（DELETE /documents/{id}）と in-flight ジョブの競合。
+
+    参照先が消えたジョブは再試行しても永久に直らない。ACK しないと xautoclaim が
+    60 秒ごとに拾い続ける（redis_io に試行上限が無い）。
+    """
+    worker, store, _, _ = _build(conf=0.99)
+    worker._consumer.push({**_JOB, "run_id": "run_missing"})  # type: ignore[attr-defined]
+    assert worker.run_once() == 0  # 成功カウントには入れない
+    assert store.job_status("job_1") == ("dead", "E1001")
+    assert worker._consumer.consume(count=10) == []  # ACK 済み＝再配信されない  # noqa: SLF001
+
+
+def test_resumeでも先にrunの存在を見る() -> None:
+    """resume は checkpointer だけで走るため、DB に run が無くても finalize まで
+    進んでしまう。run_exists のチェックが resume 分岐より前にあることを固定する。"""
+    worker, store, _, _ = _build(conf=0.78)
+    worker.process(dict(_JOB))
+    store.drop_run("run_1")  # 帳票削除で run ごと消えた
+    worker._consumer.push({**_JOB, "job_id": "job_2", "resume": {"corrections": []}})  # type: ignore[attr-defined]
+    assert worker.run_once() == 0
+    assert store.job_status("job_2") == ("dead", "E1001")
 
 
 def test_job_idの無いpayloadでも落ちない() -> None:

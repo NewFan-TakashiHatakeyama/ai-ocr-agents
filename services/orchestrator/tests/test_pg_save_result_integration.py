@@ -129,3 +129,79 @@ def test_人手確定は機械の再抽出で巻き戻らない(env) -> None:
         dst = c.execute(text("SELECT status FROM documents WHERE id=:d"), {"d": doc_id}).scalar()
     assert st == "confirmed"  # run も confirmed のまま
     assert dst == "confirmed"  # document も追従して巻き戻らない
+
+
+def test_スキーマレス発見のlabelが実DDLへ永続化される(env) -> None:
+    """自動発見（ADR-0006）の見出し原文は extraction_fields.label（0006）が唯一の置き場。
+
+    スキーマ指定の抽出は label を field_schemas から都度引けるが、スキーマレスでは
+    LLM 申告の label を行に残さないと、検証画面もテンプレート化ダイアログも
+    snake_case の name しか表示できない。InMemory はモデルを丸ごと保持するため
+    この欠落はローカルでは検出できない（correction/validation の欠落と同型）。
+    """
+    from sqlalchemy import text
+
+    owner, store, doc_id, run_id = env
+    f = _field("total_amount", "128000", "128000")
+    f.label = "御請求金額"
+    store.save_result(TENANT, run_id, fields=[f], tables=[], review_items=[],
+                      status="needs_review")
+    with owner.begin() as c:
+        row = c.execute(
+            text("SELECT label FROM extraction_fields WHERE run_id=:r AND field_name='total_amount'"),
+            {"r": run_id},
+        ).first()
+    assert row is not None and row[0] == "御請求金額"
+
+
+def test_gatewayの_syncedがlabelを読み戻す(env) -> None:
+    """スキーマレス run の結果 API で label が届くことの end-to-end 固定。
+
+    worker が書いた label を gateway の PgRepository._synced が SELECT に含めないと、
+    保存はされているのに API 応答では常に None になる（書けるが読めない片肺）。
+    """
+    owner, store, doc_id, run_id = env
+    f = _field("issuer_name", "株式会社ニューファン", "株式会社ニューファン")
+    f.label = "発行者"
+    store.save_result(TENANT, run_id, fields=[f], tables=[], review_items=[],
+                      status="needs_review")
+
+    from newfan_gateway.db import PgRepository
+
+    repo = PgRepository(_DSN)
+    run = repo.get_run(TENANT, run_id)
+    assert run is not None
+    by_name = {x.name: x for x in run.fields}
+    assert by_name["issuer_name"].label == "発行者"
+
+
+def test_再実行で消えた発見名の旧行を掃除する(env) -> None:
+    """スキーマレス自動発見の再配信・再実行で名前集合が揺れても幽霊を残さない。
+
+    UPSERT は「同名の上書き」しかしないため、再実行が別名を発見すると旧行が
+    残留し、結果 API とテンプレート化ダイアログに実在しない項目が並ぶ
+    （敵対的レビュー確定）。人手確定（corrected/approved）は掃除しない。
+    """
+    from sqlalchemy import text
+
+    owner, store, doc_id, run_id = env
+    # 1回目: total_amount と issuer_name を発見（issuer_name は人手確定にする）
+    f1 = _field("total_amount", "128000", "128000")
+    f2 = _field("issuer_name", "旧社名", "旧社名", rs=ReviewStatus.CORRECTED)
+    store.save_result(TENANT, run_id, fields=[f1, f2], tables=[], review_items=[],
+                      status="needs_review")
+    # 2回目（再配信の再実行）: LLM が billing_amount と命名し直した
+    f3 = _field("billing_amount", "128000", "128000")
+    store.save_result(TENANT, run_id, fields=[f3], tables=[], review_items=[],
+                      status="needs_review")
+    with owner.begin() as c:
+        rows = {
+            r[0]
+            for r in c.execute(
+                text("SELECT field_name FROM extraction_fields WHERE run_id=:r"),
+                {"r": run_id},
+            )
+        }
+    assert "billing_amount" in rows  # 新発見は入る
+    assert "total_amount" not in rows  # 機械由来の旧行は掃除
+    assert "issuer_name" in rows  # 人手確定は残す

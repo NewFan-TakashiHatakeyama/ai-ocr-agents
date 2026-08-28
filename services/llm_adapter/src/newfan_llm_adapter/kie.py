@@ -71,16 +71,45 @@ def kie_extract(
     data, resp = adapter.complete_json(system=system, user=user, purpose="kie")
 
     result = KieResult(response=resp)
+    seen_names: set[str] = set()
     for item in data.get("fields", []) or []:
         name = item.get("name")
         if not name:
             continue
+        # 自動発見で LLM が同名を複数返すことがある（例: 合計が2つ）。DB は
+        # UNIQUE (run_id, field_name) なので、素通しすると UPSERT の後勝ちで
+        # 先の項目が無音消失する。サフィックスで別名化して両方を保全する
+        # （どちらを残すかはレビュアが値を見て決められる）。
+        if name in seen_names:
+            n = 2
+            while f"{name}_{n}" in seen_names:
+                n += 1
+            name = f"{name}_{n}"
+        seen_names.add(name)
         valid_ids = _valid_span_ids(item.get("span_ids"), span_map)
         quote = " ".join(span_map[i].text for i in valid_ids) if valid_ids else None
+        # label の優先順位:
+        # - スキーマ指定の抽出（label_map 非空）→ スキーマ定義のみを正とする。
+        #   LLM 申告で上書きさせない（定義に label が無い項目も None のまま。
+        #   ここで LLM 申告を混ぜると「スキーマ指定なのに表示名が実行ごとに揺れる」）
+        # - スキーマレス自動発見（label_map 空）→ LLM 申告の見出し原文を使う。
+        #   無検疫で通すと dict の repr・無制限長・制御文字（U+0000 は Pg の
+        #   TEXT に入らず save_result ごと落ちる）まで流れるため、文字列のみ・
+        #   制御文字除去・120 字で打ち切る
+        label: str | None
+        if label_map:
+            label = label_map.get(item.get("name"))
+        else:
+            raw_label = item.get("label")
+            if isinstance(raw_label, str) and raw_label.strip():
+                cleaned = "".join(ch for ch in raw_label if ch.isprintable())
+                label = cleaned.strip()[:120] or None
+            else:
+                label = None
         result.fields.append(
             ExtractedField(
                 name=name,
-                label=label_map.get(name),
+                label=label,
                 value_raw=(str(item["value"]) if item.get("value") is not None else None),
                 span_ids=valid_ids,
                 page=item.get("page"),

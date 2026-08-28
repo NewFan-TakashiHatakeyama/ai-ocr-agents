@@ -176,6 +176,17 @@ def validate(state: ExtractionState) -> dict[str, Any]:
     """
     fields = state.get("fields", [])
     tables = state.get("tables", [])
+
+    # スキーマレス自動発見（ADR-0006）では検証を掛けない。V-* は名前一致で発火するが、
+    # 型が無く正規化されていない値（例: 日付が「2026年7月28日」のまま）に対しては
+    # 「正しい値を不正と誤記録する」だけになる。検証はテンプレート化後の
+    # 型付き抽出から効き始める（ADR-0006 の段階設計）。
+    # schema キー自体が無い（スタブ/旧テスト経路）場合は従来どおり検証する。
+    # 実グラフでは load_context が必ず schema を入れる（スキーマレスは fields=[]）。
+    schema = state.get("schema")
+    if schema is not None and not schema.get("fields"):
+        return {"fields": fields}
+
     results = run_validations(fields, tables, today=date.today())
 
     by_field: dict[str, list[dict[str, Any]]] = {}

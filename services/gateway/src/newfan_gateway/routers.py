@@ -27,6 +27,7 @@ from newfan_gateway.deps import (
     get_chat_agent,
     get_ingestor,
     get_lock_store,
+    get_object_store,
     get_orchestrator,
     get_queue,
     get_repo,
@@ -57,7 +58,7 @@ from newfan_gateway.records import (
     WorkflowRecord,
     WorkflowRunRecord,
 )
-from newfan_gateway.repository import Repository
+from newfan_gateway.repository import DocumentGoneError, Repository
 from newfan_ingest import IngestError, UploadInput
 
 router = APIRouter(prefix="/v1")
@@ -172,6 +173,98 @@ def get_document(
         doc_type=doc.doc_type,
         external_ref=doc.external_ref,
         page_count=doc.page_count,
+    )
+
+
+@router.delete("/documents/{document_id}", response_model=dto.DocumentDeleted)
+def delete_document(
+    document_id: str,
+    principal: Principal = Depends(require_role("reviewer")),
+    repo: Repository = Depends(get_repo),
+    wf: WorkflowsRepository = Depends(get_workflows),
+    locks: LockStore = Depends(get_lock_store),
+    store: Any = Depends(get_object_store),
+    settings: Settings = Depends(get_settings),
+) -> dto.DocumentDeleted:
+    """取り込んだ帳票を消す（原本・ページ画像・抽出結果・学習例まで）。
+
+    復元手段は用意していない。UI 側で必ず確認ダイアログを挟むこと。
+
+    順序は S3 → DB。逆にすると、S3 の削除が失敗したときに storage_uri を失って
+    孤児オブジェクトを辿る手段が消える。この順なら失敗しても DB は無傷で、
+    帳票は一覧に残ったまま再試行できる。
+    """
+    doc = _require_document(repo, principal.tenant_id, document_id)
+
+    # 実行中のものを消すと、ワーカーが参照先を失って無限に再配信される。
+    reason = repo.get_delete_blocker(
+        principal.tenant_id, document_id, stale_minutes=settings.document_delete_stale_minutes
+    )
+    if reason == "document_busy":
+        raise ApiError(
+            "E1005",
+            "処理中のため削除できません",
+            details={"document_id": document_id, "reason": reason, "status": doc.status},
+        )
+    if reason == "processing":
+        raise ApiError(
+            "E1005",
+            "抽出処理中のため削除できません",
+            details={"document_id": document_id, "reason": reason},
+        )
+    if wf.has_running_workflow_run(principal.tenant_id, document_id):
+        raise ApiError(
+            "E1005",
+            "ワークフロー実行中のため削除できません",
+            details={"document_id": document_id, "reason": "workflow_active"},
+        )
+    # ソフトロックは助言的（§8.2）。gateway は複数タスクで動き InMemoryLockStore は
+    # プロセス内なので、これは安全境界ではなく「同僚の作業を踏まない」ための配慮。
+    info = locks.get(principal.tenant_id, document_id)
+    if info is not None and info.holder_sub != principal.sub:
+        raise ApiError(
+            "E1005",
+            "他のユーザーが確認中です",
+            details={
+                "document_id": document_id,
+                "reason": "locked",
+                "holder": info.holder_name,
+            },
+        )
+
+    prefix = f"{principal.tenant_id}/{document_id}/"
+    try:
+        objects_deleted = int(store.delete_prefix(prefix))
+    except Exception as exc:  # noqa: BLE001 — 実体が残る限り DB は消さない
+        raise ApiError(
+            "E2000",
+            "帳票ファイルの削除に失敗しました。時間をおいて再試行してください。",
+            details={"document_id": document_id},
+        ) from exc
+
+    try:
+        counts = repo.delete_document(
+            principal.tenant_id,
+            document_id,
+            actor_id=principal.sub,
+            detail={"objects_deleted": objects_deleted, "prefix": prefix},
+        )
+    except DocumentGoneError:
+        # 同時に 2 回 DELETE した敗者側。実体はもう無いので「見つかりません」で正しい。
+        counts = None
+    if counts is None:
+        # S3 を消したあとで DB から消えていた（同時削除）。実体はもう無いので
+        # 「見つかりません」で正しい。
+        raise ApiError(
+            "E1001", "ドキュメントが見つかりません", details={"document_id": document_id}
+        )
+
+    locks.release(principal.tenant_id, document_id, principal.sub)
+    return dto.DocumentDeleted(
+        document_id=document_id,
+        objects_deleted=objects_deleted,
+        corrections_deleted=counts.get("corrections_deleted", 0),
+        runs_deleted=counts.get("runs_deleted", 0),
     )
 
 
@@ -312,6 +405,7 @@ def get_result(
         document_id=document_id,
         run_id=run.id,
         status=run.status,
+        schema_id=run.schema_id,
         result_version=run.result_version,
         engine_versions=run.engine_versions,
         fields=run.fields,

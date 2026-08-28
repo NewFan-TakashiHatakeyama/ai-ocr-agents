@@ -98,7 +98,7 @@ export default function ChatPage() {
         {
           id: aiId,
           role: "ai",
-          text: `「${file.name}」を取り込みました。抽出を開始できます。`,
+          text: `「${file.name}」を取り込みました。スキーマ（テンプレート）が未登録でも、まず項目を自動発見して値を抽出できます。結果を見てからテンプレート化してください。`,
           tools: [{ name: "navigate", target: `/documents/${doc.document_id}`, label: "ドキュメントを開く" }],
         },
       ]);

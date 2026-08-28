@@ -39,6 +39,8 @@ export interface ResultResponse {
   document_id: string;
   run_id: string;
   status: string;
+  // スキーマレス抽出（自動発見）なら null。テンプレート化バナーの出し分けに使う
+  schema_id?: string | null;
   result_version: number;
   engine_versions: Record<string, unknown>;
   fields: ExtractedField[];
@@ -177,6 +179,15 @@ export interface DocumentCreated {
   document_id: string;
   page_count?: number | null;
   status: string;
+}
+
+/** DELETE /documents/{id} の受領書。件数は「何を失ったか」をトーストで伝えるために使う。 */
+export interface DocumentDeleted {
+  document_id: string;
+  deleted: boolean;
+  objects_deleted: number;
+  corrections_deleted: number;
+  runs_deleted: number;
 }
 
 export interface MetricsResponse {

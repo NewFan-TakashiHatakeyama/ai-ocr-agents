@@ -76,6 +76,13 @@ class WorkflowsRepository(Protocol):
         limit: int = 50,
     ) -> list[WorkflowRunRecord]: ...
     def list_node_runs(self, tenant_id: str, run_id: str) -> list[WorkflowNodeRunRecord]: ...
+    def has_running_workflow_run(self, tenant_id: str, document_id: str) -> bool:
+        """当該帳票を掴んで実行中（running）のワークフロー実行があるか。
+
+        削除の拒否判定に使う。waiting_hitl は含めない（止める API が無いので
+        含めると永久に削除できなくなる。削除側で failed に終端化する）。
+        """
+        ...
 
     # §16.8: config 変更・有効化/停止は audit_logs へ（actor=human/agent）
     def record_audit(
@@ -184,6 +191,12 @@ class InMemoryWorkflowsRepository:
         if self.get_run(tenant_id, run_id) is None:
             return []
         return list(self._node_runs.get(run_id, []))
+
+    def has_running_workflow_run(self, tenant_id: str, document_id: str) -> bool:
+        return any(
+            r.tenant_id == tenant_id and r.document_id == document_id and r.status == "running"
+            for r in self._runs.values()
+        )
 
     def record_audit(
         self,

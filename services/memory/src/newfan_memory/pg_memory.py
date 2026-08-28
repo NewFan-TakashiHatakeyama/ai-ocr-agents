@@ -66,15 +66,24 @@ class PgMemoryRepository:
         c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
 
     # --- correction_logs ---
-    def add_correction(self, log: CorrectionLog) -> None:
+    def add_correction(self, log: CorrectionLog) -> bool:
+        """修正ログを保存する。保存したら True、帳票が既に無ければ False。
+
+        帳票削除（DELETE /v1/documents/{id}）と in-flight の learn ジョブは競合する。
+        0005 で correction_logs → documents に FK を張ったため、そのまま INSERT すると
+        ForeignKeyViolation でジョブが毒メッセージ化する。WHERE EXISTS で弾き、
+        呼び出し側（service.add）が埋め込み・FAISS 登録ごとスキップできるよう
+        bool を返す。False を無視して tenant_memories を書くと、そちらの FK でも落ちる。
+        """
         with self._engine.begin() as c:
             self._conn(c, log.tenant_id)
-            c.execute(
+            res = c.execute(
                 text(
                     "INSERT INTO correction_logs "
                     "(id, tenant_id, document_id, run_id, field_name, original_value, "
                     " corrected_value, doc_type, supplier_key, context, reviewer_id, embedded) "
-                    "VALUES (:id,:t,:d,:r,:fn,:ov,:cv,:dt,:sk,:ctx,:rv,:emb) "
+                    "SELECT :id,:t,:d,:r,:fn,:ov,:cv,:dt,:sk,:ctx,:rv,:emb "
+                    "WHERE EXISTS (SELECT 1 FROM documents WHERE id=:d AND tenant_id=:t) "
                     "ON CONFLICT (id) DO NOTHING"
                 ),
                 {
@@ -83,6 +92,17 @@ class PgMemoryRepository:
                     "dt": log.doc_type, "sk": log.supplier_key, "ctx": log.context,
                     "rv": log.reviewer_id, "emb": log.embedded,
                 },
+            )
+            if res.rowcount:
+                return True
+            # 0 行は「既に同 id がある（冪等再実行）」か「帳票が消えた」のどちらか。
+            # 前者で False を返すと再実行のたびに学習をスキップしてしまうので区別する。
+            return (
+                c.execute(
+                    text("SELECT 1 FROM correction_logs WHERE tenant_id=:t AND id=:i"),
+                    {"t": log.tenant_id, "i": log.id},
+                ).first()
+                is not None
             )
 
     def get_correction(self, tenant_id: str, correction_id: str) -> Optional[CorrectionLog]:

@@ -39,8 +39,11 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
   });
   const suggested = classify.data?.suggested_schema_id || "";
 
-  // 優先度: ユーザー選択 > 自動推定 > 先頭スキーマ（項目を出すにはスキーマ指定が要る）
-  const effectiveSchema = touched ? schemaId : (schemaId || suggested || items[0]?.id || "");
+  // 優先度: ユーザー選択 > 自動推定 > スキーマなし（自動発見）。
+  // 以前は先頭スキーマへ強制割当していたが、テンプレートが未整備の段階で
+  // 無関係なスキーマに当てはめるのは誤抽出のもと（設計見直し: まず値を見てから
+  // テンプレート化する。ADR-0006）。推定が付かなければスキーマなしで抽出する。
+  const effectiveSchema = touched ? schemaId : (schemaId || suggested || "");
 
   // ジョブ完了まで命令的にポーリング（react-query の refetchInterval より確実）。
   // 締切・dead 終端・恒久エラーで必ず止める（停滞ジョブでの無限ループを防ぐ）。
@@ -103,7 +106,10 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
     <div className="extract-start">
       <div className="emoji">📄</div>
       <h2>まだ抽出していません</h2>
-      <p>この帳票の AI-OCR 抽出を開始します。使用するスキーマ（抽出する項目の定義）を選んでください。</p>
+      <p>
+        この帳票の AI-OCR 抽出を開始します。スキーマ（抽出する項目の定義）が未登録でも、
+        まず項目を自動発見して値を抽出できます。結果を見てからテンプレート化できます。
+      </p>
 
       {suggested && !touched && classify.data?.doc_type && (
         <div className="extract-suggest" role="status">
@@ -126,7 +132,15 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
             setSchemaId(e.target.value);
           }}
         >
-          {items.length === 0 && <option value="">（スキーマ未登録）</option>}
+          {/* スキーマ指定は任意。未登録の帳票種でも行き止まりにしない（ADR-0006） */}
+          <option value="">スキーマなし — 項目を自動発見</option>
+          {/* GET /schemas は admin 限定のため、reviewer 等では一覧が空のまま
+              分類推定だけが付くことがある。選択肢に無い値を select に入れると
+              「自動発見と表示しながら推定スキーマで抽出する」嘘になるので、
+              推定分を明示の選択肢として足す */}
+          {suggested && !items.some((s) => s.id === suggested) && (
+            <option value={suggested}>推定: {classify.data?.doc_type ?? suggested}</option>
+          )}
           {items.map((s) => (
             <option key={s.id} value={s.id}>
               {s.doc_type}（v{s.version}）
@@ -135,7 +149,14 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
         </select>
       </label>
 
-      <button className="btn grad" disabled={running || !effectiveSchema} onClick={() => start.mutate()}>
+      {!effectiveSchema && (
+        <p className="sub" style={{ margin: "4px 0 0" }}>
+          帳票から見出しと値の組を AI が自動で見つけます。抽出後、結果画面から
+          スキーマとして保存（テンプレート化）できます。
+        </p>
+      )}
+
+      <button className="btn grad" disabled={running} onClick={() => start.mutate()}>
         {running ? "抽出中…（数十秒かかります）" : "抽出を開始"}
       </button>
       {running && <p className="extract-hint">完了すると自動でこの画面に結果が表示されます。</p>}

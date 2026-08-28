@@ -198,3 +198,45 @@ def test_review_queue_reflects_hitl_boost(ctx: SimpleNamespace) -> None:
     assert [i["document_id"] for i in items][0] == doc_b  # boost 側が先頭
     by_doc = {i["document_id"]: i["priority"] for i in items}
     assert by_doc[doc_b] == 26.0 and by_doc[doc_a] == 1.0
+
+
+def test_result_exposes_schema_id_for_templatize(ctx: SimpleNamespace) -> None:
+    """テンプレート化バナー（ADR-0006）の出し分け根拠。
+
+    スキーマレス抽出の run は schema_id=null、スキーマ指定なら id が入る。
+    ここが落ちると UI は「どの run が自動発見か」を判定できず、スキーマ指定済みの
+    run にまでテンプレート化を出すか、逆に一切出せなくなる。
+    """
+    # スキーマなし（自動発見）
+    doc_a = _upload(ctx)
+    ctx.repo.create_run(
+        RunRecord(id="run_nosch", tenant_id="ten_1", document_id=doc_a, status="needs_review")
+    )
+    r = ctx.client.get(f"/v1/documents/{doc_a}/result", headers=auth("viewer"))
+    assert r.status_code == 200
+    assert r.json()["schema_id"] is None
+
+    # スキーマ指定（conftest の sch_1）
+    doc_b = _upload(ctx)
+    ctx.repo.create_run(
+        RunRecord(
+            id="run_sch", tenant_id="ten_1", document_id=doc_b,
+            schema_id="sch_1", status="needs_review",
+        )
+    )
+    r = ctx.client.get(f"/v1/documents/{doc_b}/result", headers=auth("viewer"))
+    assert r.status_code == 200
+    assert r.json()["schema_id"] == "sch_1"
+
+
+def test_extract_without_schema_is_accepted(ctx: SimpleNamespace) -> None:
+    """スキーマ未指定でも 202（テンプレートレス既定, ADR-0006）。
+
+    UI（ExtractStart）はスキーマ選択を任意にした。サーバ側が必須化へ退行すると
+    「スキーマ未登録の帳票は永遠に抽出できない」行き止まりが再発する。
+    """
+    doc_id = _upload(ctx)
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={"schema_id": None}
+    )
+    assert r.status_code == 202

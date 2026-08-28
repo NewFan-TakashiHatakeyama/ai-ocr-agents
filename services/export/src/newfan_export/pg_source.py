@@ -27,10 +27,15 @@ class PgExportSource:
     def load_export_input(self, tenant_id: str, run_id: str) -> Optional[ExportInput]:
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
+            # documents を JOIN する。帳票が削除されると run は FK CASCADE で消えるが、
+            # q.export に積まれた確定済みジョブは残る。ここで拾ってしまうと、
+            # 消したはずの帳票の抽出値が webhook で外部へ送られ、derived/*.json が
+            # 顧客バケットへ書かれる（DB からは辿れないので気付けない）。
             run = c.execute(
                 text(
-                    "SELECT document_id, status, engine_versions FROM extraction_runs "
-                    "WHERE id=:r AND tenant_id=:t"
+                    "SELECT r.document_id, r.status, r.engine_versions FROM extraction_runs r "
+                    "JOIN documents d ON d.id = r.document_id AND d.tenant_id = r.tenant_id "
+                    "WHERE r.id=:r AND r.tenant_id=:t"
                 ),
                 {"r": run_id, "t": tenant_id},
             ).first()

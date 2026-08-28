@@ -44,6 +44,16 @@ class ContextStore(Protocol):
         """
         ...
 
+    def run_exists(self, tenant_id: str, run_id: str) -> bool:
+        """run と、その帳票がまだ存在するか（§6.2 帳票削除との競合検知）。
+
+        帳票が削除されると extraction_runs は FK CASCADE で消えるが、キューに
+        積まれたジョブは残る。存在しない run を処理しようとすると finalize の
+        INSERT が ForeignKeyViolation で落ち、ACK されないまま 60 秒ごとに
+        xautoclaim で無限再配信される（試行上限が無い）。処理前に見切るための問い。
+        """
+        ...
+
     def add_run_metrics(self, tenant_id: str, run_id: str, patch: dict[str, float]) -> None:
         """extraction_runs.metrics へ数値を**加算**で追記する（LLM トークン等）。"""
         ...
@@ -145,6 +155,14 @@ class InMemoryContextStore:
         self._run_status[run_id] = status
         self._document_status[seed.document_id] = status
         self._result_version[run_id] = self._result_version.get(run_id, 1)
+
+    def run_exists(self, tenant_id: str, run_id: str) -> bool:
+        seed = self._runs.get(run_id)
+        return seed is not None and seed.tenant_id == tenant_id
+
+    def drop_run(self, run_id: str) -> None:
+        """帳票削除で run ごと消えた状況を再現する（テスト用）。"""
+        self._runs.pop(run_id, None)
 
     def add_run_metrics(self, tenant_id: str, run_id: str, patch: dict[str, float]) -> None:
         m = self.run_metrics.setdefault(run_id, {})

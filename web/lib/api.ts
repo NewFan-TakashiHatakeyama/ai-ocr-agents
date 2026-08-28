@@ -15,7 +15,9 @@ import type {
   ChatConfirmResult,
   CorrectionItem,
   DocumentCreated,
+  DocumentDeleted,
   DocumentList,
+  DocumentMeta,
   LockStatus,
   MetricsResponse,
   ResultResponse,
@@ -83,10 +85,19 @@ export const api = {
   listDocuments: (status?: string) =>
     request<DocumentList>(`/documents${status ? `?status=${status}` : ""}`),
 
+  getDocument: (documentId: string) =>
+    request<DocumentMeta>(`/documents/${documentId}`),
+
   getResult: (documentId: string) =>
     request<ResultResponse>(`/documents/${documentId}/result`),
 
-  // 抽出（AI-OCR）を開始する。schema_id 未指定でも走るが、項目を出すにはスキーマ指定を推奨。
+  // 取り込んだ帳票を消す（原本・ページ画像・抽出結果・学習例まで。復元不可）。
+  // 呼ぶ前に必ず確認を取ること。409(E1005) は処理中/他者ロック中で、時間をおけば通る。
+  deleteDocument: (documentId: string) =>
+    request<DocumentDeleted>(`/documents/${documentId}`, { method: "DELETE" }),
+
+  // 抽出（AI-OCR）を開始する。schema_id 未指定は自動発見モード（ADR-0006 の既定導線。
+  // 帳票から見出し＋値の組を LLM が発見する）。指定すればその定義で抽出する。
   // Idempotency-Key で連打・再送の二重 run を防ぐ（gateway が同キーをキャッシュ応答する）。
   extract: (
     documentId: string,

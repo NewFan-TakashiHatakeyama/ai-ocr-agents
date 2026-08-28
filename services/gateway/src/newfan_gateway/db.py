@@ -17,6 +17,7 @@ from sqlalchemy import JSON, Integer, String, Text, create_engine, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from newfan_gateway.ids import new_id
+from newfan_gateway.repository import DocumentGoneError
 from newfan_gateway.records import (
     CorrectionRecord,
     DocumentRecord,
@@ -236,7 +237,8 @@ class PgRepository:
             text(
                 "SELECT field_name, value_raw, value_normalized, final_value, confidence, "
                 " grounding_score, page_no, bbox, source_quote, span_ids, correction, "
-                " validation, review_status FROM extraction_fields WHERE run_id=:r ORDER BY field_name"
+                " validation, review_status, label"
+                " FROM extraction_fields WHERE run_id=:r ORDER BY field_name"
             ),
             {"r": row.id},
         ).all()
@@ -247,7 +249,9 @@ class PgRepository:
             ExtractedField.model_validate(
                 {
                     "name": r.field_name,
-                    "label": labels.get(r.field_name),
+                    # スキーマ定義の label を正とし、無ければ行の label
+                    # （スキーマレス自動発見で LLM が申告した見出し原文）を使う
+                    "label": labels.get(r.field_name) or r.label,
                     "value_raw": r.value_raw,
                     "value_normalized": r.final_value if r.final_value is not None else r.value_normalized,
                     "span_ids": r.span_ids or [],
@@ -291,10 +295,200 @@ class PgRepository:
         )
 
     def set_document_status(self, tenant_id, document_id, status):
+        # updated_at も必ず進める。ORM モデルは gateway が参照する列だけをミラーする
+        # 方針で updated_at を持たないため、生 SQL で書く。ここを更新しないと
+        # get_delete_blocker の「確定処理中の窓」判定（updated_at 基準）が
+        # gateway 由来の遷移に対して永久に発火せず、無言で素通りする。
         with self._rls(tenant_id) as s:
-            row = s.get(Document, document_id)
-            if row:
-                row.status = status
+            s.execute(
+                text(
+                    "UPDATE documents SET status=:s, updated_at=now()"
+                    " WHERE tenant_id=:t AND id=:d"
+                ),
+                {"s": status, "t": tenant_id, "d": document_id},
+            )
+
+    # --- 削除（§6.2 DELETE /documents/{id}） ---
+
+    def get_delete_blocker(self, tenant_id, document_id, *, stale_minutes):
+        """削除を止める理由。消せるなら None。
+
+        documents.status を先に見るのが要点。confirm（routers.py）は documents を
+        in_review にするだけで extraction_runs は needs_review のまま残し、しかも
+        ロックを解放する。run.status だけ見ると確定処理の最中に削除が通り、
+        直後に resume したワーカーが孤児の correction_logs を作って webhook を
+        外部へ飛ばす。
+
+        いずれも stale_minutes より古いものは「停止したまま固着した」とみなして
+        通す。mark_run_failed はワーカーの例外ハンドラ経由でしか呼ばれず、
+        Fargate のタスク入れ替えや OOM では processing が永久に残るため、
+        閾値が無いと「消したい帳票ほど消せない」になる。
+        """
+        with self._rls(tenant_id) as s:
+            row = s.execute(
+                text(
+                    "SELECT status FROM documents"
+                    " WHERE tenant_id=:t AND id=:d"
+                    "   AND status IN ('queued','processing','in_review')"
+                    "   AND updated_at > now() - make_interval(mins => :m)"
+                ),
+                {"t": tenant_id, "d": document_id, "m": stale_minutes},
+            ).first()
+            if row is not None:
+                return "document_busy"
+            row = s.execute(
+                text(
+                    "SELECT 1 FROM extraction_runs"
+                    " WHERE tenant_id=:t AND document_id=:d AND status='processing'"
+                    "   AND started_at > now() - make_interval(mins => :m)"
+                ),
+                {"t": tenant_id, "d": document_id, "m": stale_minutes},
+            ).first()
+            return "processing" if row is not None else None
+
+    def delete_document(self, tenant_id, document_id, *, actor_id, detail):
+        """帳票と派生データを 1 トランザクションで消す。
+
+        FK CASCADE が効くのは pages / extraction_runs（→ extraction_fields /
+        extraction_tables）だけ。correction_logs・jobs・workflow_runs は
+        documents を TEXT 列で指すだけなので DB は何もしてくれない（0001 の
+        :154 / :206 / :265）。ここで明示的に消さないと、消したはずの原本の値が
+        correction_logs に残り、jobs は参照先を失って無限に再配信される。
+
+        audit_logs への記録も同一トランザクションに含める。別トランザクションだと
+        「消えたのに痕跡が無い」が成立し得る。audit_logs はアプリロールから
+        DELETE できない（ensure_app_role.py）ので、これが唯一の恒久証跡になる。
+
+        RLS に加えて全文へ tenant_id=:t を明示する（PgWorkflowsRepository と同じ
+        二重防御）。
+        """
+        counts: dict[str, int] = {}
+        with self._rls(tenant_id) as s:
+            # ワーカーの FOR NO KEY UPDATE と噛み合ったら待たずに落とす。
+            # 待つと gateway のワーカースレッドが専有され、他のリクエストも巻き添えになる。
+            s.execute(text("SET LOCAL lock_timeout = '3s'"))
+            doc = s.execute(
+                text(
+                    "SELECT id, status, doc_type, page_count, original_name, storage_uri,"
+                    " external_ref FROM documents WHERE tenant_id=:t AND id=:d"
+                ),
+                {"t": tenant_id, "d": document_id},
+            ).mappings().first()
+            if doc is None:
+                return None
+
+            run_ids = [
+                r[0]
+                for r in s.execute(
+                    text(
+                        "SELECT id FROM extraction_runs WHERE tenant_id=:t AND document_id=:d"
+                    ),
+                    {"t": tenant_id, "d": document_id},
+                ).all()
+            ]
+
+            # 1) 学習ソース。tenant_memories は correction_logs の FK CASCADE で消える
+            counts["corrections_deleted"] = s.execute(
+                text("DELETE FROM correction_logs WHERE tenant_id=:t AND document_id=:d"),
+                {"t": tenant_id, "d": document_id},
+            ).rowcount
+
+            counts["runs_deleted"] = len(run_ids)
+            counts["jobs_deleted"] = 0
+            counts["checkpoints_deleted"] = 0
+            if run_ids:
+                # 2) jobs は document_id を持たず ref_id が run_id を指す（0001:206）。
+                #    extraction_runs の CASCADE より先に解決する必要がある
+                #    （消えたあとでは run_id を引けない）。
+                counts["jobs_deleted"] = s.execute(
+                    text("DELETE FROM jobs WHERE tenant_id=:t AND ref_id = ANY(:r)"),
+                    {"t": tenant_id, "r": run_ids},
+                ).rowcount
+
+                # 3) 抽出グラフの LangGraph チェックポイント（thread_id = run_id）。
+                #    テナント列を持たない外部スキーマなので、表の存在を確認してから触る
+                #    （PostgresSaver.setup 未実行の環境では表ごと無い）。
+                if s.execute(text("SELECT to_regclass('public.checkpoints')")).scalar():
+                    for tbl in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                        counts["checkpoints_deleted"] += s.execute(
+                            text(f"DELETE FROM public.{tbl} WHERE thread_id = ANY(:r)"),
+                            {"r": run_ids},
+                        ).rowcount
+
+            # 4) ワークフロー実行履歴は残す（運用の証跡）。ただし帳票由来の中身は消す。
+            #    node_runs の input/output には抽出値がそのまま入る。
+            s.execute(
+                text(
+                    "UPDATE workflow_node_runs SET input=NULL, output=NULL"
+                    " WHERE tenant_id=:t AND workflow_run_id IN"
+                    "   (SELECT id FROM workflow_runs WHERE tenant_id=:t AND document_id=:d)"
+                ),
+                {"t": tenant_id, "d": document_id},
+            )
+            # 5) 帳票へのリンクを切る。未終端（waiting_hitl / running）は再開先が
+            #    消えた以上続行不能なので failed に終端化する。
+            #    running も含めるのが要点: 事前の has_running_workflow_run は別
+            #    トランザクションなので、チェック通過後に waiting_hitl → running へ
+            #    転移する窓がある。ここで拾わないと document_id=NULL のまま永久に
+            #    running で残り、list_hitl_boosts やワークフロー画面を汚し続ける。
+            counts["workflow_runs_detached"] = s.execute(
+                text(
+                    "UPDATE workflow_runs SET"
+                    " document_id = NULL,"
+                    " state = COALESCE(state,'{}'::jsonb) || '{\"document_deleted\": true}'::jsonb,"
+                    " status = CASE WHEN status IN ('waiting_hitl','running')"
+                    "   THEN 'failed' ELSE status END,"
+                    " error = CASE WHEN status IN ('waiting_hitl','running')"
+                    "   THEN '{\"code\":\"E1001\",\"message\":\"document deleted\"}'::jsonb"
+                    "   ELSE error END,"
+                    " finished_at = CASE WHEN status IN ('waiting_hitl','running')"
+                    "   THEN now() ELSE finished_at END"
+                    " WHERE tenant_id=:t AND document_id=:d"
+                ),
+                {"t": tenant_id, "d": document_id},
+            ).rowcount
+
+            # 6) 監査は削除本体と同じトランザクションで
+            s.execute(
+                text(
+                    "INSERT INTO audit_logs (id, tenant_id, actor_type, actor_id, action,"
+                    " target_type, target_id, detail)"
+                    " VALUES (:i,:t,'human',:a,'document.delete','document',:d, CAST(:j AS jsonb))"
+                ),
+                {
+                    "i": new_id("audit"),
+                    "t": tenant_id,
+                    "a": actor_id,
+                    "d": document_id,
+                    "j": json.dumps(
+                        {
+                            **detail,
+                            **counts,
+                            "status": doc["status"],
+                            "doc_type": doc["doc_type"],
+                            "page_count": doc["page_count"],
+                            "original_name": doc["original_name"],
+                            "storage_uri": doc["storage_uri"],
+                            "external_ref": doc["external_ref"],
+                            "run_ids": run_ids,
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+
+            # 7) 本体。CASCADE で pages / extraction_runs → fields / tables が消える
+            deleted = s.execute(
+                text("DELETE FROM documents WHERE tenant_id=:t AND id=:d"),
+                {"t": tenant_id, "d": document_id},
+            ).rowcount
+            if deleted != 1:
+                # 同時削除で先を越された。監査行ごとロールバックして「消していない」に戻す。
+                # 専用例外にするのは、router が「不在」として 400/E1001 に翻訳できる
+                # ようにするため（汎用例外だと 500「内部エラー」になり、利用者には
+                # 何が起きたか伝わらない）。
+                raise DocumentGoneError(document_id)
+        return counts
 
     def create_job(self, job: JobRecord) -> None:
         with self._rls(job.tenant_id) as s:
@@ -311,19 +505,33 @@ class PgRepository:
             )
 
     def add_corrections(self, corrections: list[CorrectionRecord]) -> None:
+        """修正ログを追記する。削除済み帳票宛ての分は静かに捨てる。
+
+        0005 で correction_logs → documents に FK を張ったため、削除された帳票へ
+        INSERT すると ForeignKeyViolation になる。オートセーブ（500ms デバウンス）と
+        削除は容易に競合するので、例外にせず WHERE EXISTS で弾く。残しても
+        「消したはずの原本の値」が DB に復活するだけで、誰の役にも立たない。
+        """
         if not corrections:
             return
         with self._rls(corrections[0].tenant_id) as s:
             for c in corrections:
-                s.add(
-                    CorrectionLog(
-                        id=c.id, tenant_id=c.tenant_id, document_id=c.document_id,
-                        run_id=c.run_id, field_name=c.field_name,
-                        original_value=c.original_value, corrected_value=c.corrected_value,
+                s.execute(
+                    text(
+                        "INSERT INTO correction_logs (id, tenant_id, document_id, run_id,"
+                        " field_name, original_value, corrected_value, doc_type,"
+                        " supplier_key, context, reviewer_id)"
+                        " SELECT :i,:t,:d,:r,:f,:ov,:cv,:dt,:sk,:cx,:rv"
+                        " WHERE EXISTS (SELECT 1 FROM documents"
+                        "   WHERE id=:d AND tenant_id=:t)"
+                    ),
+                    {
+                        "i": c.id, "t": c.tenant_id, "d": c.document_id, "r": c.run_id,
+                        "f": c.field_name, "ov": c.original_value, "cv": c.corrected_value,
                         # 学習ループ（DD-06/DD-07）の検索キーと embedding 入力
-                        doc_type=c.doc_type, supplier_key=c.supplier_key,
-                        context=c.context, reviewer_id=c.reviewer_id,
-                    )
+                        "dt": c.doc_type, "sk": c.supplier_key,
+                        "cx": c.context, "rv": c.reviewer_id,
+                    },
                 )
 
     def list_corrections(self, tenant_id: str, run_id: str) -> list[CorrectionRecord]:
@@ -1071,3 +1279,17 @@ class PgWorkflowsRepository:
             )
             for r in rows
         ]
+
+    def has_running_workflow_run(self, tenant_id: str, document_id: str) -> bool:
+        # waiting_hitl は含めない。止める API が無いので含めると永久に削除できなくなる
+        # （削除側で failed に終端化する）。
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "SELECT 1 FROM workflow_runs"
+                    " WHERE tenant_id=:t AND document_id=:d AND status='running' LIMIT 1"
+                ),
+                {"t": tenant_id, "d": document_id},
+            ).first()
+        return r is not None

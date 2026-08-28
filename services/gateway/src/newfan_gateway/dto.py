@@ -15,6 +15,21 @@ class DocumentCreated(BaseModel):
     status: str
 
 
+class DocumentDeleted(BaseModel):
+    """DELETE /documents/{id} の受領書（§6.2）。
+
+    件数を返すのは、学習例（correction_logs）まで消えることを UI が黙らずに
+    伝えられるようにするため。204 にすると本文を返せず、web の request<T> も
+    無条件に res.json() する。
+    """
+
+    document_id: str
+    deleted: bool = True
+    objects_deleted: int = 0
+    corrections_deleted: int = 0
+    runs_deleted: int = 0
+
+
 class DocumentMeta(BaseModel):
     document_id: str
     status: str
@@ -55,6 +70,9 @@ class ResultResponse(BaseModel):
     document_id: str
     run_id: str
     status: str
+    # スキーマレス抽出（自動発見, §5.5.1）なら None。UI はこれで「テンプレート化」
+    # 導線を出し分ける（スキーマ指定済みの run に出しても意味がない）
+    schema_id: Optional[str] = None
     result_version: int
     engine_versions: dict[str, Any]
     fields: list[ExtractedField]

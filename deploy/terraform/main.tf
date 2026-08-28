@@ -102,11 +102,15 @@ resource "aws_iam_role" "task" {
 
 data "aws_iam_policy_document" "task_s3" {
   statement {
-    actions   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+    # DeleteObjectVersion は帳票削除（DELETE /v1/documents/{id}）に要る。
+    # production はバージョニング有効（s3.tf）で、VersionId 無しの DeleteObject は
+    # 削除マーカーを置くだけ＝バイトがバケットに残り、UI の「元に戻せません」が嘘になる。
+    actions   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:DeleteObjectVersion"]
     resources = ["${aws_s3_bucket.this.arn}/*"]
   }
   statement {
-    actions   = ["s3:ListBucket"]
+    # ListBucketVersions が無いと削除対象の版を列挙できない（AccessDenied → 500）
+    actions   = ["s3:ListBucket", "s3:ListBucketVersions"]
     resources = [aws_s3_bucket.this.arn]
   }
   # S3ObjectStore.put は KMS キー未指定でも SSE-KMS で PUT する。この権限が無いと
