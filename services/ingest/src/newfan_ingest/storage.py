@@ -20,13 +20,19 @@ from typing import Any, Protocol
 # ".." が 1 セグメントとして通り、"a/../" が storage_root 丸ごとの rmtree になる。
 # 正規表現だけに頼らず、下の _BAD_SEGMENTS でセグメント単位にも弾く。
 _DOC_PREFIX_RE = re.compile(r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+/$")
-_BAD_SEGMENTS = {"", ".", ".."}
 
 
 def check_document_prefix(prefix: str) -> None:
-    """delete_prefix の prefix が 1 帳票のパス規約に合うことを検査する。"""
+    """delete_prefix の prefix が 1 帳票のパス規約に合うことを検査する。
+
+    ドットだけのセグメント（"." ".." "...." 等）は一律拒否する。".." は明白な
+    トラバーサルだが、"...." も Windows がパス解決で末尾ドットを落とすため
+    OS によって挙動が割れる（Linux では無害なサブディレクトリ、Windows では
+    ルート脱出になり得る — CI と実機の差として実測）。正規の tenant/document id に
+    全ドット名は存在しないので、プラットフォーム非依存で弾くのが安全。
+    """
     if not _DOC_PREFIX_RE.match(prefix) or any(
-        s in _BAD_SEGMENTS for s in prefix.split("/")[:-1]
+        not seg.strip(".") for seg in prefix.split("/")[:-1]
     ):
         raise ValueError(
             f"削除できるのは {{tenant_id}}/{{document_id}}/ 形式の prefix のみです: {prefix!r}"
