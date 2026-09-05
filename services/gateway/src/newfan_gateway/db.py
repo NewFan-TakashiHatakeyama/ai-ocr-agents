@@ -594,6 +594,26 @@ def _run_record(row: ExtractionRun) -> RunRecord:
 # ============ 管理画面（SCR-04/05/06）Pg 実装 ============
 
 
+def schema_fields_payload(fields) -> list:
+    """field_schemas.fields へ書く JSON 構造を作る（設計 §4.7 / C27・C29）。
+
+    region が未設定の field では **region キー自体を書かない**。素直に
+    ``model_dump()`` すると ``"region": null`` が JSONB に入り、旧 orchestrator の
+    ``make_kie_extract`` が schema を丸ごと ``json.dumps`` でプロンプトに載せるため、
+    「領域を使っていないスキーマのプロンプトは 1 バイトも変わらない」という
+    受け入れ条件が gateway 先行デプロイだけで破れる（2 サービスのローリング完了順は
+    保証されない）。
+
+    ``exclude_none=True`` の全体適用は**不可**——既存の ``"label": null`` /
+    ``"columns": null`` まで消えてしまい、それ自体が現行のプロンプトを変える。
+    落とすのは region キーだけに限定する。
+    """
+    return [
+        f.model_dump(exclude={"region"}) if f.region is None else f.model_dump()
+        for f in fields
+    ]
+
+
 class PgAdminRepository:
     """AdminRepository の PostgreSQL 実装（field_schemas / tenant_rules / 集計）。"""
 
@@ -617,7 +637,8 @@ class PgAdminRepository:
             self._rls(c, tenant_id)
             r = c.execute(
                 text(
-                    "SELECT id, tenant_id, doc_type, version, fields"
+                    "SELECT id, tenant_id, doc_type, version, fields,"
+                    " exclude_regions, source_page_count"
                     " FROM field_schemas WHERE tenant_id=:t AND id=:i"
                 ),
                 {"t": tenant_id, "i": schema_id},
@@ -628,6 +649,8 @@ class PgAdminRepository:
             id=r["id"], tenant_id=r["tenant_id"], doc_type=r["doc_type"],
             version=r["version"],
             fields=[SchemaFieldDef(**f) for f in (r["fields"] or [])],
+            exclude_regions=list(r["exclude_regions"] or []),
+            source_page_count=r["source_page_count"],
         )
 
     def list_schemas(self, tenant_id: str):
@@ -637,7 +660,8 @@ class PgAdminRepository:
             self._rls(c, tenant_id)
             rows = c.execute(
                 text(
-                    "SELECT DISTINCT ON (doc_type) id, doc_type, version, fields "
+                    "SELECT DISTINCT ON (doc_type) id, doc_type, version, fields, "
+                    "exclude_regions, source_page_count "
                     "FROM field_schemas WHERE tenant_id=:t ORDER BY doc_type, version DESC"
                 ),
                 {"t": tenant_id},
@@ -649,6 +673,8 @@ class PgAdminRepository:
                 doc_type=r.doc_type,
                 version=r.version,
                 fields=[SchemaFieldDef.model_validate(f) for f in (r.fields or [])],
+                exclude_regions=list(r.exclude_regions or []),
+                source_page_count=r.source_page_count,
             )
             for r in rows
         ]
@@ -660,7 +686,8 @@ class PgAdminRepository:
             self._rls(c, tenant_id)
             r = c.execute(
                 text(
-                    "SELECT id, version, fields FROM field_schemas "
+                    "SELECT id, version, fields, exclude_regions, source_page_count "
+                    "FROM field_schemas "
                     "WHERE tenant_id=:t AND doc_type=:d ORDER BY version DESC LIMIT 1"
                 ),
                 {"t": tenant_id, "d": doc_type},
@@ -673,17 +700,44 @@ class PgAdminRepository:
             doc_type=doc_type,
             version=r.version,
             fields=[SchemaFieldDef.model_validate(f) for f in (r.fields or [])],
+            exclude_regions=list(r.exclude_regions or []),
+            source_page_count=r.source_page_count,
         )
 
-    def put_schema(self, tenant_id: str, doc_type: str, fields):
+    def put_schema(
+        self, tenant_id: str, doc_type: str, fields, *, exclude_regions=None, source_page_count=None
+    ):
         import json as _json
         import uuid as _uuid
 
         from newfan_gateway.records import SchemaRecord
 
-        payload = _json.dumps([f.model_dump() for f in fields], ensure_ascii=False)
+        payload = _json.dumps(schema_fields_payload(fields), ensure_ascii=False)
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
+            # 引き継ぎ元は**版採番と同一トランザクション内**で、get_schema と同じ
+            # 版選択（ORDER BY version DESC LIMIT 1）で取る。ORDER BY を落とすと
+            # v1 の設定が復活して v2 以降の設定が消えるという、InMemory では
+            # 検出できない事故になる（設計 §4.4 / C22）。
+            prev = c.execute(
+                text(
+                    "SELECT exclude_regions, source_page_count FROM field_schemas "
+                    "WHERE tenant_id=:t AND doc_type=:d ORDER BY version DESC LIMIT 1"
+                ),
+                {"t": tenant_id, "d": doc_type},
+            ).first()
+            # None = 引き継ぎ / 明示 [] = クリア（§4.4）
+            if exclude_regions is not None:
+                regions = [
+                    r if isinstance(r, dict) else r.model_dump() for r in exclude_regions
+                ]
+            else:
+                regions = list(prev[0] or []) if prev is not None else []
+            if source_page_count is not None:
+                pages = source_page_count
+            else:
+                pages = prev[1] if prev is not None else None
+
             nxt = c.execute(
                 text(
                     "SELECT coalesce(max(version),0)+1 FROM field_schemas "
@@ -694,12 +748,27 @@ class PgAdminRepository:
             sid = f"sch_{_uuid.uuid4().hex[:20]}"
             c.execute(
                 text(
-                    "INSERT INTO field_schemas (id, tenant_id, doc_type, version, fields) "
-                    "VALUES (:i,:t,:d,:v, CAST(:f AS jsonb))"
+                    "INSERT INTO field_schemas "
+                    "(id, tenant_id, doc_type, version, fields, exclude_regions, source_page_count)"
+                    " VALUES (:i,:t,:d,:v, CAST(:f AS jsonb), CAST(:x AS jsonb), :p)"
                 ),
-                {"i": sid, "t": tenant_id, "d": doc_type, "v": nxt, "f": payload},
+                {
+                    "i": sid, "t": tenant_id, "d": doc_type, "v": nxt, "f": payload,
+                    "x": _json.dumps(regions, ensure_ascii=False), "p": pages,
+                },
             )
-        return SchemaRecord(id=sid, tenant_id=tenant_id, doc_type=doc_type, version=nxt, fields=list(fields))
+        # 戻り値は引数由来ではなく **INSERT した確定値**（引き継ぎ後）にする。
+        # PUT 応答＝直後の GET 応答でないと、旧編集画面が空配列で state を上書きし、
+        # 次の保存で明示 []（＝本当のクリア）を送る誘発経路になる（§4.4 / C28）。
+        return SchemaRecord(
+            id=sid,
+            tenant_id=tenant_id,
+            doc_type=doc_type,
+            version=nxt,
+            fields=list(fields),
+            exclude_regions=regions,
+            source_page_count=pages,
+        )
 
     # --- rules ---
     def _rule(self, tenant_id: str, r):

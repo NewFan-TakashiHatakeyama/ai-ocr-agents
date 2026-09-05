@@ -167,12 +167,19 @@ def get_document(
     repo: Repository = Depends(get_repo),
 ) -> dto.DocumentMeta:
     doc = _require_document(repo, principal.tenant_id, document_id)
+    # ページ寸法は**単体取得でのみ**埋める（設計 §6）。一覧 API は DocumentMeta を
+    # 共用しており、そちらで埋めると帳票 1 件ごとに pages を引く N+1 になる。
+    pages = repo.get_pages(principal.tenant_id, document_id)
     return dto.DocumentMeta(
         document_id=doc.id,
         status=doc.status,
         doc_type=doc.doc_type,
         external_ref=doc.external_ref,
         page_count=doc.page_count,
+        pages=[
+            dto.PageDim(page_no=p.page_no, width=p.width, height=p.height)
+            for p in sorted(pages, key=lambda x: x.page_no)
+        ],
     )
 
 
@@ -673,6 +680,10 @@ def _schema_dto(rec: Any) -> dto.SchemaDto:
         doc_type=rec.doc_type,
         version=rec.version,
         fields=[dto.SchemaFieldDto(**f.model_dump()) for f in rec.fields],
+        # 応答忠実性がこの機能の生命線（設計 §6）。ここが欠けると旧編集画面の
+        # 「取得 → 編集 → 新版として保存」往復で region / exclude が全滅する。
+        exclude_regions=list(getattr(rec, "exclude_regions", []) or []),
+        source_page_count=getattr(rec, "source_page_count", None),
     )
 
 
@@ -731,8 +742,28 @@ def put_schema(
             "同名のスキーマが既に存在します。既存スキーマを選んで編集してください",
             details={"doc_type": body.doc_type},
         )
+    # RegionRect 自体の形式（0..1 / x1<x2 / 面積）は pydantic が検証済み。ここでは
+    # **文脈依存の制約**だけを見る: include（fields[].region）に page:null は許さない。
+    # 「どのページのどこを読むか」の指定にならず、全ページに同座標を当てる意図とも
+    # 区別できないため。exclude は page:null（全ページ）が正当な指定。
+    for f in body.fields:
+        if f.region is not None and f.region.page is None:
+            raise ApiError(
+                "E1003",
+                "読取領域にはページ指定が必要です（全ページ指定は除外領域のみ）",
+                details={"field": f.name},
+            )
     fields = [SchemaFieldDef(**f.model_dump()) for f in body.fields]
-    rec = admin.put_schema(principal.tenant_id, body.doc_type, fields)  # 常に新版
+    # exclude_regions / source_page_count は None のまま渡す（= 直前版から引き継ぎ）。
+    # 旧編集画面・chat 経路はこれらを送らないので、ここで [] に潰すと保存 1 回で
+    # 除外設定が消える（設計 §4.4）。
+    rec = admin.put_schema(  # 常に新版
+        principal.tenant_id,
+        body.doc_type,
+        fields,
+        exclude_regions=body.exclude_regions,
+        source_page_count=body.source_page_count,
+    )
     return _schema_dto(rec)
 
 

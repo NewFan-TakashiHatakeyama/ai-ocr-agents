@@ -19,6 +19,10 @@ class LoadedContext:
     schema: dict[str, Any]
     pages: list[dict[str, Any]]
     tenant_settings: dict[str, Any] = field(default_factory=dict)
+    # 除外領域とテンプレート化時のページ数（設計 §4.6）。schema dict とは別に持つ
+    # （schema はそのままプロンプトへ埋まるため、座標を入れると出力が変わる）。
+    exclude_regions: list[dict[str, Any]] = field(default_factory=list)
+    source_page_count: Optional[int] = None
 
 
 class ContextStore(Protocol):
@@ -87,6 +91,8 @@ class _RunSeed:
     schema: dict[str, Any]
     pages: list[dict[str, Any]]
     tenant_settings: dict[str, Any] = field(default_factory=dict)
+    exclude_regions: list[dict[str, Any]] = field(default_factory=list)
+    source_page_count: Optional[int] = None
 
 
 class InMemoryContextStore:
@@ -112,6 +118,8 @@ class InMemoryContextStore:
         schema: dict[str, Any],
         pages: list[dict[str, Any]],
         tenant_settings: Optional[dict[str, Any]] = None,
+        exclude_regions: Optional[list[dict[str, Any]]] = None,
+        source_page_count: Optional[int] = None,
     ) -> None:
         self._runs[run_id] = _RunSeed(
             tenant_id=tenant_id,
@@ -119,6 +127,8 @@ class InMemoryContextStore:
             schema=schema,
             pages=pages,
             tenant_settings=tenant_settings or {},
+            exclude_regions=list(exclude_regions or []),
+            source_page_count=source_page_count,
         )
         self._document_status[document_id] = "processing"
         self._run_status[run_id] = "processing"
@@ -133,6 +143,8 @@ class InMemoryContextStore:
             schema=seed.schema,
             pages=seed.pages,
             tenant_settings=seed.tenant_settings,
+            exclude_regions=list(seed.exclude_regions),
+            source_page_count=seed.source_page_count,
         )
 
     def save_result(

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Optional, Protocol
 
+from newfan_schemas import RegionRect
+
 from newfan_gateway.ids import new_id
 from newfan_gateway.records import (
     ConnectionRecord,
@@ -36,8 +38,25 @@ class AdminRepository(Protocol):
     def get_schema(self, tenant_id: str, doc_type: str) -> Optional[SchemaRecord]: ...
     def get_schema_by_id(self, tenant_id: str, schema_id: str) -> Optional[SchemaRecord]: ...
     def put_schema(
-        self, tenant_id: str, doc_type: str, fields: list[SchemaFieldDef]
-    ) -> SchemaRecord: ...
+        self,
+        tenant_id: str,
+        doc_type: str,
+        fields: list[SchemaFieldDef],
+        *,
+        exclude_regions: Optional[list[RegionRect]] = None,
+        source_page_count: Optional[int] = None,
+    ) -> SchemaRecord:
+        """新版を INSERT する（常に新 version）。
+
+        exclude_regions / source_page_count は **None = 直前版から引き継ぎ**、
+        exclude_regions の明示 `[]` のみクリア（設計 §4.4）。旧編集画面と chat 経路は
+        これらを送らないため、「省略時 []」にすると旧経路の保存 1 回で除外設定が
+        全滅する。引き継ぎを呼び出し側でなく実装側に置くことで、旧経路はコード
+        無変更のまま安全になる。戻り値には**引き継ぎ後の実値**を載せる（PUT 応答が
+        直後の GET と一致しないと、旧画面が空配列で state を上書きして次の保存で
+        本物のクリアを送ってしまう）。
+        """
+        ...
 
     # ルール（§5.8.4）
     def create_rule(self, rec: RuleRecord) -> RuleRecord: ...
@@ -124,15 +143,34 @@ class InMemoryAdminRepository:
         return max(rows, key=lambda s: s.version) if rows else None
 
     def put_schema(
-        self, tenant_id: str, doc_type: str, fields: list[SchemaFieldDef]
+        self,
+        tenant_id: str,
+        doc_type: str,
+        fields: list[SchemaFieldDef],
+        *,
+        exclude_regions: Optional[list[RegionRect]] = None,
+        source_page_count: Optional[int] = None,
     ) -> SchemaRecord:
         prev = self.get_schema(tenant_id, doc_type)
+        # None = 引き継ぎ（§4.4）。Pg 実装と意味論を揃える。
+        regions = (
+            list(exclude_regions)
+            if exclude_regions is not None
+            else (list(prev.exclude_regions) if prev else [])
+        )
+        pages = (
+            source_page_count
+            if source_page_count is not None
+            else (prev.source_page_count if prev else None)
+        )
         rec = SchemaRecord(
             id=new_id("schema"),
             tenant_id=tenant_id,
             doc_type=doc_type,
             version=(prev.version + 1) if prev else 1,
             fields=fields,
+            exclude_regions=regions,
+            source_page_count=pages,
         )
         self._schemas[rec.id] = rec
         return rec

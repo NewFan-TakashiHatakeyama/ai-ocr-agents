@@ -23,7 +23,14 @@ def make_load_context(store: ContextStore) -> NodeFn:
             errors = list(state.get("errors", []))
             errors.append({"stage": "load_context", "code": "E2000", "error": "context not found"})
             return {"errors": errors}
-        return {"document_id": ctx.document_id, "schema": ctx.schema, "pages": ctx.pages}
+        return {
+            "document_id": ctx.document_id,
+            "schema": ctx.schema,
+            "pages": ctx.pages,
+            # schema とは別キーで積む（§4.6）。schema に混ぜると kie プロンプトが汚れる。
+            "exclude_regions": ctx.exclude_regions,
+            "source_page_count": ctx.source_page_count,
+        }
 
     return _node
 

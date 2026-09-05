@@ -49,12 +49,32 @@ export interface ResultResponse {
   fallback_pages?: number[]; // VL フォールバックしたページ（§5.4）
 }
 
+/** ページの正規寸法（前処理後 PNG 画素）。領域の正規化・逆正規化に使う。 */
+export interface PageDim {
+  page_no: number;
+  width?: number | null;
+  height?: number | null;
+}
+
+/**
+ * スキーマに保存する領域。ランタイムの bbox（画素 int）とは別物で、
+ * こちらは当該ページ寸法に対する正規化 [0,1] の rect。
+ * page: 1始まり int / "last"（最終ページ）/ null（全ページ・除外のみ）
+ */
+export interface RegionRect {
+  page?: number | "last" | null;
+  rect: [number, number, number, number];
+  label?: string | null;
+}
+
 export interface DocumentMeta {
   document_id: string;
   status: string;
   doc_type?: string | null;
   external_ref?: string | null;
   page_count?: number | null;
+  /** 単体取得 GET /documents/{id} のみ充填。一覧では空（N+1 回避） */
+  pages?: PageDim[];
 }
 
 export interface DocumentList {
@@ -103,6 +123,8 @@ export interface SchemaFieldDto {
   required: boolean;
   critical: boolean;
   columns?: Record<string, unknown>[] | null;
+  /** 読取領域（hint）。null/未設定なら領域指定なし */
+  region?: RegionRect | null;
 }
 
 export interface SchemaDto {
@@ -110,6 +132,10 @@ export interface SchemaDto {
   doc_type: string;
   version: number;
   fields: SchemaFieldDto[];
+  /** 除外領域。doc_type（スキーマ版）単位で決定論的に適用される */
+  exclude_regions?: RegionRect[];
+  /** テンプレート化時点の帳票ページ数 */
+  source_page_count?: number | null;
 }
 
 export interface ExtractAccepted {

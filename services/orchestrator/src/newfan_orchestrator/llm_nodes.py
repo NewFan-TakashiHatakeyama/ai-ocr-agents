@@ -22,6 +22,34 @@ def _rule_hints(active_rules: list[dict[str, Any]]) -> str:
     return "\n".join(h for h in hints if h)
 
 
+def _schema_for_prompt(schema: dict[str, Any]) -> dict[str, Any]:
+    """kie プロンプトへ渡す schema から ``region`` キーを落とす（設計 §5.6 / §4.7）。
+
+    kie.py は schema をそのまま ``json.dumps`` してプロンプトへ埋める。region は
+    **正規化座標**なので、素通しすると LLM に「0.30」等の意味不明な数値が渡り、
+    しかも領域を使っていないスキーマでも gateway が ``"region": null`` を書くだけで
+    プロンプトが変わる（＝抽出結果が変わり得る）。この関数がその 1 バイトの差も
+    含めて現行と同一にする役目を負う。
+
+    プロンプトへの領域ヒント注入は Phase 4（画素へ射影した ``region_px`` を渡す形）
+    で改めて設計・計測する。ここではキーを落とすだけ。
+
+    state の schema は**変更しない**（LangGraph の state は他ノードと共有され、
+    checkpoint にも載る。破壊的に書き換えると再開時の入力が変わる）。
+    """
+    fields = schema.get("fields")
+    if not isinstance(fields, list):
+        return dict(schema)
+    out = dict(schema)
+    out["fields"] = [
+        {k: v for k, v in f.items() if k != "region"}
+        if isinstance(f, dict) and "region" in f
+        else f
+        for f in fields
+    ]
+    return out
+
+
 def make_kie_extract(adapter: LLMAdapter, bundle: PromptBundle) -> NodeFn:
     def _node(state: ExtractionState) -> dict[str, Any]:
         result = kie_extract(
@@ -29,7 +57,7 @@ def make_kie_extract(adapter: LLMAdapter, bundle: PromptBundle) -> NodeFn:
             bundle,
             spans=state.get("spans", []),
             layout_markdown=state.get("layout_markdown", ""),
-            schema_json=dict(state.get("schema", {})),
+            schema_json=_schema_for_prompt(dict(state.get("schema", {}))),
             rule_hints=_rule_hints(state.get("active_rules", [])),
         )
         # 構造由来テーブル（structure_ocr が cell 座標付きで生成）を優先し、

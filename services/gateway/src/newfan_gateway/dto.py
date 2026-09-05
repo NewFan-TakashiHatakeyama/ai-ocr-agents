@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from newfan_schemas import ExtractedField, TableResult
+from newfan_schemas import ExtractedField, RegionRect, TableResult
 
 
 class DocumentCreated(BaseModel):
@@ -30,12 +30,24 @@ class DocumentDeleted(BaseModel):
     runs_deleted: int = 0
 
 
+class PageDim(BaseModel):
+    """ページの正規寸法（前処理後 PNG の画素）。領域の正規化・逆正規化に使う。"""
+
+    page_no: int
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+
 class DocumentMeta(BaseModel):
     document_id: str
     status: str
     doc_type: Optional[str] = None
     external_ref: Optional[str] = None
     page_count: Optional[int] = None
+    # 未訪問ページの領域も正規化できるようにページ寸法を返す（設計 §6）。
+    # **一覧 API と共用の型なので既定は空配列**であり、埋めるのは単体取得だけ。
+    # 一覧で埋めると帳票 1 件ごとに pages を引く N+1 になる。
+    pages: list[PageDim] = Field(default_factory=list)
 
 
 class DocumentList(BaseModel):
@@ -148,6 +160,10 @@ class SchemaFieldDto(BaseModel):
     required: bool = False
     critical: bool = False
     columns: Optional[list[dict[str, Any]]] = None
+    # records.SchemaFieldDef と**同一コミットで**追加すること。pydantic v2 の既定は
+    # extra="ignore" なので、DTO 側を忘れると GET /schemas の応答から region が
+    # 静かに消え、旧編集画面の「新版として保存」往復で region が全滅する（§4.2）。
+    region: Optional[RegionRect] = None
 
 
 class SchemaDto(BaseModel):
@@ -157,6 +173,8 @@ class SchemaDto(BaseModel):
     doc_type: str
     version: int
     fields: list[SchemaFieldDto]
+    exclude_regions: list[RegionRect] = Field(default_factory=list)
+    source_page_count: Optional[int] = None
 
 
 class SchemaList(BaseModel):
@@ -170,6 +188,12 @@ class PutSchemaRequest(BaseModel):
     # 一覧が陳腐化していると素通りし、既存スキーマを黙って新版で置換してしまうため、
     # 「作成のつもり」はサーバ側で守る。省略時（false）は従来どおり常に新版作成（§7.2）。
     create: bool = False
+    # **None = 直前版から引き継ぎ / 明示 [] = クリア**（設計 §4.4）。
+    # 旧編集画面と chat 経路は body に exclude_regions を含めないため、「省略時 []」に
+    # すると旧経路の保存 1 回で除外設定が全滅する。引き継ぎは put_schema の内部で
+    # 行うので、旧経路はコード無変更のまま安全。
+    exclude_regions: Optional[list[RegionRect]] = None
+    source_page_count: Optional[int] = None
 
 
 class RuleDto(BaseModel):

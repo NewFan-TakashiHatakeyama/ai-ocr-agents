@@ -170,6 +170,10 @@ def test_get_schema_by_id_matches_real_ddl() -> None:
         got = admin.get_schema_by_id(tenant, rec.id)
         assert got is not None and got.id == rec.id and got.doc_type == rec.doc_type
         assert got.fields[0].name == "total_amount"
+        # 0007 の新列も SELECT に載っていること（列追加だけして SELECT を直し忘れると、
+        # 値は書けているのに読めない＝UI 上は「保存したのに消えた」になる）
+        assert got.exclude_regions == []
+        assert got.source_page_count is None
         assert admin.get_schema_by_id(tenant, "sch_nonexistent") is None
         assert admin.get_schema_by_id("ten_other", rec.id) is None  # テナント境界
     finally:
@@ -178,3 +182,97 @@ def test_get_schema_by_id_matches_real_ddl() -> None:
         with admin._engine.begin() as c:  # noqa: SLF001
             c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
             c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": rec.id})
+
+
+def test_pg_put_schema_legacy_put_inherits_exclude_regions() -> None:
+    """exclude_regions の引き継ぎが**実 Pg の SQL で**成立すること（設計 §4.4 / C22）。
+
+    InMemory の同名ユニットテストは ``db.py`` の SQL を 1 行も通らない。引き継ぎ元の
+    SELECT から ``ORDER BY version DESC`` を落とすと「v1 の設定が復活して v2 以降が
+    消える」という事故になるが、それは Pg でしか再現しない。旧 UI 相当の legacy 呼び
+    出し（キーワード引数なし）を複数回はさんで、常に**最新版**から引き継ぐことを見る。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_gateway.records import SchemaFieldDef
+
+    admin = PgAdminRepository(_DSN)  # type: ignore[arg-type]
+    tenant = "ten_test"
+    other_tenant = "ten_test_other"
+    doc_type = f"inherit_probe_{uuid.uuid4().hex[:8]}"
+    other_doc_type = f"{doc_type}_other"
+
+    r1 = {"page": 1, "rect": [0.10, 0.10, 0.20, 0.20], "label": "v1"}
+    r2 = {"page": None, "rect": [0.80, 0.02, 0.98, 0.14], "label": "v2"}
+    r_other = {"page": 1, "rect": [0.50, 0.50, 0.60, 0.60], "label": "other"}
+    fields = [SchemaFieldDef(name="total_amount", type="money_jpy")]
+
+    with admin._engine.begin() as c:  # noqa: SLF001 - テスト用の前提データ投入
+        for t in (tenant, other_tenant):
+            c.execute(
+                text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+                {"i": t, "n": "test"},
+            )
+
+    made: list[str] = []
+    try:
+        # 混入源: 別 tenant / 別 doc_type にも版を作っておく
+        made.append(
+            admin.put_schema(
+                other_tenant, doc_type, fields, exclude_regions=[r_other], source_page_count=9
+            ).id
+        )
+        made.append(
+            admin.put_schema(
+                tenant, other_doc_type, fields, exclude_regions=[r_other], source_page_count=9
+            ).id
+        )
+
+        v1 = admin.put_schema(tenant, doc_type, fields, exclude_regions=[r1], source_page_count=2)
+        made.append(v1.id)
+        v2 = admin.put_schema(tenant, doc_type, fields, exclude_regions=[r2])
+        made.append(v2.id)
+        # source_page_count も引き継がれる（v2 は値を送っていない）
+        assert v2.source_page_count == 2
+
+        # ③ 旧 UI 相当（キーワード引数なし）→ **v1 ではなく v2** を引き継ぐ
+        v3 = admin.put_schema(tenant, doc_type, fields)
+        made.append(v3.id)
+        assert v3.exclude_regions[0].label == "v2", "最新版ではなく v1 から引き継いでいる"
+        assert v3.source_page_count == 2
+        # PUT 応答は引数由来ではなく INSERT した確定値であること（C28）
+        assert admin.get_schema_by_id(tenant, v3.id).exclude_regions == v3.exclude_regions
+
+        # ④ さらに legacy で put しても保たれる
+        v4 = admin.put_schema(tenant, doc_type, fields)
+        made.append(v4.id)
+        assert v4.exclude_regions[0].label == "v2"
+
+        # ⑤ 明示 [] はクリア
+        v5 = admin.put_schema(tenant, doc_type, fields, exclude_regions=[])
+        made.append(v5.id)
+        assert v5.exclude_regions == []
+        assert admin.get_schema_by_id(tenant, v5.id).exclude_regions == []
+        # クリア後の legacy put は空を引き継ぐ（v2 が復活しない）
+        v6 = admin.put_schema(tenant, doc_type, fields)
+        made.append(v6.id)
+        assert v6.exclude_regions == []
+
+        # ⑥ 別 tenant / 別 doc_type は混ざっていない
+        assert admin.get_schema(other_tenant, doc_type).exclude_regions[0].label == "other"
+        assert admin.get_schema(tenant, other_doc_type).exclude_regions[0].label == "other"
+
+        # region キーを持たない field は JSONB にも region を書かない（§4.7）
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            raw = c.execute(
+                text("SELECT fields FROM field_schemas WHERE id=:i"), {"i": v1.id}
+            ).scalar_one()
+        assert "region" not in raw[0]
+    finally:
+        with admin._engine.begin() as c:  # noqa: SLF001
+            for t in (tenant, other_tenant):
+                c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": t})
+                for sid in made:
+                    c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": sid})

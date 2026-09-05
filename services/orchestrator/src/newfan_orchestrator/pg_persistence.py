@@ -35,13 +35,23 @@ class PgContextStore:
                 return None
             document_id, schema_id = run
             schema = dict(EMPTY_SCHEMA)
+            exclude_regions: list = []
+            source_page_count = None
             if schema_id is not None:
                 srow = c.execute(
-                    text("SELECT doc_type, fields FROM field_schemas WHERE id = :s"),
+                    text(
+                        "SELECT doc_type, fields, exclude_regions, source_page_count "
+                        "FROM field_schemas WHERE id = :s"
+                    ),
                     {"s": schema_id},
                 ).first()
                 if srow is not None:
+                    # exclude_regions / source_page_count は **schema dict に入れない**
+                    # （§4.6）。schema は make_kie_extract がそのまま json.dumps で
+                    # プロンプトへ埋めるため、座標を混ぜると LLM 出力が変わる。
                     schema = {"doc_type": srow[0], "fields": srow[1]}
+                    exclude_regions = list(srow[2] or [])
+                    source_page_count = srow[3]
             pages = [
                 {"page_no": r[0], "image_uri": r[1], "width": r[2], "height": r[3]}
                 for r in c.execute(
@@ -52,7 +62,13 @@ class PgContextStore:
                     {"d": document_id},
                 )
             ]
-            return LoadedContext(document_id=document_id, schema=schema, pages=pages)
+            return LoadedContext(
+                document_id=document_id,
+                schema=schema,
+                pages=pages,
+                exclude_regions=exclude_regions,
+                source_page_count=source_page_count,
+            )
 
     def run_exists(self, tenant_id, run_id) -> bool:
         # documents を JOIN する。帳票が消えると extraction_runs は FK CASCADE で

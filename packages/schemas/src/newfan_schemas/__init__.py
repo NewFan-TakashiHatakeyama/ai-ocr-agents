@@ -13,7 +13,13 @@ from newfan_schemas.extraction import (
     TableCell,
     TableResult,
 )
-from newfan_schemas.field_schema import ColumnDef, FieldDef, FieldSchema
+from newfan_schemas.field_schema import (
+    MIN_REGION_AREA,
+    ColumnDef,
+    FieldDef,
+    FieldSchema,
+    RegionRect,
+)
 from newfan_schemas.enums import DocStatus, FieldType, ReviewStatus, RunStatus, SpanSource
 
 __all__ = [
@@ -27,6 +33,8 @@ __all__ = [
     "FieldSchema",
     "FieldDef",
     "ColumnDef",
+    "RegionRect",
+    "MIN_REGION_AREA",
     "FieldType",
     "SpanSource",
     "ReviewStatus",

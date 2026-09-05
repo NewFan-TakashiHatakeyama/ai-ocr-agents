@@ -21,6 +21,7 @@ import type {
   LockStatus,
   MetricsResponse,
   ResultResponse,
+  RegionRect,
   ReviewQueueItem,
   RuleDto,
   SchemaDto,
@@ -152,10 +153,31 @@ export const api = {
   listSchemas: () => request<{ items: SchemaDto[] }>(`/schemas`),
   // create=true は新規作成モード: 既存 doc_type ならサーバが E1005(409) で拒否する
   //（クライアントの重複チェックは一覧が陳腐化していると素通りするため）
-  putSchema: (docType: string, fields: SchemaFieldDto[], opts?: { create?: boolean }) =>
+  // exclude_regions / source_page_count は **キー自体を送らなければ直前版から引き継ぎ**
+  // される（サーバ側 §4.4）。undefined を明示的に送ると JSON.stringify が落とすので
+  // 結果は同じだが、「省略＝引き継ぎ」を呼び出し側が意識できるよう opts で分ける。
+  putSchema: (
+    docType: string,
+    fields: SchemaFieldDto[],
+    opts?: {
+      create?: boolean;
+      excludeRegions?: RegionRect[] | null;
+      sourcePageCount?: number | null;
+    },
+  ) =>
     request<SchemaDto>(`/schemas`, {
       method: "PUT",
-      body: JSON.stringify({ doc_type: docType, fields, create: opts?.create ?? false }),
+      body: JSON.stringify({
+        doc_type: docType,
+        fields,
+        create: opts?.create ?? false,
+        ...(opts?.excludeRegions !== undefined
+          ? { exclude_regions: opts.excludeRegions }
+          : {}),
+        ...(opts?.sourcePageCount !== undefined
+          ? { source_page_count: opts.sourcePageCount }
+          : {}),
+      }),
     }),
   listConnections: () => request<{ items: ConnectionDto[] }>(`/connections`),
   // 接続の登録（⑤⑥ SaaS連携）。秘密は config に入れず secret_ref で渡す（§16.5）
