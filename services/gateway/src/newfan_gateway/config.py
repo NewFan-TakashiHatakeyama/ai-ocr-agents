@@ -21,6 +21,11 @@ class Settings:
     redis_url: str | None = None  # 未設定なら InMemoryQueue（開発/テスト）
     s3_bucket: str | None = None  # 設定時 ingest は S3ObjectStore（未設定は Local, §2.3）
     s3_kms_key_id: str | None = None  # S3 SSE-KMS のキー ID（任意）
+    # 削除の「実行中だから消せない」判定で、これより古い processing は停止済みとみなす。
+    # mark_run_failed は worker の例外ハンドラ経由でしか呼ばれず、Fargate のタスク
+    # 入れ替えや OOM では processing が永久固着する。閾値が無いと「消したい帳票ほど
+    # 消せない」になるため、時間で見切る。
+    document_delete_stale_minutes: int = 30
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -37,4 +42,7 @@ class Settings:
             redis_url=os.environ.get("REDIS_URL"),
             s3_bucket=os.environ.get("S3_BUCKET"),
             s3_kms_key_id=os.environ.get("S3_KMS_KEY_ID"),
+            document_delete_stale_minutes=int(
+                os.environ.get("DOCUMENT_DELETE_STALE_MINUTES", "30")
+            ),
         )

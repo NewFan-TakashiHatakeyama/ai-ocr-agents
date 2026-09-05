@@ -11,7 +11,13 @@ from newfan_memory.records import CorrectionLog, RuleStatus, TenantMemory, Tenan
 
 
 class MemoryRepository(Protocol):
-    def add_correction(self, log: CorrectionLog) -> None: ...
+    def add_correction(self, log: CorrectionLog) -> bool:
+        """修正ログを保存する。保存済み（＝学習を続けてよい）なら True。
+
+        帳票が既に削除されていれば False。呼び出し側は埋め込み・FAISS 登録を
+        まとめてスキップする（tenant_memories は correction_logs への FK を持つ）。
+        """
+        ...
     def get_correction(self, tenant_id: str, correction_id: str) -> Optional[CorrectionLog]: ...
     def list_corrections(
         self, tenant_id: str, *, doc_type: Optional[str] = None, field_name: Optional[str] = None
@@ -44,8 +50,10 @@ class InMemoryMemoryRepository:
         self._rules: dict[str, TenantRule] = {}
         self._vector_seq: dict[str, int] = {}
 
-    def add_correction(self, log: CorrectionLog) -> None:
+    def add_correction(self, log: CorrectionLog) -> bool:
+        # InMemory は documents を持たないので常に保存できる（削除との競合は Pg 側の話）
         self._corrections[log.id] = log
+        return True
 
     def get_correction(self, tenant_id: str, correction_id: str) -> Optional[CorrectionLog]:
         log = self._corrections.get(correction_id)

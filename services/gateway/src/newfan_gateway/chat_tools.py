@@ -129,6 +129,12 @@ class ChatTools:
             return {"ok": False, "message": "ドキュメントが見つかりません"}
         if self._repo.has_processing_run(tenant_id, document_id):
             return {"ok": False, "message": "現在処理中です。完了を待ってください。"}
+        # REST /extract と同じ正規化・検証（敵対的レビュー確定の残穴）。LLM は空文字や
+        # 実在しない schema_id を渡し得る。素通しすると extraction_runs の FK 違反で
+        # 未捕捉 500 になる（REST 側で実際に起きたのと同じ経路）
+        schema_id = (schema_id or "").strip() or None
+        if schema_id is not None and self._admin.get_schema_by_id(tenant_id, schema_id) is None:
+            return {"ok": False, "message": f"スキーマが見つかりません: {schema_id}"}
 
         run_id, job_id = new_id("run"), new_id("job")
         self._repo.create_run(

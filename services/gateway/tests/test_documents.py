@@ -83,3 +83,26 @@ def test_tenant_isolation(ctx: SimpleNamespace) -> None:
     r = ctx.client.get(f"/v1/documents/{doc_id}", headers=other)
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "E1001"
+
+
+def test_extract_rejects_empty_schema_id(ctx: SimpleNamespace) -> None:
+    """空文字の schema_id は「未指定」として扱う（FK違反で 500 になっていた回帰）。"""
+    doc_id = _upload(ctx)
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"schema_id": "", "options": {"force_vl": False}},
+    )
+    assert r.status_code == 202, r.text
+
+
+def test_extract_rejects_unknown_schema_id(ctx: SimpleNamespace) -> None:
+    """存在しない schema_id は 404(E1001) で明示する（従来は 500 内部エラー）。"""
+    doc_id = _upload(ctx)
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"schema_id": "sch_does_not_exist", "options": {"force_vl": False}},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "E1001"

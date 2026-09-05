@@ -308,6 +308,18 @@ a {
   color: var(--ink2);
 }
 
+/* 不可逆操作（削除）。押す前に色で気付けるように、hover では実際に赤で塗る */
+.btn.danger {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
 .btn.sm {
   padding: 5px 10px;
   font-size: 12px;
@@ -1884,4 +1896,91 @@ a {
 .wfnode .react-flow__handle {
   width: 12px; height: 12px; border-radius: 6px;
   background: var(--accent, #3b6ef5); border: 2px solid var(--panel);
+}
+
+/* ============ テンプレート化ダイアログ（ADR-0006 スキーマレス→スキーマ化） ============ */
+.tpl-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.tpl-card {
+  background: #fff;
+  border-radius: 14px;
+  padding: 20px 22px;
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(80vh, 640px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.25);
+}
+
+.tpl-card h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.tpl-card input,
+.tpl-card select {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.tpl-rows {
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.tpl-row {
+  display: grid;
+  grid-template-columns: 24px 1.2fr 1.2fr 130px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+
+.tpl-row:last-child {
+  border-bottom: none;
+}
+
+.tpl-row.off > *:not(input[type="checkbox"]) {
+  opacity: 0.45;
+}
+
+.tpl-row.tpl-head {
+  font-weight: 600;
+  color: var(--ink2);
+  background: var(--bg-soft, #f8fafc);
+  position: sticky;
+  top: 0;
+}
+
+.tpl-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* スキーマレス抽出のバナー（検証画面）。VL バナーと同系の帯 */
+.tpl-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  background: #eef4ff;
+  border-bottom: 1px solid #d7e3fb;
+  font-size: 12px;
+  color: #23459c;
 }

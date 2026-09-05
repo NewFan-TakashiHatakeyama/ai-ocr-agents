@@ -142,7 +142,11 @@ class MemoryService:
 
     # --- 登録（§5.8.1 /internal/memory/add） ---
     def add(self, log: CorrectionLog) -> None:
-        self._repo.add_correction(log)  # 正本を保存（冪等）
+        if not self._repo.add_correction(log):  # 正本を保存（冪等）
+            # 帳票が削除済み。tenant_memories は correction_logs への FK を持つので、
+            # ここで続けると FK 違反でジョブが毒メッセージ化する。学習ごと捨てる
+            # （消した帳票の値を学習に残さないのは、削除の意味としても正しい）。
+            return
         key = embedding_key(
             doc_type=log.doc_type or "",
             supplier=log.supplier_key or "",

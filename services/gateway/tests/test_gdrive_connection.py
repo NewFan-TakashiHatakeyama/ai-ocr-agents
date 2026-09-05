@@ -135,3 +135,36 @@ def test_今すぐ同期はq_syncに実種別を積む(ctx: SimpleNamespace) -> 
         assert r.status_code == 202, r.text
         msg = [m for s, m in ctx.queue.messages if s == "q.sync" and m["connection_id"] == cid][-1]
         assert msg["type"] == t
+
+
+def test_フォルダ監視系はenv参照のsecret_refを許可する(ctx: SimpleNamespace) -> None:
+    # ローカル/compose の実 OAuth 検証用（docs/gdrive-oauth-setup.md）。
+    # 宛先が固定の各社トークンエンドポイントに限られるため名前空間検査を免除する
+    r = ctx.client.post(
+        "/v1/connections",
+        headers=auth("admin"),
+        json={
+            "type": "gdrive",
+            "name": "実OAuth",
+            "config": {"folder_id": "real-folder"},
+            "secret_ref": "env:GDRIVE_REFRESH_TOKEN",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["secret_ref"] == "env:GDRIVE_REFRESH_TOKEN"
+
+
+def test_env参照でもフォルダ監視系以外は従来どおり拒否(ctx: SimpleNamespace) -> None:
+    # db_write 系は宛先（config.host）を利用者が差し替えられるため env: を許さない
+    r = ctx.client.post(
+        "/v1/connections",
+        headers=auth("admin"),
+        json={
+            "type": "postgres",
+            "name": "erp",
+            "config": {"host": "db.example.com", "database": "erp"},
+            "secret_ref": "env:SINK_DB_PASSWORD",
+        },
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "E4001"

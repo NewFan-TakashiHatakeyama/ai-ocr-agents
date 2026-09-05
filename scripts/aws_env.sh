@@ -151,6 +151,33 @@ _ecr_has_tag() {
     --image-ids "imageTag=$2" >/dev/null 2>&1
 }
 
+_migrate_db_only() {
+  # alembic upgrade head だけを migrate タスクで流す。
+  # cmd_push が新コードを force-new-deployment する**前**に呼ぶためのもの。
+  # 新コードは新しい migration を前提にし得る（例: 0006 の label 列を SELECT/INSERT）。
+  # 先に DDL を進めないと「新コード + 旧 DDL」の窓で既存 API まで全 500 になる
+  # （敵対的レビュー確定 major。c3555c5 の UndefinedColumn 事故と同型）。
+  # 戻り値: 0=成功 / 1=migration 失敗 / 2=クラスタ未作成（up 前の push。呼び出し側で無視可）
+  local cluster td sg subnets arn code tid
+  cluster="$(_prefix)"
+  td="$(cd "$TF_DIR" && terraform output -raw migrate_task_definition_arn 2>/dev/null)" || return 2
+  [ -z "$td" ] && return 2
+  aws ecs describe-clusters --region "$REGION" --clusters "$cluster" --query "clusters[0].status" --output text 2>/dev/null | grep -q ACTIVE || return 2
+  sg="$(cd "$TF_DIR" && terraform output -raw service_security_group_id)"
+  subnets="$(aws ec2 describe-subnets --region "$REGION" --filters "Name=tag:Name,Values=ai-ocr-private-*" --query "Subnets[].SubnetId" --output text | tr '\t' ',')"
+  echo "[migrate] alembic upgrade head を実行します"
+  arn=$(aws ecs run-task --region "$REGION" --cluster "$cluster" --task-definition "$td" --launch-type FARGATE --network-configuration "awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${sg}],assignPublicIp=DISABLED}" --query "tasks[0].taskArn" --output text)
+  aws ecs wait tasks-stopped --region "$REGION" --cluster "$cluster" --tasks "$arn"
+  code=$(aws ecs describe-tasks --region "$REGION" --cluster "$cluster" --tasks "$arn" --query "tasks[0].containers[0].exitCode" --output text)
+  if [ "$code" != "0" ]; then
+    tid="${arn##*/}"
+    echo "[migrate] 失敗（exit=$code）。ログ:" >&2
+    aws logs get-log-events --region "$REGION" --log-group-name "/ecs/ai-ocr-migrate" --log-stream-name "ecs/migrate/${tid}" --query "events[-15:].message" --output text >&2 || true
+    return 1
+  fi
+  echo "[migrate] 完了"
+}
+
 cmd_push() {
   # ECR に image_tag が無ければ **Dockerfile からビルドして** push する。
   # ローカルの既存タグを使い回さないのは、古い config を焼いたイメージを掴む事故を
@@ -169,6 +196,15 @@ cmd_push() {
   # 事後検出できないため、web だけは常に再ビルドする）。
   local alb; alb="$(cd "$TF_DIR" && terraform output -raw alb_dns_name 2>/dev/null || echo "")"
 
+  # app 系（コードが頻繁に変わる）は、タグが在っても「リポジトリの最新コミットより
+  # 古い」なら作り直す。image_tag 据え置き + タグ存在スキップの組合せで 7/21 の
+  # 古いイメージを掴み、新機能欠落と migration 未適用が実際に起きた（レビュー確定）。
+  # inference/vl-* は巨大ビルドかつ変更が稀なため従来どおりタグ有無のみ
+  # （変更した時は image_tag を上げるか、タグを手で消して push し直す）。
+  local app_imgs=" gateway orchestrator-worker export-worker migrate "
+  # git -C に MSYS の /c/... パスを渡すと MSYS_NO_PATHCONV=1 のため解決できない
+  # （実測: fatal: cannot change to）。cd してから実行する
+  local repo_epoch; repo_epoch="$(cd "$repo_root" && git log -1 --format=%ct)"
   local missing=()
   for i in gateway orchestrator-worker export-worker migrate inference web vl-pipeline vlm-server; do
     if [ "$i" = "web" ]; then
@@ -176,7 +212,18 @@ cmd_push() {
       echo "  ai-ocr-${i}:${tag} … ALB 依存のため常に再ビルドします"
       missing+=("$i")
     elif _ecr_has_tag "$i" "$tag"; then
-      echo "  ai-ocr-${i}:${tag} … あり"
+      if [[ "$app_imgs" == *" $i "* ]]; then
+        pushed="$(aws ecr describe-images --region "$REGION" --repository-name "ai-ocr-$i" --image-ids "imageTag=$tag" --query "imageDetails[0].imagePushedAt" --output text 2>/dev/null)"
+        pushed_epoch="$(${PY_BIN} -c "import datetime,sys;print(int(datetime.datetime.fromisoformat(sys.argv[1]).timestamp()))" "$pushed" 2>/dev/null || echo 0)"
+        if [ "${pushed_epoch:-0}" -lt "$repo_epoch" ]; then
+          echo "  ai-ocr-${i}:${tag} … あり（最新コミットより古いため再ビルドします）"
+          missing+=("$i")
+        else
+          echo "  ai-ocr-${i}:${tag} … あり（最新）"
+        fi
+      else
+        echo "  ai-ocr-${i}:${tag} … あり"
+      fi
     else
       echo "  ai-ocr-${i}:${tag} … 無し（ビルドします）"
       missing+=("$i")
@@ -184,11 +231,6 @@ cmd_push() {
   done
 
   aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$reg" >/dev/null
-
-  # ECR は imageTagMutability=IMMUTABLE のため同タグへの push が拒否される。
-  # 旧タグが存在すれば明示的に削除してから push し直す（無ければ何もしない）。
-  aws ecr batch-delete-image --region "$REGION" --repository-name ai-ocr-web \
-    --image-ids imageTag="$tag" >/dev/null 2>&1 || true
 
   local i
   for i in "${missing[@]}"; do
@@ -208,7 +250,42 @@ cmd_push() {
     echo "  building ai-ocr-${i}:${tag} …"
     (cd "$repo_root" && docker build -q "${args[@]}" . >/dev/null) || {
       echo "  [!] ${i} のビルドに失敗しました" >&2; return 1; }
-    docker push -q "${reg}/ai-ocr-${i}:${tag}" >/dev/null && echo "  pushed ai-ocr-${i}:${tag}"
+    # ECR は IMMUTABLE のため旧タグを消してから push する。削除は**ビルド成功後・
+    # push 直前**に行う（先に全削除すると、ビルド失敗時に ECR からタグが消えたまま
+    # になり、以後のタスク起動が pull できなくなる）
+    aws ecr batch-delete-image --region "$REGION" --repository-name "ai-ocr-${i}" \
+      --image-ids imageTag="$tag" >/dev/null 2>&1 || true
+    docker push -q "${reg}/ai-ocr-${i}:${tag}" >/dev/null || {
+      echo "  [!] ${i} の push に失敗しました" >&2; return 1; }
+    echo "  pushed ai-ocr-${i}:${tag}"
+  done
+
+  # 新コードを走らせる前に DDL を最新化する。app 系イメージを作り直した＝コードが
+  # 変わった時だけでよい（inference/web のみの再ビルドで migrate を待つ必要はない）。
+  local need_migrate=""
+  for i in "${missing[@]}"; do
+    case "$i" in gateway|orchestrator-worker|export-worker|migrate) need_migrate=1 ;; esac
+  done
+  if [ -n "$need_migrate" ]; then
+    _migrate_db_only
+    case $? in
+      0) : ;;
+      2) echo "  [i] クラスタ未作成のため migration をスキップします（up が後で実行します）" ;;
+      *) echo "  [!] migration に失敗したため再デプロイを中止します（旧コードのまま維持）" >&2; return 1 ;;
+    esac
+  fi
+
+  # push しただけでは稼働中タスクは旧イメージのまま残る（実測）。push した app 系
+  # サービスへ force-new-deployment を打って確実に切り替える（クラスタ未作成時は無視）
+  local svc
+  for i in "${missing[@]}"; do
+    case "$i" in
+      gateway|web|orchestrator-worker|export-worker) svc="ai-ocr-${i}" ;;
+      *) continue ;;
+    esac
+    aws ecs update-service --region "$REGION" --cluster "$(_prefix)" \
+      --service "$svc" --force-new-deployment >/dev/null 2>&1 \
+      && echo "  redeploy ${svc}" || true
   done
 }
 
@@ -219,27 +296,8 @@ cmd_migrate() {
   local td sg subnets arn tid
   td="$(cd "$TF_DIR" && terraform output -raw migrate_task_definition_arn)"
   sg="$(cd "$TF_DIR" && terraform output -raw service_security_group_id)"
-  subnets="$(aws ec2 describe-subnets --region "$REGION" \
-    --filters "Name=tag:Name,Values=ai-ocr-private-*" \
-    --query "Subnets[].SubnetId" --output text | tr '\t' ',')"
-
-  echo "[migrate] alembic upgrade head を実行します"
-  arn=$(aws ecs run-task --region "$REGION" --cluster "$cluster" --task-definition "$td" \
-    --launch-type FARGATE \
-    --network-configuration "awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${sg}],assignPublicIp=DISABLED}" \
-    --query "tasks[0].taskArn" --output text)
-  aws ecs wait tasks-stopped --region "$REGION" --cluster "$cluster" --tasks "$arn"
-  local code
-  code=$(aws ecs describe-tasks --region "$REGION" --cluster "$cluster" --tasks "$arn" \
-    --query "tasks[0].containers[0].exitCode" --output text)
-  if [ "$code" != "0" ]; then
-    tid="${arn##*/}"
-    echo "[migrate] 失敗（exit=$code）。ログ:" >&2
-    aws logs get-log-events --region "$REGION" --log-group-name "/ecs/ai-ocr-migrate" \
-      --log-stream-name "ecs/migrate/${tid}" --query "events[-15:].message" --output text >&2 || true
-    return 1
-  fi
-  echo "[migrate] 完了"
+  subnets="$(aws ec2 describe-subnets --region "$REGION" --filters "Name=tag:Name,Values=ai-ocr-private-*" --query "Subnets[].SubnetId" --output text | tr '\t' ',')"
+  _migrate_db_only || return 1
 
   echo "[migrate] dev テナント（${DEV_TENANT}）を投入します"
   arn=$(aws ecs run-task --region "$REGION" --cluster "$cluster" --task-definition "$td" \

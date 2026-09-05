@@ -144,13 +144,25 @@ services:
       SINK_DB_PASSWORD: ${SINK_DB_PASSWORD:-}
       # ⑤⑥ SaaS連携（GDrive/M365/Box）。ローカルは Fake＝下記マウントのディレクトリを
       # SaaS フォルダに見立てる（./<type>-fake/<folder_id>/ にファイルを置くと
-      # 検知→取込→ワークフロー発火）。実 API は各種 env を設定して *_FAKE_ROOT を外す
-      # （gdrive: GOOGLE_OAUTH_CLIENT_ID/SECRET、m365: M365_TENANT_ID/CLIENT_ID/SECRET、
-      #  box: BOX_CLIENT_ID/SECRET/ENTERPRISE_ID。.env 差し替えのみで切替）。
-      GDRIVE_FAKE_ROOT: ${GDRIVE_FAKE_ROOT:-/gdrive-fake}
-      M365_FAKE_ROOT: ${M365_FAKE_ROOT:-/m365-fake}
-      BOX_FAKE_ROOT: ${BOX_FAKE_ROOT:-/box-fake}
+      # 検知→取込→ワークフロー発火）。実 API へ切り替えるには .env で
+      # `GDRIVE_FAKE_ROOT=`（空文字）＋実クレデンシャルを設定する。
+      # 注意: `${VAR:-def}` は空文字でも既定値に化けるため `${VAR-def}`（未設定時のみ既定）
+      # を使う — 空文字で Fake を無効化できるのはこの書き方だけ。
+      GDRIVE_FAKE_ROOT: ${GDRIVE_FAKE_ROOT-/gdrive-fake}
+      M365_FAKE_ROOT: ${M365_FAKE_ROOT-/m365-fake}
+      BOX_FAKE_ROOT: ${BOX_FAKE_ROOT-/box-fake}
       SAAS_POLL_INTERVAL_SEC: ${SAAS_POLL_INTERVAL_SEC:-15}
+      # 実 API のクレデンシャル（.env から。未設定ならその種別は Fake か無効のまま）。
+      # リフレッシュトークンは接続の secret_ref="env:GDRIVE_REFRESH_TOKEN" で参照する
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GDRIVE_REFRESH_TOKEN: ${GDRIVE_REFRESH_TOKEN:-}
+      M365_TENANT_ID: ${M365_TENANT_ID:-}
+      M365_CLIENT_ID: ${M365_CLIENT_ID:-}
+      M365_CLIENT_SECRET: ${M365_CLIENT_SECRET:-}
+      BOX_CLIENT_ID: ${BOX_CLIENT_ID:-}
+      BOX_CLIENT_SECRET: ${BOX_CLIENT_SECRET:-}
+      BOX_ENTERPRISE_ID: ${BOX_ENTERPRISE_ID:-}
       STORAGE_ROOT: /data
     volumes:
       - appdata:/data

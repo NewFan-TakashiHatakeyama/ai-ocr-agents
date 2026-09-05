@@ -184,9 +184,38 @@ def test_resumeジョブも_succeeded_になる() -> None:
 
 def test_失敗したジョブは_failed_になる() -> None:
     worker, store, _, _ = _build(conf=0.99)
-    worker._consumer.push({**_JOB, "run_id": "run_missing"})  # type: ignore[attr-defined]
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("boom")
+
+    worker._graph.invoke = _boom  # type: ignore[attr-defined]  # noqa: SLF001
+    worker._consumer.push(dict(_JOB))  # type: ignore[attr-defined]
     assert worker.run_once() == 0  # ACK せず再配信に委ねる（§9）
     assert store.job_status("job_1") == ("failed", "E9001")
+
+
+def test_run_が消えていればdead終端にしてACKする() -> None:
+    """帳票削除（DELETE /documents/{id}）と in-flight ジョブの競合。
+
+    参照先が消えたジョブは再試行しても永久に直らない。ACK しないと xautoclaim が
+    60 秒ごとに拾い続ける（redis_io に試行上限が無い）。
+    """
+    worker, store, _, _ = _build(conf=0.99)
+    worker._consumer.push({**_JOB, "run_id": "run_missing"})  # type: ignore[attr-defined]
+    assert worker.run_once() == 0  # 成功カウントには入れない
+    assert store.job_status("job_1") == ("dead", "E1001")
+    assert worker._consumer.consume(count=10) == []  # ACK 済み＝再配信されない  # noqa: SLF001
+
+
+def test_resumeでも先にrunの存在を見る() -> None:
+    """resume は checkpointer だけで走るため、DB に run が無くても finalize まで
+    進んでしまう。run_exists のチェックが resume 分岐より前にあることを固定する。"""
+    worker, store, _, _ = _build(conf=0.78)
+    worker.process(dict(_JOB))
+    store.drop_run("run_1")  # 帳票削除で run ごと消えた
+    worker._consumer.push({**_JOB, "job_id": "job_2", "resume": {"corrections": []}})  # type: ignore[attr-defined]
+    assert worker.run_once() == 0
+    assert store.job_status("job_2") == ("dead", "E1001")
 
 
 def test_job_idの無いpayloadでも落ちない() -> None:
@@ -280,3 +309,27 @@ def test_llm使用量が差分でrun_metricsへ永続化される() -> None:
     assert store.run_metrics["run_1"] == {
         "llm_input_tokens": 1200, "llm_output_tokens": 340, "llm_cost_jpy": 1.25,
     }
+
+
+def test_needs_review_run_saves_pending_fields_and_bbox() -> None:
+    """Phase 0 の受け入れ条件をグラフ全体で確認する。
+
+    (a) 保存された field に bbox が入る（F-0。以前は常に None で検証画面の
+        オーバーレイに出なかった）
+    (b) 要確認の field が pending で保存される（gate 所見が review_status に
+        反映されないと、run は needs_review なのに画面は全部確定済みに見える）
+
+    ノード単体テストは戻り値しか見ないため、この 2 つはグラフを通して初めて
+    「人に届くか」が確かめられる。
+    """
+    from newfan_schemas import ReviewStatus
+
+    worker, store, _, _ = _build(conf=0.78)  # 低確信 → needs_review
+    assert worker.process(dict(_JOB)) == "needs_review"
+
+    saved = store.saved_fields("run_1")
+    assert saved, "needs_review でも fields は保存される"
+    assert any(f.bbox for f in saved), "根拠 span のある field に bbox が付く"
+    assert any(f.review_status is ReviewStatus.PENDING for f in saved), (
+        "要確認の field が pending で保存される（検証画面の『要確認』の唯一の根拠）"
+    )

@@ -41,6 +41,7 @@ def create_app(
     chat_agent: Optional[ChatAgent] = None,
     workflows: Optional[WorkflowsRepository] = None,
     secret_store: Any = None,
+    object_store: Any = None,
 ) -> FastAPI:
     app = FastAPI(title="NewFan AI-OCR Gateway", version="0.1.0")
 
@@ -66,11 +67,14 @@ def create_app(
     app.state.api_keys = api_keys or InMemoryApiKeyStore({})
     app.state.lock_store = InMemoryLockStore()
     app.state.idempotency = {}
+    # 帳票の実体（原本 PDF・ページ画像）の保管先。アップロードは ingestor 経由だが、
+    # 削除（DELETE /v1/documents/{id}）は router から直接 delete_prefix を呼ぶ。
+    app.state.object_store = object_store or _default_object_store(app.state.settings)
     if ingestor is not None:
         app.state.ingestor = ingestor
     # ingestor 未注入時は本番構成（newfan_ingest）を遅延構築する。
     elif not hasattr(app.state, "ingestor"):
-        app.state.ingestor = _default_ingestor(app.state.settings)
+        app.state.ingestor = _default_ingestor(app.state.settings, app.state.object_store)
 
     @app.middleware("http")
     async def add_request_id(request: Request, call_next: Any) -> Any:
@@ -107,20 +111,26 @@ def create_app(
     return app
 
 
-def _default_ingestor(settings: Settings) -> Ingestor:
-    # rasterizer は AutoRasterizer（PDF=pypdfium2 / 画像・TIFF=Pillow, runtime extra）。
-    # PdfiumRasterizer 単体だと PNG/JPEG のアップロードが NotImplementedError → 500 になる
-    # （validate_upload は pdf/png/jpeg/tiff/office を通すため。実コンテナで検出）。
-    # ObjectStore は S3_BUCKET 設定時 S3、無ければ Local。
-    from newfan_ingest import IngestService
-    from newfan_ingest.rasterize import AutoRasterizer
+def _default_object_store(settings: Settings) -> Any:
+    """ObjectStore は S3_BUCKET 設定時 S3、無ければ Local（§2.3）。
 
+    アップロード（ingest 経由）と削除（DELETE /v1/documents）の両方から要るので、
+    IngestService の内側に埋めず単体で組めるようにしてある。
+    """
     if settings.s3_bucket:
         from newfan_ingest.storage import S3ObjectStore
 
-        store: Any = S3ObjectStore(settings.s3_bucket, kms_key_id=settings.s3_kms_key_id)
-    else:
-        from newfan_ingest.storage import LocalObjectStore
+        return S3ObjectStore(settings.s3_bucket, kms_key_id=settings.s3_kms_key_id)
+    from newfan_ingest.storage import LocalObjectStore
 
-        store = LocalObjectStore(settings.storage_root)
+    return LocalObjectStore(settings.storage_root)
+
+
+def _default_ingestor(settings: Settings, store: Any) -> Ingestor:
+    # rasterizer は AutoRasterizer（PDF=pypdfium2 / 画像・TIFF=Pillow, runtime extra）。
+    # PdfiumRasterizer 単体だと PNG/JPEG のアップロードが NotImplementedError → 500 になる
+    # （validate_upload は pdf/png/jpeg/tiff/office を通すため。実コンテナで検出）。
+    from newfan_ingest import IngestService
+    from newfan_ingest.rasterize import AutoRasterizer
+
     return IngestService(store, AutoRasterizer())

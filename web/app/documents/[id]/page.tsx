@@ -1,17 +1,21 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { use, useCallback, useEffect, useMemo, useState } from "react";
 
+import { DeleteDocument } from "@/components/DeleteDocument";
 import { DocViewer } from "@/components/DocViewer";
 import { ExtractStart } from "@/components/ExtractStart";
 import { FieldPanel } from "@/components/FieldPanel";
 import { RunWorkflow } from "@/components/RunWorkflow";
 import { StatusChip } from "@/components/StatusChip";
+import { TemplatizeSchema } from "@/components/TemplatizeSchema";
 import { ApiError, api } from "@/lib/api";
 import { sortFields } from "@/lib/fields";
 import { useReviewStore } from "@/lib/store";
+import { hasRole, usePrincipal } from "@/lib/principal";
 import { useToasts } from "@/lib/toast";
 import { fmtRemaining, useDocumentLock } from "@/lib/useDocumentLock";
 
@@ -28,12 +32,43 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
       return st >= 500 && count < 2;
     },
   });
+  // result が E1001 のとき、それが「未抽出」なのか「帳票ごと削除済み」なのかは
+  // result だけでは区別できない（サーバはどちらも E1001）。帳票の存在を別途確かめる。
+  const resultErrCode = (error as { code?: string } | null)?.code;
+  const docExists = useQuery({
+    queryKey: ["doc-exists", id],
+    queryFn: () => api.getDocument(id).then(() => true).catch(() => false),
+    enabled: resultErrCode === "E1001",
+    retry: false,
+    staleTime: 0,
+    gcTime: 0,
+  });
+  const docGone = docExists.data === false;
+
   const { selectedField, selectedCell, edits, select, setEdit, clearEdits } = useReviewStore();
   const push = useToasts((s) => s.push);
+  const router = useRouter();
+  const qc = useQueryClient();
+
+  // 削除後にこの画面へ戻ってこないよう、キャッシュを捨ててから一覧へ送る。
+  // removeQueries を省くと、戻るボタンで消えた帳票の結果が一瞬表示される。
+  const afterDelete = useCallback(() => {
+    qc.removeQueries({ queryKey: ["result", id] });
+    qc.removeQueries({ queryKey: ["classify", id] });
+    qc.invalidateQueries({ queryKey: ["documents"] });
+    qc.invalidateQueries({ queryKey: ["review-queue"] });
+    qc.invalidateQueries({ queryKey: ["metrics"] });
+    router.push("/documents");
+  }, [qc, id, router]);
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(1);
   // §8.2 ソフトロック: 他者が確認中なら readOnly（編集・確定を抑止）
   const { readOnly, remaining, holder } = useDocumentLock(id);
+  const { me } = usePrincipal();
+  // テンプレート化に成功した doc_type。run の schema_id は作成後も null のままなので、
+  // これが無いとバナーが「テンプレート化してください」を出し続け、成功したのか
+  // 何も起きなかったのか画面から分からない（敵対的レビュー確定）。
+  const [createdDocType, setCreatedDocType] = useState<string | null>(null);
 
   const pending = useMemo(
     () => (data ? sortFields(data.fields).filter((f) => f.review_status === "pending") : []),
@@ -95,6 +130,10 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   // §8.4 キーボード完結
   useEffect(() => {
     function onKey(ev: KeyboardEvent) {
+      // テンプレート化ダイアログ表示中は画面ショートカットを全て止める。
+      // 特に Ctrl/⌘+Enter は typing 判定より先に評価されるため、doc_type 入力中に
+      // 押すと帳票の確定（会計連携）が発火してしまう（敵対的レビュー確定）。
+      if (document.querySelector(".tpl-overlay")) return;
       const typing = ev.target instanceof HTMLInputElement || ev.target instanceof HTMLTextAreaElement;
       if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") {
         ev.preventDefault();
@@ -160,6 +199,33 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   // まだ抽出していない（run 無し = E1001）なら行き止まりにせず「抽出を開始」導線を出す。
   // instanceof は dev のモジュール重複で false になり得るため code を直接見る（duck typing）
   const errCode = (error as { code?: string } | null)?.code;
+  if (errCode === "E1001" && docGone) {
+    // 帳票そのものが消えている。サーバは「帳票が無い」と「run が無い」を同じ
+    // E1001 で返すので、result だけ見ると削除済みの帳票が「まだ抽出していません」
+    // として復活して見える（削除 → 戻る、で必ず踏む）。
+    return (
+      <div className="main">
+        <div className="rv-head">
+          <Link href="/documents" className="btn sm ghost">
+            ← 一覧
+          </Link>
+        </div>
+        <div className="empty">
+          <div className="emoji">🗑️</div>
+          <h3>この帳票は削除されました</h3>
+          <p>抽出結果・原本ファイルとも残っていません。</p>
+          <Link href="/documents" className="btn grad" style={{ marginTop: 10 }}>
+            ドキュメント一覧へ
+          </Link>
+        </div>
+      </div>
+    );
+  }
+  if (errCode === "E1001" && docExists.isPending) {
+    // 「未抽出」と「削除済み」の判定が付くまでは出し分けない（一瞬 ExtractStart が
+    // 見えてから消えるより、読み込み中のままの方が誤解が無い）
+    return <div className="page">読み込み中…</div>;
+  }
   if (errCode === "E1001") {
     return (
       <div className="main">
@@ -168,6 +234,11 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             ← 一覧
           </Link>
           <span className="docname" style={{ marginLeft: 8 }}>{id}</span>
+          {/* 未抽出の帳票（誤アップロード等）こそ消したい。ここに導線が無いと
+              一覧に戻らないと消せない */}
+          <span style={{ marginLeft: "auto" }}>
+            <DeleteDocument documentId={id} onDeleted={afterDelete} />
+          </span>
         </div>
         <ExtractStart documentId={id} onDone={() => refetch()} />
       </div>
@@ -205,6 +276,8 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           <b style={{ color: pend ? "var(--amber-ink)" : "var(--green)" }}>要確認 {pend}</b>
         </div>
         <RunWorkflow documentId={data.document_id} />
+        {/* 他者が確認中は消させない（サーバ側も 409 で弾くが、押せない方が親切） */}
+        <DeleteDocument documentId={id} disabled={readOnly} onDeleted={afterDelete} />
         <button
           className="btn primary"
           disabled={busy || readOnly || data.status === "confirmed"}
@@ -214,6 +287,28 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         </button>
       </div>
 
+      {/* === null の厳密比較にする: 旧 gateway（schema_id キー無し）と新 web の
+          混在窓では undefined になり、緩い比較だとスキーマ指定済みの帳票まで
+          「自動発見」バナーが出る（敵対的レビュー確定）。undefined なら出さない側に倒す */}
+      {data.schema_id === null && createdDocType === null && (
+        <div className="tpl-banner" role="status">
+          🧩 この抽出は<b>スキーマなしの自動発見</b>です。項目を確認して
+          テンプレート化すると、次回から同じ定義で自動抽出できます。
+          <span className="spacer" />
+          {hasRole(me.role, "admin") ? (
+            <TemplatizeSchema fields={data.fields} onCreated={setCreatedDocType} />
+          ) : (
+            <span className="sub">（テンプレート化は管理者が実行できます）</span>
+          )}
+        </div>
+      )}
+      {createdDocType !== null && (
+        <div className="tpl-banner" role="status">
+          ✅ スキーマ「<b>{createdDocType}</b>」を作成しました。この帳票の値はこのまま
+          確認・確定できます。次回の同種帳票は、ファイル名に種別を含めるか取込時に
+          種別を指定すると、このスキーマが自動で選ばれます（抽出画面でも選べます）。
+        </div>
+      )}
       {readOnly && (
         <div className="rv-lock" role="status" aria-live="polite">
           🔒 {holder ?? "他のメンバー"} が確認中です（残り {fmtRemaining(remaining)}）。
