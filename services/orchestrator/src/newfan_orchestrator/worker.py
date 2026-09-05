@@ -155,6 +155,9 @@ class ExtractionWorker:
                 review_items=state.get("review_items", []),
                 status="needs_review",
                 fallback_pages=state.get("fallback_pages", []),
+                # finalize を通らない経路なので、ここでも渡さないと除外バッジが
+                # レビュー中だけ出なくなる（マスク発動 run は必ずここを通る）
+                region_stats=state.get("metrics", {}).get("region"),
             )
             if self._webhook is not None:
                 self._webhook(

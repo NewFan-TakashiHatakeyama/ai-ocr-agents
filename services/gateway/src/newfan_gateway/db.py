@@ -11,9 +11,20 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Iterator, Optional
 
-from sqlalchemy import JSON, Integer, String, Text, create_engine, select, text
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    func,
+    select,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from newfan_gateway.ids import new_id
@@ -71,6 +82,11 @@ class ExtractionRun(Base):
     options: Mapped[dict] = mapped_column(JSON, default=dict)
     metrics: Mapped[dict] = mapped_column(JSON, default=dict)
     result_version: Mapped[int] = mapped_column(Integer, default=1)
+    # 「最新の run」を決めるために要る。DDL 側に DEFAULT now() があるので INSERT では
+    # 渡さない（渡すとアプリのクロックと DB のクロックが混ざる）。
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     # fields/tables/review_summary は正規化テーブル（extraction_fields/_tables）が正本。
     # _synced() がそこから RunRecord を組む（§7 の実スキーマに整合）。
 
@@ -188,6 +204,21 @@ class PgRepository:
             )
             return s.scalars(stmt).first() is not None
 
+    def supersede_review_runs(self, tenant_id, document_id) -> int:
+        # needs_review のまま残った run を終端させる。processing は触らない
+        # （実行中の worker が finalize しようとしている）。
+        # PgRepository._rls は「セッションを yield する contextmanager」であり、
+        # PgAdminRepository._rls（接続に SET を発行するだけ）とは形が違う。
+        with self._rls(tenant_id) as s:
+            res = s.execute(
+                text(
+                    "UPDATE extraction_runs SET status='superseded', finished_at=now() "
+                    "WHERE tenant_id=:t AND document_id=:d AND status='needs_review'"
+                ),
+                {"t": tenant_id, "d": document_id},
+            )
+            return int(res.rowcount or 0)
+
     def create_run(self, run: RunRecord) -> None:
         # gateway は抽出前に run 行のみ作成する。fields/tables は worker が
         # extraction_fields/_tables へ書く（§4.3 finalize）。
@@ -211,11 +242,16 @@ class PgRepository:
             return self._synced(s, row) if row else None
 
     def get_latest_run(self, tenant_id, document_id):
+        # **id 順ではなく開始時刻順**。run id は `run_` + ランダム uuid なので、
+        # id.desc() は「最新」ではなく実質ランダムに 1 本を選ぶ。帳票に run が
+        # 1 本しか無い間は表面化しないが、チャットの再抽出や supersede 付き
+        # 再抽出で 2 本目ができた瞬間、検証画面が古い結果を表示し始める
+        # （実機で 4 回中 1 回再現した）。同時刻の並びは id で決定論化する。
         with self._rls(tenant_id) as s:
             stmt = (
                 select(ExtractionRun)
                 .where(ExtractionRun.document_id == document_id)
-                .order_by(ExtractionRun.id.desc())
+                .order_by(ExtractionRun.started_at.desc(), ExtractionRun.id.desc())
                 .limit(1)
             )
             row = s.scalars(stmt).first()
@@ -292,6 +328,7 @@ class PgRepository:
             status=row.status, engine_versions=row.engine_versions, options=row.options,
             result_version=row.result_version, fields=fields, tables=tables, review_summary=review_summary,
             fallback_pages=(row.metrics or {}).get("fallback_pages", []),
+            region_stats=(row.metrics or {}).get("region"),
         )
 
     def set_document_status(self, tenant_id, document_id, status):
@@ -588,6 +625,7 @@ def _run_record(row: ExtractionRun) -> RunRecord:
         status=row.status, engine_versions=row.engine_versions, options=row.options,
         result_version=row.result_version, fields=[], tables=[], review_summary={},
         fallback_pages=(row.metrics or {}).get("fallback_pages", []),
+        region_stats=(row.metrics or {}).get("region"),
     )
 
 
@@ -1222,6 +1260,26 @@ class PgWorkflowsRepository:
                 {"t": tenant_id, "i": schema_id},
             ).first()
         return r is not None
+
+    def schema_is_latest(self, tenant_id: str, schema_id: str) -> bool:
+        """この schema_id が当該 doc_type の最新版か（lint L012）。
+
+        存在しない id は True を返す（「最新でない」ではなく「存在しない」であり、
+        それは L009 が error として出す。ここで二重に出すと指摘が読みにくい）。
+        """
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "SELECT s.id = ("
+                    "  SELECT id FROM field_schemas"
+                    "  WHERE tenant_id = s.tenant_id AND doc_type = s.doc_type"
+                    "  ORDER BY version DESC LIMIT 1"
+                    ") FROM field_schemas s WHERE s.tenant_id=:t AND s.id=:i"
+                ),
+                {"t": tenant_id, "i": schema_id},
+            ).first()
+        return True if r is None else bool(r[0])
 
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool:
         # 疎通未確認（untested）の接続は有効化に使わせない（§16.5 の安全策）

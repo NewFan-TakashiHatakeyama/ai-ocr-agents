@@ -25,6 +25,13 @@ from newfan_paddle_client import (
 )
 from newfan_schemas import ExtractionState, ReviewItem, Span, SpanSource
 
+from newfan_orchestrator.region_mask import (
+    RegionStats,
+    filter_spans,
+    mask_tables,
+    regions_for_page,
+)
+
 logger = logging.getLogger(__name__)
 
 NodeFn = Callable[[ExtractionState], dict[str, Any]]
@@ -116,6 +123,33 @@ def file_uri_loader(uri: str) -> bytes:
     raise ValueError(f"未対応の image_uri スキーム: {uri}")
 
 
+def _merge_region_metrics(
+    state: ExtractionState, stats: RegionStats, *, active: bool
+) -> dict[str, Any]:
+    """``metrics["region"]`` を積算する。
+
+    metrics は reducer 無しの LastValue チャネルなので、既存値を読んでから返さないと
+    先に走ったノードの記録が消える（structure_ocr → vl_fallback の順で両方が書く）。
+
+    除外領域が 1 つも設定されていない run では **region キー自体を作らない**
+    （active=False）。全 run に 0 埋めの region を書くと「領域を使っていない run は
+    完全に no-op」という後方互換の条件が崩れ、既存 run との metrics 差分が出る。
+    領域が設定されている run は 0 件でも記録する（設定は効いているが何も消して
+    いない、という情報自体に意味がある）。
+    """
+    metrics = dict(state.get("metrics", {}))
+    if not active and "region" not in metrics:
+        return metrics
+    cur = dict(metrics.get("region", {}) or {})
+    add = stats.as_dict()
+    for key in ("excluded_spans", "excluded_cells", "excluded_rows"):
+        cur[key] = int(cur.get(key, 0)) + int(add[key])
+    for key in ("skipped_pages_no_dims", "markdown_dropped_pages"):
+        cur[key] = sorted(set(list(cur.get(key, []) or []) + add[key]))
+    metrics["region"] = cur
+    return metrics
+
+
 def make_structure_ocr(
     client: StructureClient,
     image_loader: ImageLoader = file_uri_loader,
@@ -130,6 +164,10 @@ def make_structure_ocr(
         markdown_parts: list[str] = []
         errors: list[dict[str, Any]] = list(state.get("errors", []))
         next_span_id = 0
+
+        exclude_regions = list(state.get("exclude_regions", []) or [])
+        page_count = len(state.get("pages", []))
+        rstats = RegionStats()
 
         tenant = state.get("tenant_id", "unknown")
         for page in state.get("pages", []):
@@ -160,16 +198,42 @@ def make_structure_ocr(
 
             elem = resp.layout_parsing_results[0]
             page_spans = build_spans(elem.pruned_result, page=page_no, start_id=next_span_id)
+            # 除外領域は **_backfill より前**に適用する。後だと印影の OCR ゴミに
+            # crop 再認識の課金が乗る。span_id の採番はフィルタ**前**の件数で
+            # 進める（フィルタ後件数だと次ページの id と衝突する）。
+            raw_span_count = len(page_spans)
+            w, h = page.get("width"), page.get("height")
+            px_regions = regions_for_page(exclude_regions, page_no, page_count, w, h)
+            if exclude_regions and not px_regions and not (w and h):
+                # 寸法不明のページは適用せず記録に残す（fail-open。§4.6）。
+                # 無音で素通しすると「除外したのに出ている」の原因が追えない。
+                logger.warning(
+                    "[structure_ocr] ページ寸法が無いため除外領域を適用しません: page=%s", page_no
+                )
+                rstats.skipped_pages_no_dims.append(page_no)
+            page_spans, n_excluded = filter_spans(page_spans, px_regions)
+            rstats.excluded_spans += n_excluded
             # DD-02: 低確信 span を crop→/ocr 再認識で補完（ocr_client 注入時のみ）
             if ocr_client is not None:
                 _backfill(page_spans, data, ocr_client, backfill_threshold)
             spans.extend(page_spans)
             layout.extend(build_layout_blocks(elem.pruned_result, page=page_no))
             # 構造由来テーブル（cell_box を span でグラウンディング, §5.3）
-            tables.extend(build_tables(elem.pruned_result, page_spans, page=page_no))
-            next_span_id += len(page_spans)
+            page_tables, mask_stats = mask_tables(
+                build_tables(elem.pruned_result, page_spans, page=page_no), px_regions
+            )
+            tables.extend(page_tables)
+            rstats.excluded_cells += mask_stats.cells
+            rstats.excluded_rows += mask_stats.rows
+            next_span_id += raw_span_count
             if elem.markdown is not None and elem.markdown.text:
-                markdown_parts.append(elem.markdown.text)
+                if px_regions:
+                    # markdown は座標を持たないため部分マスクが構造的に不可能で、
+                    # ページ単位で落とすしかない。KIE の主要入力の 1 つを丸ごと
+                    # 失うが、「除外領域の文字は DB に載せない」保証を優先する。
+                    rstats.markdown_dropped_pages.append(page_no)
+                else:
+                    markdown_parts.append(elem.markdown.text)
 
         return {
             "spans": spans,
@@ -177,6 +241,7 @@ def make_structure_ocr(
             "tables": tables,
             "layout_markdown": "\n\n".join(markdown_parts),
             "errors": errors,
+            "metrics": _merge_region_metrics(state, rstats, active=bool(exclude_regions)),
         }
 
     return _node
@@ -199,6 +264,9 @@ def make_vl_fallback(
             return {}
 
         pages_by_no = {int(p["page_no"]): p for p in state.get("pages", [])}
+        exclude_regions = list(state.get("exclude_regions", []) or [])
+        page_count = len(state.get("pages", []))
+        rstats = RegionStats()
         spans = list(state.get("spans", []))
         layout = list(state.get("layout", []))
         review_items = list(state.get("review_items", []))
@@ -233,10 +301,27 @@ def make_vl_fallback(
             vl_spans = build_spans(
                 elem.pruned_result, page=page_no, start_id=next_span_id, source=SpanSource.VL
             )
+            # 採番はフィルタ前件数で進める（既存行のまま）。除外は extend の直前で
+            # 掛ける——順序を入れ替えると複数の fallback ページで span_id が衝突する。
             next_span_id += len(vl_spans)
+            w, h = page.get("width"), page.get("height")
+            px_regions = regions_for_page(exclude_regions, page_no, page_count, w, h)
+            if exclude_regions and not px_regions and not (w and h):
+                logger.warning(
+                    "[vl_fallback] ページ寸法が無いため除外領域を適用しません: page=%s", page_no
+                )
+                rstats.skipped_pages_no_dims.append(page_no)
+            vl_spans, n_excluded = filter_spans(vl_spans, px_regions)
+            rstats.excluded_spans += n_excluded
             spans.extend(vl_spans)  # 既存 OCR span を破棄せず併存
             layout.extend(build_layout_blocks(elem.pruned_result, page=page_no))
 
-        return {"spans": spans, "layout": layout, "review_items": review_items, "errors": errors}
+        return {
+            "spans": spans,
+            "layout": layout,
+            "review_items": review_items,
+            "errors": errors,
+            "metrics": _merge_region_metrics(state, rstats, active=bool(exclude_regions)),
+        }
 
     return _node

@@ -49,6 +49,8 @@ class RunRecord(BaseModel):
     review_summary: dict[str, Any] = Field(default_factory=dict)
     # VL フォールバックしたページ番号（品質ゲート NG, §5.4/DD-09）。UI のバッジ/バナー用。
     fallback_pages: list[int] = Field(default_factory=list)
+    # 除外領域で消した件数（metrics.region）。UI のバッジ用。
+    region_stats: Optional[dict[str, Any]] = None
     started_at: datetime = Field(default_factory=_now)
 
 

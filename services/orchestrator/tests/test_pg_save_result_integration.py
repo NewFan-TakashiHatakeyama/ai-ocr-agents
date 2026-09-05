@@ -205,3 +205,66 @@ def test_再実行で消えた発見名の旧行を掃除する(env) -> None:
     assert "billing_amount" in rows  # 新発見は入る
     assert "total_amount" not in rows  # 機械由来の旧行は掃除
     assert "issuer_name" in rows  # 人手確定は残す
+
+
+def test_region_statsがmetricsへマージされる(env) -> None:
+    """除外件数が metrics JSONB に載り、fallback_pages を潰さないこと。
+
+    検証画面の除外バッジはこの値だけが根拠（ReviewItem は永続化されない）ので、
+    ここが落ちると「N セルを未取込」という所見の裏付けが消える。
+    """
+    from sqlalchemy import text
+
+    owner, store, _doc, run_id = env
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review",
+        fallback_pages=[2],
+        region_stats={"excluded_spans": 4, "excluded_cells": 2, "excluded_rows": 1},
+    )
+    with owner.begin() as c:
+        m = c.execute(
+            text("SELECT metrics FROM extraction_runs WHERE id=:r"), {"r": run_id}
+        ).scalar_one()
+    # **needs_review 保存の時点で**載っていること（マスク発動 run は必ずここで止まる）
+    assert m["region"] == {"excluded_spans": 4, "excluded_cells": 2, "excluded_rows": 1}
+    assert m["fallback_pages"] == [2]  # 既存キーを潰さない
+
+
+def test_region_stats未指定なら既存metricsを壊さない(env) -> None:
+    """領域を使っていない run では region キーを作らない（後方互換）。"""
+    from sqlalchemy import text
+
+    owner, store, _doc, run_id = env
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review", fallback_pages=[],
+    )
+    with owner.begin() as c:
+        m = c.execute(
+            text("SELECT metrics FROM extraction_runs WHERE id=:r"), {"r": run_id}
+        ).scalar_one()
+    assert "region" not in m
+
+
+def test_フィールドのbboxがNULLでなく保存される(env) -> None:
+    """F-0（Phase 0）の永続化を実 DDL で押さえる。
+
+    kie が bbox を作っても保存列へ渡っていなければ検証画面のオーバーレイは出ない。
+    """
+    from sqlalchemy import text
+
+    owner, store, _doc, run_id = env
+    f = _field("total_amount", "128000", "128000")
+    f.bbox = [300, 180, 430, 212]
+    store.save_result(
+        TENANT, run_id, fields=[f], tables=[], review_items=[], status="confirmed"
+    )
+    with owner.begin() as c:
+        row = c.execute(
+            text("SELECT page_no, bbox FROM extraction_fields WHERE run_id=:r"), {"r": run_id}
+        ).mappings().first()
+    assert row["bbox"] == [300, 180, 430, 212]
+    assert row["page_no"] == 1

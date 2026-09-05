@@ -240,3 +240,65 @@ def test_extract_without_schema_is_accepted(ctx: SimpleNamespace) -> None:
         f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={"schema_id": None}
     )
     assert r.status_code == 202
+
+
+# ---------- supersede_review（設計 §3.1 再抽出ボタン / C2・C3・C6） ----------
+
+
+def test_extract_needs_review_rejected_by_default(ctx: SimpleNamespace) -> None:
+    """既定は従来どおり needs_review も競合として弾く（外部連携の二重投入防止）。"""
+    doc_id = _upload(ctx)
+    _seed_needs_review_run(ctx, doc_id)
+    r = ctx.client.post(f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "E1005"
+
+
+def test_extract_supersede_review_accepts_needs_review(ctx: SimpleNamespace) -> None:
+    """テンプレート化直後の再抽出は「自動発見 run が needs_review」が典型状態。
+
+    既定のままではこのボタンが必ず 409 になるので、明示フラグのときだけ通す。
+    旧 run は superseded へ落とす——残すと get_latest_run・削除ブロッカー・
+    ワークフローの hitl_gate が古い run を見続ける。
+    """
+    doc_id = _upload(ctx)
+    old_run = _seed_needs_review_run(ctx, doc_id)
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"supersede_review": True},
+    )
+    assert r.status_code == 202
+    assert ctx.repo.get_run("ten_1", old_run).status == "superseded"
+    # 検証画面は新しい run を見る
+    latest = ctx.repo.get_latest_run("ten_1", doc_id)
+    assert latest is not None and latest.id == r.json()["run_id"]
+
+
+def test_extract_supersede_review_still_rejects_processing(ctx: SimpleNamespace) -> None:
+    """処理中の run は supersede_review でも弾く（worker が走っている）。"""
+    doc_id = _upload(ctx)
+    ctx.client.post(f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={})
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"supersede_review": True},
+    )
+    assert r.status_code == 409 and r.json()["error"]["code"] == "E1005"
+
+
+def test_extract_rejects_confirmed_document(ctx: SimpleNamespace) -> None:
+    """確定済みは supersede_review でも拒否する。
+
+    会計連携済みの確定値を無警告で置き換えないため。UI 側でもボタンを出さないが、
+    API 直叩きでも守る。
+    """
+    doc_id = _upload(ctx)
+    run = _seed_needs_review_run(ctx, doc_id)
+    ctx.repo.get_run("ten_1", run).status = "confirmed"
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"supersede_review": True},
+    )
+    assert r.status_code == 409 and r.json()["error"]["code"] == "E1005"
+    assert ctx.repo.get_run("ten_1", run).status == "confirmed"  # 触っていない

@@ -8,15 +8,29 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Any
 
 from newfan_memory import TenantRule, apply_rule
 from newfan_metrics import current_tenant, rule_auto_apply_total
 from newfan_normalizers import NormContext, normalize
-from newfan_schemas import ExtractedField, ExtractionState, FieldSchema, FieldType, ReviewStatus
+from newfan_schemas import (
+    ExtractedField,
+    ExtractionState,
+    FieldSchema,
+    FieldType,
+    ReviewItem,
+    ReviewStatus,
+)
 from newfan_validators import run_validations
 
+from newfan_orchestrator.region_mask import (
+    REGION_GUARD_MIN_FIELDS_FOR_LAYOUT,
+    guard_enforced,
+    region_mismatches,
+    regions_by_field,
+)
 from newfan_orchestrator.confidence import (
     auto_elevate,
     compute_confidence,
@@ -27,6 +41,8 @@ from newfan_orchestrator.gate import Thresholds, confidence_gate
 
 # --- 外部サービス接続ノード（スタブ） ---------------------------------------
 
+
+logger = logging.getLogger(__name__)
 
 def load_context(state: ExtractionState) -> dict[str, Any]:
     """DB から document/pages/schema/テナント設定をロード（§4.3, DD-08 検証はここ）。"""
@@ -247,6 +263,16 @@ def confidence_gate_node(state: ExtractionState) -> dict[str, Any]:
         ):
             f.review_status = ReviewStatus.PENDING
 
+    region_items, metrics = _region_observations(state, fields, schema)
+    items = list(items) + region_items
+    # 位置ガードが per-field 所見を出した場合も「要確認」に出す
+    for f in fields:
+        if f.name in {i.field_name for i in region_items} and f.review_status not in (
+            ReviewStatus.CORRECTED,
+            ReviewStatus.APPROVED,
+        ):
+            f.review_status = ReviewStatus.PENDING
+
     # 上流（vl_fallback 等）の ReviewItem を先頭に残す。(field_name, reason) で
     # 重複を落とす（同じ所見を二重に見せない）。
     merged: list[Any] = []
@@ -257,7 +283,113 @@ def confidence_gate_node(state: ExtractionState) -> dict[str, Any]:
             continue
         seen.add(key)
         merged.append(it)
-    return {"review_items": merged, "fields": fields}
+    return {"review_items": merged, "fields": fields, "metrics": metrics}
+
+
+# 集約 ReviewItem の擬似 field 名。実 field と衝突しないよう区切り文字を使う。
+REGION_AGGREGATE_FIELD = "__region__"
+
+
+def _region_observations(
+    state: ExtractionState, fields: list[ExtractedField], schema: FieldSchema
+) -> tuple[list[ReviewItem], dict[str, Any]]:
+    """除外領域と位置ガードの観測（設計 §5.4 / §5.5）。値は一切変えない。
+
+    ここに集約する理由は 2 つ。ReviewItem の生成箇所を gate 1 点に寄せて二重経路を
+    作らないこと、そして位置ガードは confidence を触ってはいけないこと——
+    グラフ順は confidence_score → llm_correct → validate → confidence_gate なので、
+    上流で confidence を下げると validate の auto_elevate に巻き戻され、さらに
+    llm_correct の起動条件（0.80 未満）を毎回踏んで文字補正 LLM が誤課金と
+    値書き換えのリスクを負う。
+    """
+    metrics = dict(state.get("metrics", {}))
+    region = dict(metrics.get("region", {}) or {})
+    items: list[ReviewItem] = []
+
+    excluded_spans = int(region.get("excluded_spans", 0) or 0)
+    excluded_cells = int(region.get("excluded_cells", 0) or 0)
+    excluded_rows = int(region.get("excluded_rows", 0) or 0)
+
+    # (a) セル/行マスク: 明細に領域が重なっている可能性。運用上いちばん痛い誤設定。
+    if excluded_cells or excluded_rows:
+        items.append(
+            ReviewItem(
+                field_name=REGION_AGGREGATE_FIELD,
+                reason=(
+                    f"除外領域により {excluded_cells}セル/{excluded_rows}行を未取込"
+                    "（設定領域が明細に重なっていないか確認してください）"
+                ),
+            )
+        )
+
+    # (b) 除外 span が全体の 20% を超える: 本文に重なっている疑い。
+    total_spans = excluded_spans + len(state.get("spans", []))
+    if excluded_spans and total_spans and excluded_spans / total_spans > 0.20:
+        items.append(
+            ReviewItem(
+                field_name=REGION_AGGREGATE_FIELD,
+                reason=(
+                    f"除外領域が本文に重なっている可能性（{excluded_spans}/{total_spans} 件を除外）"
+                ),
+            )
+        )
+
+    # (c) 除外が起きた run で required/critical が空: 別レイアウトの取引先帳票から
+    #     実データを消した疑い。除外は doc_type 単位なので同座標が全帳票に当たる。
+    if excluded_spans or excluded_cells:
+        important = {f.name for f in schema.fields if f.required or f.critical}
+        lost = sorted(
+            f.name
+            for f in fields
+            if f.name in important and not (f.value_normalized or f.value_raw)
+        )
+        if lost:
+            items.append(
+                ReviewItem(
+                    field_name=REGION_AGGREGATE_FIELD,
+                    critical=True,
+                    reason=(
+                        "除外領域が必須項目を消した可能性: "
+                        + "、".join(lost)
+                        + "（オーバーレイで領域を確認してください）"
+                    ),
+                )
+            )
+
+    # (d) 読取領域の位置ガード。既定は shadow（metrics とログのみ）。
+    mismatched = region_mismatches(
+        fields,
+        dict(state.get("schema", {}) or {}),
+        list(state.get("pages", []) or []),
+        state.get("source_page_count"),
+    )
+    if mismatched:
+        region["mismatch_fields"] = mismatched
+        n_regions = len(regions_by_field(dict(state.get("schema", {}) or {})))
+        # region 付き項目の過半が同時にずれているなら「別レイアウトの帳票」と見て
+        # per-field レビューは出さない（取引先 B の帳票を全件レビュー化させない）。
+        # ただし n が小さいと「過半」が統計的な意味を持たないため下限を設ける。
+        layout_mismatch = (
+            n_regions >= REGION_GUARD_MIN_FIELDS_FOR_LAYOUT
+            and len(mismatched) > n_regions / 2
+        )
+        region["layout_mismatch"] = layout_mismatch
+        logger.info(
+            "[region_guard] mismatch fields=%s regions=%d layout_mismatch=%s enforce=%s",
+            mismatched,
+            n_regions,
+            layout_mismatch,
+            guard_enforced(),
+        )
+        if guard_enforced() and not layout_mismatch:
+            items.extend(
+                ReviewItem(field_name=name, reason="設定領域外の位置で検出")
+                for name in mismatched
+            )
+
+    if region:
+        metrics["region"] = region
+    return items, metrics
 
 
 def hitl_review(state: ExtractionState) -> dict[str, Any]:

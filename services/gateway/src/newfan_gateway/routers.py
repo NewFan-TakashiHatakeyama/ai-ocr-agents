@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, U
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
+from newfan_schemas import resolve_regions
 from newfan_workflow import WorkflowGraph, build_candidate, catalog, classify_text, has_errors, lint
 from newfan_workflow.lint import Finding
 from pydantic import ValidationError
@@ -358,7 +359,27 @@ def extract(
     if schema_id is not None and admin.get_schema_by_id(principal.tenant_id, schema_id) is None:
         raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
 
-    if repo.has_active_run(principal.tenant_id, document_id):
+    # 既定の競合判定は processing + needs_review（外部連携の二重投入防止）。
+    # supersede_review=true のときだけ「今まさに処理中」だけを競合とみなす
+    # （chat の rerun_extract と同じ意味論）。テンプレート化直後の再抽出は
+    # 「自動発見 run が needs_review」が典型状態で、既定のままでは必ず 409 になる。
+    if body.supersede_review:
+        if repo.has_processing_run(principal.tenant_id, document_id):
+            raise ApiError(
+                "E1005", "実行中の Run と競合しています", details={"document_id": document_id}
+            )
+        latest = repo.get_latest_run(principal.tenant_id, document_id)
+        if latest is not None and latest.status in ("confirmed", "exported"):
+            # 確定済み（会計連携済みを含む）を無警告で置き換えない
+            raise ApiError(
+                "E1005",
+                "確定済みの結果があります。再抽出すると確定値が置き換わります",
+                details={"document_id": document_id, "status": latest.status},
+            )
+        # 新 run を作る前に旧 needs_review を終端させる。残すと get_latest_run・
+        # 削除ブロッカー・ワークフローの hitl_gate が古い run を見続ける。
+        repo.supersede_review_runs(principal.tenant_id, document_id)
+    elif repo.has_active_run(principal.tenant_id, document_id):
         raise ApiError("E1005", "実行中の Run と競合しています", details={"document_id": document_id})
 
     run_id = new_id("run")
@@ -403,11 +424,28 @@ def get_result(
     document_id: str,
     principal: Principal = Depends(require_role("viewer")),
     repo: Repository = Depends(get_repo),
+    admin: AdminRepository = Depends(get_admin),
 ) -> dto.ResultResponse:
     _require_document(repo, principal.tenant_id, document_id)
     run = repo.get_latest_run(principal.tenant_id, document_id)
     if run is None:
         raise ApiError("E1001", "抽出 Run がありません", details={"document_id": document_id})
+
+    # 適用された除外領域と doc_type はスキーマ側から採る。db の 1 SELECT で取る案は
+    # 採らない——admin リポジトリなら Pg / InMemory の両実装を通るので、
+    # 「InMemory では常に空が返るので UI 実装者が本番との差に気づけない」盲点が消える。
+    applied: list[dto.ResolvedRegion] = []
+    schema_doc_type: Optional[str] = None
+    if run.schema_id:
+        rec = admin.get_schema_by_id(principal.tenant_id, run.schema_id)
+        if rec is not None:
+            schema_doc_type = rec.doc_type
+            page_count = len(repo.get_pages(principal.tenant_id, document_id))
+            applied = [
+                dto.ResolvedRegion(**r)
+                for r in resolve_regions(list(rec.exclude_regions), page_count)
+            ]
+
     return dto.ResultResponse(
         document_id=document_id,
         run_id=run.id,
@@ -419,6 +457,9 @@ def get_result(
         tables=run.tables,
         review_summary=run.review_summary,
         fallback_pages=run.fallback_pages,
+        region_stats=run.region_stats,
+        applied_exclude_regions=applied,
+        schema_doc_type=schema_doc_type,
     )
 
 
@@ -931,6 +972,7 @@ def _lint_workflow(
         auto_confirm=rec.auto_confirm,
         schema_exists=lambda sid: wf.schema_exists(tenant_id, sid),
         connection_ok=lambda cid: wf.connection_ok(tenant_id, cid),
+        schema_is_latest=lambda sid: wf.schema_is_latest(tenant_id, sid),
     )
     unsupported = sorted(str(t) for t in {n.type for n in graph.nodes} - IMPLEMENTED_NODE_TYPES)
     return findings, unsupported

@@ -87,7 +87,16 @@ class PgContextStore:
         return r is not None
 
     def save_result(
-        self, tenant_id, run_id, *, fields, tables, review_items, status, fallback_pages=None
+        self,
+        tenant_id,
+        run_id,
+        *,
+        fields,
+        tables,
+        review_items,
+        status,
+        fallback_pages=None,
+        region_stats=None,
     ) -> None:
         with self._engine.begin() as c:
             c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
@@ -200,7 +209,14 @@ class PgContextStore:
                 {
                     "st": status,
                     "r": run_id,
-                    "m": json.dumps({"fallback_pages": sorted(set(fallback_pages or []))}),
+                    # region は「除外で消した件数」。needs_review 保存の時点で載って
+                    # いないと、レビュー中だけ検証画面の除外バッジが出ない（§5.4）。
+                    "m": json.dumps(
+                        {
+                            "fallback_pages": sorted(set(fallback_pages or [])),
+                            **({"region": region_stats} if region_stats else {}),
+                        }
+                    ),
                 },
             )
             if run_upd.rowcount:

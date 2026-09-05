@@ -62,6 +62,7 @@ class WorkflowsRepository(Protocol):
 
     # activate 時の lint L009/L010 の参照解決
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool: ...
+    def schema_is_latest(self, tenant_id: str, schema_id: str) -> bool: ...
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool: ...
 
     # 実行（§16 設計 v0.2 §11 / P3）
@@ -156,6 +157,11 @@ class InMemoryWorkflowsRepository:
         return w
 
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool:
+        return (tenant_id, schema_id) in self._schemas
+
+    def schema_is_latest(self, tenant_id: str, schema_id: str) -> bool:
+        # InMemory は版を持たないので「存在すれば最新」とみなす。版固定の検出は
+        # Pg 実装が担う（L012 は warning なので過検出より未検出に倒す）。
         return (tenant_id, schema_id) in self._schemas
 
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool:

@@ -22,11 +22,20 @@ def poly_to_bbox(poly: Poly) -> list[int]:
     return [int(round(min(xs))), int(round(min(ys))), int(round(max(xs))), int(round(max(ys)))]
 
 
-def _overlap_area(a: list[int], b: list[int]) -> float:
+def overlap_area(a: list[int], b: list[int]) -> float:
+    """2 つの軸平行 bbox の重なり面積。
+
+    領域除外（orchestrator の region_mask）も同じ式で被覆率を出すため公開する。
+    式が 2 箇所に分かれると、片方だけ丸め方を変えたときに「UI で見えている領域と
+    実際に消える範囲がずれる」という気付きにくい差になる。
+    """
     ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
     ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
     w, h = max(0, ix2 - ix1), max(0, iy2 - iy1)
     return float(w * h)
+
+
+_overlap_area = overlap_area  # 後方互換（本モジュール内の既存呼び出し）
 
 
 def _block_order_for(bbox: list[int], blocks: list[ParsingBlock]) -> int:

@@ -63,6 +63,13 @@ class ExtractOptions(BaseModel):
 
 class ExtractRequest(BaseModel):
     schema_id: Optional[str] = None
+    # レビュー待ちの帳票を取り直す（設計 §3.1）。既定 false のときの競合判定は
+    # processing と needs_review の両方（外部連携の二重投入防止）だが、テンプレート化
+    # 直後の再抽出は「自動発見 run が needs_review」が典型状態なので必ず 409 になる。
+    # true のときだけ processing のみを競合とみなし、旧 needs_review run は
+    # superseded へ落とす。confirmed / exported は true でも拒否する
+    # （会計連携済みの確定値を無警告で置き換えないため）。
+    supersede_review: bool = False
     options: ExtractOptions = Field(default_factory=ExtractOptions)
 
 
@@ -78,6 +85,14 @@ class JobStatus(BaseModel):
     error_code: Optional[str] = None
 
 
+class ResolvedRegion(BaseModel):
+    """ページ番号まで解決済みの領域（検証画面のオーバーレイ用）。"""
+
+    page_no: int
+    rect: list[float]
+    label: Optional[str] = None
+
+
 class ResultResponse(BaseModel):
     document_id: str
     run_id: str
@@ -91,6 +106,17 @@ class ResultResponse(BaseModel):
     tables: list[TableResult]
     review_summary: dict[str, Any]
     fallback_pages: list[int] = Field(default_factory=list)  # VL フォールバックしたページ（§5.4）
+    # 除外領域で消した件数（設計 §5.4）。検証画面のバッジの唯一の到達経路
+    # （ReviewItem は永続化されないため）。0 件なら UI は出さない。
+    region_stats: Optional[dict[str, Any]] = None
+    # この run に適用された除外領域を**ページ解決済み**で返す（§6）。"last" / null の
+    # 解決を web に再実装させると、最終ページ限定の承認印除外が全ページに描かれる
+    # ／描かれない事故になる。
+    applied_exclude_regions: list[ResolvedRegion] = Field(default_factory=list)
+    # run.schema_id から解決した doc_type（編集モードのプリロード起点）。
+    # list_schemas は doc_type ごと最新版しか返さず、run.schema_id は旧版であり得るので
+    # id 突合ができない。
+    schema_doc_type: Optional[str] = None
 
 
 class CorrectionItem(BaseModel):

@@ -300,3 +300,95 @@ def test_document_list_does_not_fill_page_dims(ctx: SimpleNamespace) -> None:
     assert r.status_code == 200
     assert r.json()["items"], "一覧が空だとこのテストは何も検証していない"
     assert all(item["pages"] == [] for item in r.json()["items"])
+
+
+# ---------- result API（Phase 2） ----------
+
+
+def _doc_with_run(ctx: SimpleNamespace, *, pages: int, schema_id: str, metrics_region=None) -> str:
+    """指定ページ数の帳票と、そのスキーマを指す run を用意する。"""
+    from newfan_gateway.records import DocumentRecord, PageRecord, RunRecord
+
+    doc_id = f"doc_test_{pages}_{schema_id[-6:]}"
+    ctx.repo.create_document(
+        DocumentRecord(
+            id=doc_id, tenant_id="ten_1", storage_uri="s3://b/k", mime_type="image/png",
+            page_count=pages, status="uploaded",
+        ),
+        [
+            PageRecord(page_no=i, width=1000, height=1400, image_uri=f"s3://b/p{i}.png")
+            for i in range(1, pages + 1)
+        ],
+    )
+    run = RunRecord(
+        id=f"run_{doc_id}", tenant_id="ten_1", document_id=doc_id,
+        schema_id=schema_id, status="needs_review", region_stats=metrics_region,
+    )
+    ctx.repo.create_run(run)
+    return doc_id
+
+
+def test_result_applied_exclude_regions_resolves_last_and_null(ctx: SimpleNamespace) -> None:
+    """"last" と null をサーバ側で解決して返す（設計 §6 / C16）。
+
+    検証画面は自分が描いているページ番号しか持たないので、解決を web に任せると
+    「最終ページ限定の承認印除外が全ページに描かれる／描かれない」事故になる。
+    ページ数を超える指定は落とす（別ページを消していると誤解させない）。
+    """
+    sch = _put(
+        ctx,
+        {
+            "doc_type": "resolve_probe",
+            "fields": [{"name": "a", "type": "string"}],
+            "exclude_regions": [
+                X_APPROVAL,                                        # page: "last"
+                X_STAMP,                                           # page: null
+                {"page": 9, "rect": [0.1, 0.1, 0.2, 0.2]},         # 存在しないページ
+            ],
+            "create": True,
+        },
+    ).json
+    doc_id = _doc_with_run(ctx, pages=3, schema_id=sch["id"])
+
+    body = ctx.client.get(f"/v1/documents/{doc_id}/result", headers=auth("viewer")).json()
+    applied = body["applied_exclude_regions"]
+    by_label = sorted((r["page_no"], r["label"]) for r in applied)
+    assert by_label == [(1, "社印"), (2, "社印"), (3, "承認印"), (3, "社印")]
+    assert all(r["rect"] for r in applied)
+    # InMemory 実装でも非空であること（本番との差に気づけない盲点を作らない）
+    assert applied
+
+
+def test_result_exposes_schema_doc_type_and_region_stats(ctx: SimpleNamespace) -> None:
+    """編集モードのプリロード起点（doc_type）と除外バッジの材料を返す。"""
+    sch = _put(
+        ctx,
+        {"doc_type": "stats_probe", "fields": [{"name": "a", "type": "string"}], "create": True},
+    ).json
+    doc_id = _doc_with_run(
+        ctx, pages=1, schema_id=sch["id"],
+        metrics_region={"excluded_spans": 4, "excluded_cells": 2, "excluded_rows": 1},
+    )
+    body = ctx.client.get(f"/v1/documents/{doc_id}/result", headers=auth("viewer")).json()
+    assert body["schema_doc_type"] == "stats_probe"
+    assert body["region_stats"]["excluded_cells"] == 2
+
+
+def test_result_schemaless_run_has_empty_region_fields(ctx: SimpleNamespace) -> None:
+    """スキーマレス run では空（テンプレートレス運用に退行なし）。"""
+    from newfan_gateway.records import DocumentRecord, PageRecord, RunRecord
+
+    ctx.repo.create_document(
+        DocumentRecord(
+            id="doc_bare", tenant_id="ten_1", storage_uri="s3://b/k", mime_type="image/png",
+            page_count=1, status="uploaded",
+        ),
+        [PageRecord(page_no=1, width=100, height=100, image_uri="s3://b/p1.png")],
+    )
+    ctx.repo.create_run(
+        RunRecord(id="run_bare", tenant_id="ten_1", document_id="doc_bare", status="needs_review")
+    )
+    body = ctx.client.get("/v1/documents/doc_bare/result", headers=auth("viewer")).json()
+    assert body["applied_exclude_regions"] == []
+    assert body["schema_doc_type"] is None
+    assert body["region_stats"] is None

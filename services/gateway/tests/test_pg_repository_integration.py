@@ -276,3 +276,81 @@ def test_pg_put_schema_legacy_put_inherits_exclude_regions() -> None:
                 c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": t})
                 for sid in made:
                     c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": sid})
+
+
+def test_pg_supersede_review_runs(repo, seeded) -> None:
+    """needs_review の run だけを superseded へ落とす（実 Pg）。
+
+    InMemory 版はモデル属性を書き換えるだけなので、SQL や RLS ヘルパの使い方の
+    誤りを一切検出できない。実際に PgRepository._rls（セッションを yield する
+    contextmanager）を PgAdminRepository._rls（接続に SET を撃つだけ）と同じ形で
+    呼んで本番だけ 500 になる事故を起こしたため、この経路は Pg で守る。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.records import RunRecord
+
+    tenant, doc_id, processing_run = seeded
+    review_run = f"run_{uuid.uuid4().hex[:12]}"
+    repo.create_run(
+        RunRecord(id=review_run, tenant_id=tenant, document_id=doc_id, status="needs_review")
+    )
+    try:
+        assert repo.supersede_review_runs(tenant, doc_id) == 1
+        with repo._engine.begin() as c:  # noqa: SLF001 - 状態の直接確認
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            rows = dict(
+                c.execute(
+                    text("SELECT id, status FROM extraction_runs WHERE document_id=:d"),
+                    {"d": doc_id},
+                ).all()
+            )
+        assert rows[review_run] == "superseded"
+        assert rows[processing_run] == "processing"  # 実行中の run は触らない
+        # 冪等（もう needs_review が無いので 0 件）
+        assert repo.supersede_review_runs(tenant, doc_id) == 0
+        # テナント境界
+        assert repo.supersede_review_runs("ten_other", doc_id) == 0
+    finally:
+        with repo._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(text("DELETE FROM extraction_runs WHERE id=:i"), {"i": review_run})
+
+
+def test_pg_get_latest_run_orders_by_start_time(repo, seeded) -> None:
+    """複数 run がある帳票で **開始時刻が最新の** run を返すこと。
+
+    実装は長く `ORDER BY id DESC` だった。run id は `run_` + ランダム uuid なので、
+    これは「最新」ではなく実質ランダムに 1 本を選ぶ。帳票に run が 1 本しか無い間は
+    表面化しないが、チャットの再抽出や supersede 付き再抽出で 2 本目ができた瞬間に
+    検証画面が古い結果を表示し始める（実機で 4 回中 1 回再現した）。
+
+    id の大小と時刻の順序を**逆**にした 2 本で、時刻が勝つことを確かめる。
+    InMemory 実装は started_at で並べているのでこの差は Pg でしか出ない。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.records import RunRecord
+
+    tenant, doc_id, _first = seeded
+    older_but_bigger_id = "run_zzzz_old"
+    newer_but_smaller_id = "run_aaaa_new"
+    repo.create_run(RunRecord(id=older_but_bigger_id, tenant_id=tenant, document_id=doc_id))
+    repo.create_run(RunRecord(id=newer_but_smaller_id, tenant_id=tenant, document_id=doc_id))
+    try:
+        with repo._engine.begin() as c:  # noqa: SLF001 - 開始時刻を明示的にずらす
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(
+                text("UPDATE extraction_runs SET started_at = now() - interval '1 hour'"
+                     " WHERE id = :i"),
+                {"i": older_but_bigger_id},
+            )
+        latest = repo.get_latest_run(tenant, doc_id)
+        assert latest is not None and latest.id == newer_but_smaller_id
+    finally:
+        with repo._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(
+                text("DELETE FROM extraction_runs WHERE id = ANY(:i)"),
+                {"i": [older_but_bigger_id, newer_but_smaller_id]},
+            )

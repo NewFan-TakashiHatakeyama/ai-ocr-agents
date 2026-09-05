@@ -47,6 +47,12 @@ export interface ResultResponse {
   tables: TableResult[];
   review_summary: Record<string, number>;
   fallback_pages?: number[]; // VL フォールバックしたページ（§5.4）
+  /** 除外領域で消した件数。0 件なら UI は出さない */
+  region_stats?: RegionStats | null;
+  /** この run に適用された除外領域（ページ解決済み） */
+  applied_exclude_regions?: ResolvedRegion[];
+  /** run.schema_id から解決した doc_type（領域編集のプリロード起点） */
+  schema_doc_type?: string | null;
 }
 
 /** ページの正規寸法（前処理後 PNG 画素）。領域の正規化・逆正規化に使う。 */
@@ -65,6 +71,24 @@ export interface RegionRect {
   page?: number | "last" | null;
   rect: [number, number, number, number];
   label?: string | null;
+}
+
+/** サーバ側でページ番号まで解決済みの領域（検証画面のオーバーレイ用）。 */
+export interface ResolvedRegion {
+  page_no: number;
+  rect: [number, number, number, number];
+  label?: string | null;
+}
+
+/** 除外領域で消した件数（検証画面のバッジの材料）。 */
+export interface RegionStats {
+  excluded_spans?: number;
+  excluded_cells?: number;
+  excluded_rows?: number;
+  skipped_pages_no_dims?: number[];
+  markdown_dropped_pages?: number[];
+  mismatch_fields?: string[];
+  layout_mismatch?: boolean;
 }
 
 export interface DocumentMeta {

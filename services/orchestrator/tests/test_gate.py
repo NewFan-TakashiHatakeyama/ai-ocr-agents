@@ -148,3 +148,220 @@ def test_gate_dedups_identical_review_items() -> None:
         }
     )
     assert len(twice["review_items"]) == len(once["review_items"]) == 1
+
+
+# ---------- 除外領域の観測性と位置ガード（設計 §5.4 / §5.5） ----------
+
+_W = _H = 1000
+_PAGES = [{"page_no": 1, "width": _W, "height": _H}]
+_REGION_SCHEMA = {
+    "doc_type": "invoice",
+    "fields": [
+        {"name": "title", "type": "string", "region": {"page": 1, "rect": [0.3, 0.0, 0.7, 0.1]}}
+    ],
+}
+
+
+def _good_field(name: str = "title") -> ExtractedField:
+    """位置も確信度も問題ない field（gate 自身の所見を出さないための土台）。"""
+    return ExtractedField(
+        name=name, value_raw="請求書", value_normalized="請求書", span_ids=[1],
+        page=1, bbox=[320, 10, 680, 60], confidence=0.99, grounding_score=1.0,
+    )
+
+
+def _gate(state: dict):
+    from newfan_orchestrator import nodes
+
+    return nodes.confidence_gate_node(state)
+
+
+def test_mask_stats_emit_aggregated_review_item() -> None:
+    """セル/行マスクが起きた run は集約 ReviewItem を積み hitl へ回す。
+
+    明細に領域が重なっているのが運用上いちばん痛い誤設定なので、必ず人の目に触れさせる。
+    """
+    from newfan_orchestrator import nodes
+
+    out = _gate(
+        {
+            "schema": {"doc_type": "invoice", "fields": []},
+            "fields": [_good_field()],
+            "metrics": {"region": {"excluded_cells": 3, "excluded_rows": 1}},
+        }
+    )
+    reasons = [i.reason for i in out["review_items"]]
+    assert any("3セル/1行を未取込" in r for r in reasons)
+    assert nodes.route_confidence_gate(out) == "hitl_review"
+
+
+def test_no_review_item_for_ordinary_span_exclusion() -> None:
+    """印影ゴミの除外は想定内動作。metrics だけで ReviewItem は積まない。"""
+    from newfan_orchestrator import nodes
+
+    out = _gate(
+        {
+            "schema": {"doc_type": "invoice", "fields": []},
+            "fields": [_good_field()],
+            "spans": [object()] * 100,
+            "metrics": {"region": {"excluded_spans": 3}},
+        }
+    )
+    assert out["review_items"] == []
+    assert nodes.route_confidence_gate(out) == "finalize"
+
+
+def test_excessive_span_exclusion_emits_review_item() -> None:
+    """除外 span が全体の 20% を超えたら本文に重なっている疑いを出す。"""
+    out = _gate(
+        {
+            "schema": {"doc_type": "invoice", "fields": []},
+            "fields": [_good_field()],
+            "spans": [object()] * 10,
+            "metrics": {"region": {"excluded_spans": 5}},
+        }
+    )
+    assert any("本文に重なっている可能性" in i.reason for i in out["review_items"])
+
+
+def test_excluded_span_with_null_required_field_emits_review_item() -> None:
+    """除外が起きた run で必須項目が空 = 実データを消した疑い（C19）。
+
+    除外は doc_type 単位なので、同じ doc_type を共有する別レイアウト取引先の
+    帳票にも同座標が当たる。その最低限の検知線。
+    """
+    empty_required = ExtractedField(name="total_amount", value_raw=None, page=1)
+    out = _gate(
+        {
+            "schema": {
+                "doc_type": "invoice",
+                "fields": [{"name": "total_amount", "type": "money_jpy", "required": True}],
+            },
+            "fields": [empty_required],
+            "spans": [object()] * 100,
+            "metrics": {"region": {"excluded_spans": 2}},
+        }
+    )
+    assert any("必須項目を消した可能性" in i.reason for i in out["review_items"])
+
+
+def test_region_guard_shadow_records_metrics_only(monkeypatch) -> None:
+    """既定（shadow）は metrics とログだけ。confidence も review_items も触らない。"""
+    monkeypatch.delenv("REGION_GUARD_ENFORCE", raising=False)
+    far = _good_field()
+    far.bbox = [10, 800, 200, 860]
+    before = far.confidence
+    out = _gate(
+        {"schema": _REGION_SCHEMA, "fields": [far], "pages": _PAGES, "source_page_count": 1}
+    )
+    assert out["metrics"]["region"]["mismatch_fields"] == ["title"]
+    assert out["review_items"] == []
+    assert out["fields"][0].confidence == before
+    assert out["fields"][0].review_status.value != "pending"
+
+
+def test_region_guard_enforced_single_field_reviews(monkeypatch) -> None:
+    """有効化すると per-field の所見が出て、検証画面の「要確認」にも載る。"""
+    monkeypatch.setenv("REGION_GUARD_ENFORCE", "1")
+    far = _good_field()
+    far.bbox = [10, 800, 200, 860]
+    out = _gate(
+        {"schema": _REGION_SCHEMA, "fields": [far], "pages": _PAGES, "source_page_count": 1}
+    )
+    assert [(i.field_name, i.reason) for i in out["review_items"]] == [
+        ("title", "設定領域外の位置で検出")
+    ]
+    assert out["fields"][0].review_status.value == "pending"
+    # 値は決して捨てない（領域は hint であって hard crop ではない）
+    assert out["fields"][0].value_normalized == "請求書"
+
+
+def _multi_region_schema(n: int) -> dict:
+    return {
+        "doc_type": "invoice",
+        "fields": [
+            {"name": f"f{i}", "type": "string", "region": {"page": 1, "rect": [0.3, 0.0, 0.7, 0.1]}}
+            for i in range(n)
+        ],
+    }
+
+
+def _far_fields(n: int) -> list[ExtractedField]:
+    out = []
+    for i in range(n):
+        f = _good_field(f"f{i}")
+        f.bbox = [10, 800, 200, 860]
+        out.append(f)
+    return out
+
+
+def test_region_guard_enforced_majority_mismatch_suppresses_per_field(monkeypatch) -> None:
+    """region 3 件以上で過半がずれたら「別レイアウトの帳票」と見て抑止する。
+
+    取引先 B の帳票を全件レビュー化させないための判定。
+    """
+    monkeypatch.setenv("REGION_GUARD_ENFORCE", "1")
+    out = _gate(
+        {
+            "schema": _multi_region_schema(3),
+            "fields": _far_fields(3),
+            "pages": _PAGES,
+            "source_page_count": 1,
+        }
+    )
+    assert out["metrics"]["region"]["layout_mismatch"] is True
+    assert out["review_items"] == []
+
+
+def test_region_guard_layout_judgement_requires_min_fields(monkeypatch) -> None:
+    """n<=2 では doc レベル抑止を行わず per-field 所見を出す（C33）。
+
+    n=1 なら 1 件の mismatch が常に「過半」になり、抑止が常に効いてガードが
+    一度もレビューを出さない（enforce しても shadow と挙動が変わらない）。
+    """
+    monkeypatch.setenv("REGION_GUARD_ENFORCE", "1")
+    for n in (1, 2):
+        out = _gate(
+            {
+                "schema": _multi_region_schema(n),
+                "fields": _far_fields(n),
+                "pages": _PAGES,
+                "source_page_count": 1,
+            }
+        )
+        assert out["metrics"]["region"]["layout_mismatch"] is False, n
+        assert len(out["review_items"]) == n, n
+
+
+def test_region_guard_page_count_drift_ignores_page(monkeypatch) -> None:
+    """テンプレート化時と run のページ数が違えば page 一致は問わない。"""
+    monkeypatch.setenv("REGION_GUARD_ENFORCE", "1")
+    pages2 = [
+        {"page_no": 1, "width": _W, "height": _H},
+        {"page_no": 2, "width": _W, "height": _H},
+    ]
+    f = _good_field()
+    f.page = 2  # 2 ページ目で、座標は領域どおり
+    out = _gate(
+        {"schema": _REGION_SCHEMA, "fields": [f], "pages": pages2, "source_page_count": 1}
+    )
+    assert "mismatch_fields" not in out["metrics"].get("region", {})
+    assert out["review_items"] == []
+
+
+def test_region_guard_no_source_page_count_skips_page_judgement(monkeypatch) -> None:
+    monkeypatch.setenv("REGION_GUARD_ENFORCE", "1")
+    pages2 = [
+        {"page_no": 1, "width": _W, "height": _H},
+        {"page_no": 2, "width": _W, "height": _H},
+    ]
+    f = _good_field()
+    f.page = 2
+    out = _gate({"schema": _REGION_SCHEMA, "fields": [f], "pages": pages2})
+    assert out["review_items"] == []
+
+
+def test_region_observations_noop_without_regions() -> None:
+    """領域機能を使っていない run では metrics に region キーを作らない。"""
+    out = _gate({"schema": {"doc_type": "invoice", "fields": []}, "fields": [_good_field()]})
+    assert "region" not in out["metrics"]

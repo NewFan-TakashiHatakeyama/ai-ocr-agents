@@ -40,6 +40,7 @@ class Repository(Protocol):
     def create_run(self, run: RunRecord) -> None: ...
     def get_run(self, tenant_id: str, run_id: str) -> Optional[RunRecord]: ...
     def get_latest_run(self, tenant_id: str, document_id: str) -> Optional[RunRecord]: ...
+    def supersede_review_runs(self, tenant_id: str, document_id: str) -> int: ...
     def set_document_status(self, tenant_id: str, document_id: str, status: str) -> None: ...
 
     def get_delete_blocker(
@@ -159,6 +160,24 @@ class InMemoryRepository:
         ]
         runs.sort(key=lambda r: r.started_at, reverse=True)
         return runs[0] if runs else None
+
+    def supersede_review_runs(self, tenant_id: str, document_id: str) -> int:
+        """needs_review の run を superseded へ落とす（設計 §3.1 再抽出ボタン）。
+
+        レビュー待ちのまま再抽出すると run が 2 本並び、get_latest_run・削除ブロッカー・
+        ワークフローの hitl_gate が古い方を見続ける。新しい run を作る**前**に
+        旧 run を終端させる。processing は触らない（実行中の worker がいる）。
+        """
+        n = 0
+        for r in self._runs.values():
+            if (
+                r.document_id == document_id
+                and self._owned(r.tenant_id, tenant_id)
+                and r.status == "needs_review"
+            ):
+                r.status = "superseded"
+                n += 1
+        return n
 
     def set_document_status(self, tenant_id: str, document_id: str, status: str) -> None:
         doc = self.get_document(tenant_id, document_id)

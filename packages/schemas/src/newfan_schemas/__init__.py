@@ -19,6 +19,8 @@ from newfan_schemas.field_schema import (
     FieldDef,
     FieldSchema,
     RegionRect,
+    resolve_page,
+    resolve_regions,
 )
 from newfan_schemas.enums import DocStatus, FieldType, ReviewStatus, RunStatus, SpanSource
 
@@ -35,6 +37,8 @@ __all__ = [
     "ColumnDef",
     "RegionRect",
     "MIN_REGION_AREA",
+    "resolve_page",
+    "resolve_regions",
     "FieldType",
     "SpanSource",
     "ReviewStatus",

@@ -48,6 +48,7 @@ def make_finalize(store: ContextStore, enqueue: EnqueueFn | None = None) -> Node
             review_items=[],
             status="confirmed",
             fallback_pages=state.get("fallback_pages", []),
+            region_stats=state.get("metrics", {}).get("region"),
         )
         if enqueue is not None:
             enqueue(

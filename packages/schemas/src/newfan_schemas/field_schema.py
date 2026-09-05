@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -59,6 +59,53 @@ class RegionRect(BaseModel):
             raise ValueError("rect の面積が小さすぎます（誤クリック由来の矩形の可能性）")
         self.rect = [x1, y1, x2, y2]
         return self
+
+
+
+def resolve_page(
+    page: Optional[Union[int, str]], page_no: int, page_count: int
+) -> bool:
+    """RegionRect.page が当該ページに適用されるか（設計 §5.1）。
+
+    orchestrator（除外の適用）と gateway（検証画面へ返す解決済み領域）の**両方**が
+    同じ規則で解決する必要があるため、ここに置いて共有する。web に再実装させると
+    「最終ページ限定の承認印除外が全ページに描かれる／描かれない」事故になる。
+
+    - None: 全ページ
+    - "last": ページ数可変帳票の最終ページ
+    - int: そのページ。**run の総ページ数を超える指定は適用しない**
+      （2 ページ帳票で作った p2 の領域を 1 ページ帳票へ当てない。1 ページ目への
+      縮退は誤った位置を決定論削除するので採らない）
+    """
+    if page is None:
+        return True
+    if page == "last":
+        return page_count >= 1 and page_no == page_count
+    if isinstance(page, int) and not isinstance(page, bool):
+        return 1 <= page <= page_count and page == page_no
+    return False
+
+
+def resolve_regions(
+    regions: list[Any], page_count: int
+) -> list[dict[str, Any]]:
+    """RegionRect 列を ``{page_no, rect, label}`` へ展開する（設計 §6）。
+
+    ``"last"`` と ``None`` をサーバ側で解決してから返すことで、受け手（検証画面）は
+    ページ番号の一致だけを見ればよくなる。dict / RegionRect のどちらでも受ける
+    （state 経由は JSONB 由来の dict、gateway 経由はモデル）。
+    """
+    out: list[dict[str, Any]] = []
+    for r in regions:
+        page = r.get("page") if isinstance(r, dict) else getattr(r, "page", None)
+        rect = r.get("rect") if isinstance(r, dict) else getattr(r, "rect", None)
+        label = r.get("label") if isinstance(r, dict) else getattr(r, "label", None)
+        if not rect or len(rect) < 4:
+            continue
+        for page_no in range(1, page_count + 1):
+            if resolve_page(page, page_no, page_count):
+                out.append({"page_no": page_no, "rect": list(rect), "label": label})
+    return out
 
 
 class ColumnDef(BaseModel):
