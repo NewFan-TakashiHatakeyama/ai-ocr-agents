@@ -42,6 +42,53 @@ def _valid_span_ids(raw: Any, span_map: dict[int, Span]) -> list[int]:
     return out
 
 
+def _page_and_bbox(
+    valid_ids: list[int], span_map: dict[int, Span], fallback_page: Any
+) -> tuple[Any, list[int] | None]:
+    """根拠 span から field の (page, bbox) を決める（F-0, 設計 §7.2）。
+
+    kie は長く span_ids しか付けず bbox を作らなかったため、テキスト項目の
+    bbox は保存列があるのに常に NULL で、検証画面のオーバーレイに一切出なかった
+    （明細だけ出ていたのは structure 解析がセル座標を持つため）。
+
+    規則:
+    1. 根拠 span が無ければ bbox を作らない。LLM 申告 page は残すが座標は捏造
+       しない（原文に無い値を作らない span 根拠契約の延長）。
+    2. 支配ページ = span 数が最多のページ。同数タイは (page, span_id) の辞書順
+       最小。第一キーを page にするのは、span_id が読み順を表すのは単一
+       build_spans 呼び出し内だけで、vl_fallback は全 OCR ページ確定後に
+       max(span_id)+1 から採番するため（1 ページ目が VL・2 ページ目が OCR だと
+       1 ページ目の id の方が大きくなり、span_id 優先では読み順と逆になる）。
+    3. bbox は支配ページ上の span だけの外接矩形。ページを跨いで union すると
+       別画像の座標が混ざり無意味な矩形になるため禁止。
+    4. page は LLM 申告でなく span 由来で返す。申告 page は無検証で bbox と
+       食い違い得るが、UI は page でフィルタするため誤ページに矩形が出る。
+    """
+    if not valid_ids:
+        return fallback_page, None
+
+    spans = [span_map[i] for i in valid_ids]
+    by_page: dict[int, list[Span]] = {}
+    for s in spans:
+        by_page.setdefault(s.page, []).append(s)
+
+    # 最多 → タイは (page, 最小 span_id) の辞書順
+    page = min(
+        by_page,
+        key=lambda p: (-len(by_page[p]), p, min(s.span_id for s in by_page[p])),
+    )
+    boxes = [s.bbox for s in by_page[page] if s.bbox and len(s.bbox) >= 4]
+    if not boxes:
+        return page, None
+    bbox = [
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    ]
+    return page, bbox
+
+
 def kie_extract(
     adapter: LLMAdapter,
     bundle: PromptBundle,
@@ -88,6 +135,9 @@ def kie_extract(
         seen_names.add(name)
         valid_ids = _valid_span_ids(item.get("span_ids"), span_map)
         quote = " ".join(span_map[i].text for i in valid_ids) if valid_ids else None
+        # 根拠 span から座標を合成する（F-0）。span 根拠契約を執行するこの場所に
+        # 置く（根拠が無ければ bbox も作らない、を 1 箇所で守る）。
+        page, bbox = _page_and_bbox(valid_ids, span_map, item.get("page"))
         # label の優先順位:
         # - スキーマ指定の抽出（label_map 非空）→ スキーマ定義のみを正とする。
         #   LLM 申告で上書きさせない（定義に label が無い項目も None のまま。
@@ -112,7 +162,8 @@ def kie_extract(
                 label=label,
                 value_raw=(str(item["value"]) if item.get("value") is not None else None),
                 span_ids=valid_ids,
-                page=item.get("page"),
+                page=page,
+                bbox=bbox,
                 source_quote=quote,
             )
         )

@@ -212,16 +212,52 @@ def validate(state: ExtractionState) -> dict[str, Any]:
 
 
 def confidence_gate_node(state: ExtractionState) -> dict[str, Any]:
-    """閾値表と always_review で review_items を生成する（実装済み, §2.5）。"""
+    """閾値表と always_review で review_items を生成する（§2.5）。
+
+    上流の ReviewItem を引き継ぎ、所見の付いた field を pending に倒す。
+    どちらも「レビューが必要と判定したのに人に届かない」既存欠陥の修正:
+
+    - carry-forward: review_items は reducer 無しの LastValue チャネルなので、
+      ここで置換 return すると vl_fallback が積んだ「未抽出ページ」の ReviewItem
+      （ocr_nodes の VL 失敗経路）がグラフ通過時に消える。ノード単体のテストは
+      戻り値しか見ないため検出できていなかった。
+    - review_status: 検証画面の「要確認」は extraction_fields.review_status のみを
+      見るが、PENDING を立てるのは llm_correct 経路だけだった。このため
+      confidence_gate の所見（低確信・根拠なし・always_review）は run を
+      needs_review に倒すのに画面上は「確定済み」に見えていた。
+    """
     schema = FieldSchema.model_validate(state.get("schema", {"doc_type": "", "fields": []}))
     always = set(state.get("schema", {}).get("always_review_fields", []) or [])
+    fields = state.get("fields", [])
     items = confidence_gate(
-        state.get("fields", []),
+        fields,
         schema,
         thresholds=Thresholds(),
         always_review_fields=always,
     )
-    return {"review_items": items}
+
+    # 所見の付いた field を pending にする。人手確定（corrected/approved）は
+    # 触らない（save_result の巻き戻し防止 WHERE と同じ意図。resume 後の
+    # apply_feedback で確定した値をここで差し戻さない）。
+    flagged = {i.field_name for i in items}
+    for f in fields:
+        if f.name in flagged and f.review_status not in (
+            ReviewStatus.CORRECTED,
+            ReviewStatus.APPROVED,
+        ):
+            f.review_status = ReviewStatus.PENDING
+
+    # 上流（vl_fallback 等）の ReviewItem を先頭に残す。(field_name, reason) で
+    # 重複を落とす（同じ所見を二重に見せない）。
+    merged: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for it in list(state.get("review_items", [])) + list(items):
+        key = (it.field_name, it.reason)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(it)
+    return {"review_items": merged, "fields": fields}
 
 
 def hitl_review(state: ExtractionState) -> dict[str, Any]:
