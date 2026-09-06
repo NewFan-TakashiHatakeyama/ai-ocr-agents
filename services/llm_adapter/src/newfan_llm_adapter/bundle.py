@@ -36,6 +36,9 @@ def _confusion_set(data: dict[str, Any]) -> list[frozenset[str]]:
 class PromptBundle:
     version: str
     kie_template: str
+    # 読取領域ヒントの追記文（Phase 4）。**ヒントを持つ run にだけ**末尾へ足す。
+    # kie_template 本体に混ぜると、領域を使っていないテナントのプロンプトまで変わる。
+    kie_region_hint_template: str
     correct_template: str
     rule_extract_template: str
     confusion_groups: list[frozenset[str]]
@@ -57,6 +60,7 @@ class PromptBundle:
         return cls(
             version=str(meta.get("version", "")),
             kie_template=_read_template("kie_extract.yaml"),
+            kie_region_hint_template=_read_template("kie_region_hint.yaml"),
             correct_template=_read_template("llm_correct.yaml"),
             rule_extract_template=_read_template("rule_extract.yaml"),
             confusion_groups=_confusion_set(confusion),

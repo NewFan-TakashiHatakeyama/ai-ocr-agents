@@ -142,6 +142,11 @@ services:
       # sink.db_write のローカル用秘密（secret_ref "env:SINK_DB_PASSWORD" が読む。
       # AWS では Secrets Manager を使うためこの変数は使われない）
       SINK_DB_PASSWORD: ${SINK_DB_PASSWORD:-}
+      # 読取領域を KIE のヒントとして渡すか（Phase 4）。設計の約束は「精度改善を
+      # 実測できた場合のみ出荷」なので既定 off。A/B 実測のときだけ 1 にする。
+      REGION_KIE_HINTS: ${REGION_KIE_HINTS:-}
+      # 位置ずれ検知を実際にレビューへ反映するか（Phase 5）。既定 off（shadow）。
+      REGION_GUARD_ENFORCE: ${REGION_GUARD_ENFORCE:-}
       # ⑤⑥ SaaS連携（GDrive/M365/Box）。ローカルは Fake＝下記マウントのディレクトリを
       # SaaS フォルダに見立てる（./<type>-fake/<folder_id>/ にファイルを置くと
       # 検知→取込→ワークフロー発火）。実 API へ切り替えるには .env で

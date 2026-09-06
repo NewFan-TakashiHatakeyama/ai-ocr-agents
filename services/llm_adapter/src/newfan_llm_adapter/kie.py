@@ -26,11 +26,43 @@ class KieResult:
     response: LLMResponse | None = None
 
 
-def _spans_for_prompt(spans: list[Span]) -> str:
+def _spans_for_prompt(spans: list[Span], *, with_bbox: bool = False) -> str:
+    """span 一覧を JSON 化する。
+
+    ``with_bbox`` は **読取領域のヒントを渡すときだけ** True にする。座標を常に載せると
+    領域を使っていないスキーマまでプロンプトが膨らみ（span 1 件あたり 4 数値ぶん）、
+    「領域機能を使っていない run の挙動は一切変わらない」という受け入れ条件も壊れる。
+    ヒントが無ければ LLM は座標を照合しようがないので、載せる意味も無い。
+    """
+    if not with_bbox:
+        return json.dumps(
+            [
+                {"span_id": s.span_id, "page": s.page, "text": s.text, "conf": round(s.conf, 3)}
+                for s in spans
+            ],
+            ensure_ascii=False,
+        )
     return json.dumps(
-        [{"span_id": s.span_id, "page": s.page, "text": s.text, "conf": round(s.conf, 3)} for s in spans],
+        [
+            {
+                "span_id": s.span_id,
+                "page": s.page,
+                "text": s.text,
+                "conf": round(s.conf, 3),
+                "bbox": list(s.bbox) if s.bbox else None,
+            }
+            for s in spans
+        ],
         ensure_ascii=False,
     )
+
+
+def _has_region_hint(schema_json: dict[str, Any]) -> bool:
+    """スキーマに region_px（読取領域のヒント）を持つ field があるか。"""
+    for f in schema_json.get("fields") or []:
+        if isinstance(f, dict) and f.get("region_px"):
+            return True
+    return False
 
 
 def _valid_span_ids(raw: Any, span_map: dict[int, Span]) -> list[int]:
@@ -106,15 +138,21 @@ def kie_extract(
         if isinstance(f, dict)
     }
     system = "あなたは帳票からの項目抽出エンジンです。出力はJSONのみ。"
+    with_hint = _has_region_hint(schema_json)
     user = render(
         bundle.kie_template,
         {
             "layout_markdown": layout_markdown,
-            "spans": _spans_for_prompt(spans),
+            # 領域ヒントを渡すときだけ span にも座標を載せる（照合できるようにする）
+            "spans": _spans_for_prompt(spans, with_bbox=with_hint),
             "schema_json": json.dumps(schema_json, ensure_ascii=False),
             "rule_hints": rule_hints,
         },
     )
+    if with_hint:
+        # 領域ヒントの説明は**ヒントを持つ run にだけ**足す。テンプレート本体に
+        # 書くと、領域を使っていないテナントのプロンプトまで変わってしまう。
+        user = user + bundle.kie_region_hint_template
     data, resp = adapter.complete_json(system=system, user=user, purpose="kie")
 
     result = KieResult(response=resp)
