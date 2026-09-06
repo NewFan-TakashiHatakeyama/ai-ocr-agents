@@ -18,7 +18,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # rec_polys の各要素は 4 点 [[x,y],...]、bbox は [xmin,ymin,xmax,ymax]
 Poly = list[list[float]]
-Bbox = list[int]
+# **float で受ける**。PP-StructureV3 は解像度によって座標を小数で返す
+# （実測: PDF を高 DPI でラスタライズしたページで rec_boxes に 2033.13… が出る）。
+# ここを int にしていたため pydantic の int_from_float で**応答全体が検証エラーになり、
+# ページが丸ごと欠落**していた（ocr_nodes はページ単位で例外を握って継続するので、
+# 抽出は「成功」のまま結果だけが減る）。整数化は座標を使う側（spans / tables）が行う。
+Bbox = list[float]
 
 
 class _Loose(BaseModel):

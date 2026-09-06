@@ -51,3 +51,27 @@ resource "aws_s3_bucket_versioning" "this" {
     status = var.env == "production" ? "Enabled" : "Disabled"
   }
 }
+
+# 帳票削除（DELETE /v1/documents/{id}）は全バージョンを消すが、取りこぼしの保険。
+# バージョニング有効だと旧版は明示的に消さない限り永遠に課金対象として残る。
+# 未完了マルチパートアップロードも同様（一覧に出ないので気付けない）。
+resource "aws_s3_bucket_lifecycle_configuration" "this" {
+  bucket = aws_s3_bucket.this.id
+
+  rule {
+    id     = "expire-noncurrent-and-incomplete"
+    status = "Enabled"
+
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = 7
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.this]
+}

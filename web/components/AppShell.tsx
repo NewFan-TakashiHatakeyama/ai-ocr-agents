@@ -7,43 +7,15 @@ import { type ReactNode, useEffect, useState } from "react";
 import { SignIn } from "@/components/SignIn";
 import { StatusChip } from "@/components/StatusChip";
 import { api } from "@/lib/api";
+import { usePrincipal } from "@/lib/principal";
 
 // §4 共通レイアウト: サイドナビ216px（フロストガラス）＋ main。
 // 一覧系画面で使用。検証画面(SCR-03)は集中のためフルスクリーン（本シェル非使用）。
 
-type Principal = { sub: string; role: string };
-
-function decodePrincipal(token: string | undefined | null): Principal {
-  try {
-    if (!token) return { sub: "guest", role: "viewer" };
-    const p = JSON.parse(atob(token.split(".")[1]));
-    return { sub: p.sub ?? "user", role: p.role ?? "viewer" };
-  } catch {
-    return { sub: "user", role: "viewer" };
-  }
-}
-
-// localStorage を render 中に読むと SSR と初回クライアントレンダで結果が変わり
-// hydration mismatch になる（サーバは env トークン、クライアントは localStorage を見るため）。
-// 初期値は env 由来の決定論的な値にし、localStorage はマウント後にのみ反映する。
-type Session = { me: Principal; hasToken: boolean; ready: boolean };
-
-function usePrincipal(): Session {
-  const envToken = process.env.NEXT_PUBLIC_DEV_TOKEN;
-  const [me, setMe] = useState<Principal>(() => decodePrincipal(envToken));
-  // ready=false の間は判定を出さない。localStorage を見る前に「トークン無し」と
-  // 決めるとサインイン画面が一瞬ちらつく（SSR と初回クライアントで結果が違うため）。
-  const [state, setState] = useState<{ hasToken: boolean; ready: boolean }>({
-    hasToken: Boolean(envToken),
-    ready: false,
-  });
-  useEffect(() => {
-    const t = window.localStorage.getItem("nf_token") || envToken;
-    setMe(decodePrincipal(t));
-    setState({ hasToken: Boolean(t), ready: true });
-  }, [envToken]);
-  return { me, ...state };
-}
+// Principal の解決は lib/principal.ts に集約する（検証画面は AppShell を使わないが
+// ロールで出し分けたい導線があるため、シェル内に閉じ込めない）。
+// ready=false の間は判定を出さない。localStorage を見る前に「トークン無し」と
+// 決めるとサインイン画面が一瞬ちらつく。
 
 const ICON = {
   chat: "M21 12a8 8 0 1 1-4-6.9M21 3v6h-6",

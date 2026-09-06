@@ -2,11 +2,110 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from newfan_schemas.enums import FieldType
+
+
+# 正規化矩形の最小面積。クリック誤検出（1px ドラッグ）で潰れた矩形が保存され、
+# 以降のフィルタで予期しない挙動になるのを防ぐ。ページ全体の 0.01%。
+MIN_REGION_AREA = 0.0001
+
+
+class RegionRect(BaseModel):
+    """スキーマに保存する領域（設計 §4.1）。
+
+    ランタイムの ``bbox``（Span / ExtractedField / TableCell）は**前処理後 PNG の
+    画素 int** だが、こちらは**当該ページ寸法に対する正規化 [0,1] float** である。
+    キー名を ``rect`` と分けているのは、両者が混ざると「どちらの座標系か」を
+    型では判別できず、画素値を正規化矩形として保存する事故が静かに通るため。
+
+    page:
+      - int（1 始まり）: そのページだけ
+      - "last": ページ数可変帳票の最終ページ（承認印・合計欄）
+      - None: 全ページ。**exclude でのみ許可**（include に許すと「どこを読むか」
+        の指定にならない）。文脈依存の制約なので gateway の put_schema で検査する。
+    """
+
+    page: Optional[Union[int, Literal["last"]]] = None
+    rect: list[float]  # [x1, y1, x2, y2] 正規化 0..1
+    label: Optional[str] = None  # exclude の表示名（「社印」等）。include では未使用
+
+    @field_validator("page")
+    @classmethod
+    def _page_positive(
+        cls, v: Optional[Union[int, str]]
+    ) -> Optional[Union[int, str]]:
+        # bool は int のサブクラスなので明示的に弾く（page=True が 1 として通る）
+        if isinstance(v, bool):
+            raise ValueError("page には bool を指定できません")
+        if isinstance(v, int) and v < 1:
+            raise ValueError('page は 1 以上の整数、"last"、または null です')
+        return v
+
+    @model_validator(mode="after")
+    def _check_rect(self) -> "RegionRect":
+        r = self.rect
+        if len(r) != 4:
+            raise ValueError("rect は [x1, y1, x2, y2] の 4 要素です")
+        if not all(0.0 <= float(v) <= 1.0 for v in r):
+            raise ValueError("rect の各値は 0..1 の正規化座標です")
+        x1, y1, x2, y2 = (float(v) for v in r)
+        if x1 >= x2 or y1 >= y2:
+            raise ValueError("rect は x1 < x2 かつ y1 < y2 である必要があります")
+        if (x2 - x1) * (y2 - y1) <= MIN_REGION_AREA:
+            raise ValueError("rect の面積が小さすぎます（誤クリック由来の矩形の可能性）")
+        self.rect = [x1, y1, x2, y2]
+        return self
+
+
+
+def resolve_page(
+    page: Optional[Union[int, str]], page_no: int, page_count: int
+) -> bool:
+    """RegionRect.page が当該ページに適用されるか（設計 §5.1）。
+
+    orchestrator（除外の適用）と gateway（検証画面へ返す解決済み領域）の**両方**が
+    同じ規則で解決する必要があるため、ここに置いて共有する。web に再実装させると
+    「最終ページ限定の承認印除外が全ページに描かれる／描かれない」事故になる。
+
+    - None: 全ページ
+    - "last": ページ数可変帳票の最終ページ
+    - int: そのページ。**run の総ページ数を超える指定は適用しない**
+      （2 ページ帳票で作った p2 の領域を 1 ページ帳票へ当てない。1 ページ目への
+      縮退は誤った位置を決定論削除するので採らない）
+    """
+    if page is None:
+        return True
+    if page == "last":
+        return page_count >= 1 and page_no == page_count
+    if isinstance(page, int) and not isinstance(page, bool):
+        return 1 <= page <= page_count and page == page_no
+    return False
+
+
+def resolve_regions(
+    regions: list[Any], page_count: int
+) -> list[dict[str, Any]]:
+    """RegionRect 列を ``{page_no, rect, label}`` へ展開する（設計 §6）。
+
+    ``"last"`` と ``None`` をサーバ側で解決してから返すことで、受け手（検証画面）は
+    ページ番号の一致だけを見ればよくなる。dict / RegionRect のどちらでも受ける
+    （state 経由は JSONB 由来の dict、gateway 経由はモデル）。
+    """
+    out: list[dict[str, Any]] = []
+    for r in regions:
+        page = r.get("page") if isinstance(r, dict) else getattr(r, "page", None)
+        rect = r.get("rect") if isinstance(r, dict) else getattr(r, "rect", None)
+        label = r.get("label") if isinstance(r, dict) else getattr(r, "label", None)
+        if not rect or len(rect) < 4:
+            continue
+        for page_no in range(1, page_count + 1):
+            if resolve_page(page, page_no, page_count):
+                out.append({"page_no": page_no, "rect": list(rect), "label": label})
+    return out
 
 
 class ColumnDef(BaseModel):
@@ -22,6 +121,9 @@ class FieldDef(BaseModel):
     required: bool = False
     critical: bool = False
     columns: Optional[list[ColumnDef]] = None
+    # 読み取ってほしい領域（設計 §4.2）。**hint であって hard crop ではない**ため、
+    # region の外で見つかった値を捨てる根拠にはしない。
+    region: Optional[RegionRect] = None
 
 
 class FieldSchema(BaseModel):

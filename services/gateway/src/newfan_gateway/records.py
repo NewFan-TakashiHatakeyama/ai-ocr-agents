@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from newfan_schemas import ExtractedField, TableResult
+from newfan_schemas import ExtractedField, RegionRect, TableResult
 
 
 def _now() -> datetime:
@@ -49,6 +49,8 @@ class RunRecord(BaseModel):
     review_summary: dict[str, Any] = Field(default_factory=dict)
     # VL フォールバックしたページ番号（品質ゲート NG, §5.4/DD-09）。UI のバッジ/バナー用。
     fallback_pages: list[int] = Field(default_factory=list)
+    # 除外領域で消した件数（metrics.region）。UI のバッジ用。
+    region_stats: Optional[dict[str, Any]] = None
     started_at: datetime = Field(default_factory=_now)
 
 
@@ -92,6 +94,9 @@ class SchemaFieldDef(BaseModel):
     required: bool = False
     critical: bool = False
     columns: Optional[list[dict[str, Any]]] = None  # table 型の列定義（§5.5）
+    # 読取領域（設計 §4.2）。newfan_schemas に一元定義したものを import する
+    # （gateway で再定義すると検証規則が二重管理になり、片方だけ緩む）。
+    region: Optional[RegionRect] = None
 
 
 class SchemaRecord(BaseModel):
@@ -102,6 +107,11 @@ class SchemaRecord(BaseModel):
     doc_type: str
     version: int
     fields: list[SchemaFieldDef] = Field(default_factory=list)
+    # 除外領域（設計 §4.3 migration 0007）。fields JSONB 内に擬似フィールドとして
+    # 置かないのは、classify の分類語彙を汚染しスキーマ編集画面にも並ぶため。
+    exclude_regions: list[RegionRect] = Field(default_factory=list)
+    # テンプレート化時点の帳票ページ数。位置ガードの page 判定に使う（§5.5）。
+    source_page_count: Optional[int] = None
     updated_at: datetime = Field(default_factory=_now)
 
 

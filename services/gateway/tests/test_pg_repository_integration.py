@@ -142,3 +142,215 @@ def test_create_rule_roundtrips_llm_hint() -> None:
         with admin._engine.begin() as c:  # noqa: SLF001
             c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
             c.execute(text("DELETE FROM tenant_rules WHERE id=:i"), {"i": rid})
+
+
+def test_get_schema_by_id_matches_real_ddl() -> None:
+    """get_schema_by_id が実 DDL（field_schemas に updated_at 無し）と整合すること。
+
+    存在しない列を SELECT すると InMemory テストは通るのに本番だけ UndefinedColumn →
+    抽出 API が 500 になる（実 AWS で発生・correction_logs の note 事故と同型）。
+    """
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_gateway.records import SchemaFieldDef
+
+    admin = PgAdminRepository(_DSN)  # type: ignore[arg-type]
+    tenant = "ten_test"
+    with admin._engine.begin() as c:  # noqa: SLF001 - テスト用の前提データ投入
+        from sqlalchemy import text
+
+        c.execute(
+            text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+            {"i": tenant, "n": "test"},
+        )
+    rec = admin.put_schema(
+        tenant, f"ddl_probe_{uuid.uuid4().hex[:8]}",
+        [SchemaFieldDef(name="total_amount", label="合計", type="money_jpy", required=True, critical=True)],
+    )
+    try:
+        got = admin.get_schema_by_id(tenant, rec.id)
+        assert got is not None and got.id == rec.id and got.doc_type == rec.doc_type
+        assert got.fields[0].name == "total_amount"
+        # 0007 の新列も SELECT に載っていること（列追加だけして SELECT を直し忘れると、
+        # 値は書けているのに読めない＝UI 上は「保存したのに消えた」になる）
+        assert got.exclude_regions == []
+        assert got.source_page_count is None
+        assert admin.get_schema_by_id(tenant, "sch_nonexistent") is None
+        assert admin.get_schema_by_id("ten_other", rec.id) is None  # テナント境界
+    finally:
+        from sqlalchemy import text
+
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": rec.id})
+
+
+def test_pg_put_schema_legacy_put_inherits_exclude_regions() -> None:
+    """exclude_regions の引き継ぎが**実 Pg の SQL で**成立すること（設計 §4.4 / C22）。
+
+    InMemory の同名ユニットテストは ``db.py`` の SQL を 1 行も通らない。引き継ぎ元の
+    SELECT から ``ORDER BY version DESC`` を落とすと「v1 の設定が復活して v2 以降が
+    消える」という事故になるが、それは Pg でしか再現しない。旧 UI 相当の legacy 呼び
+    出し（キーワード引数なし）を複数回はさんで、常に**最新版**から引き継ぐことを見る。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_gateway.records import SchemaFieldDef
+
+    admin = PgAdminRepository(_DSN)  # type: ignore[arg-type]
+    tenant = "ten_test"
+    other_tenant = "ten_test_other"
+    doc_type = f"inherit_probe_{uuid.uuid4().hex[:8]}"
+    other_doc_type = f"{doc_type}_other"
+
+    r1 = {"page": 1, "rect": [0.10, 0.10, 0.20, 0.20], "label": "v1"}
+    r2 = {"page": None, "rect": [0.80, 0.02, 0.98, 0.14], "label": "v2"}
+    r_other = {"page": 1, "rect": [0.50, 0.50, 0.60, 0.60], "label": "other"}
+    fields = [SchemaFieldDef(name="total_amount", type="money_jpy")]
+
+    with admin._engine.begin() as c:  # noqa: SLF001 - テスト用の前提データ投入
+        for t in (tenant, other_tenant):
+            c.execute(
+                text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+                {"i": t, "n": "test"},
+            )
+
+    made: list[str] = []
+    try:
+        # 混入源: 別 tenant / 別 doc_type にも版を作っておく
+        made.append(
+            admin.put_schema(
+                other_tenant, doc_type, fields, exclude_regions=[r_other], source_page_count=9
+            ).id
+        )
+        made.append(
+            admin.put_schema(
+                tenant, other_doc_type, fields, exclude_regions=[r_other], source_page_count=9
+            ).id
+        )
+
+        v1 = admin.put_schema(tenant, doc_type, fields, exclude_regions=[r1], source_page_count=2)
+        made.append(v1.id)
+        v2 = admin.put_schema(tenant, doc_type, fields, exclude_regions=[r2])
+        made.append(v2.id)
+        # source_page_count も引き継がれる（v2 は値を送っていない）
+        assert v2.source_page_count == 2
+
+        # ③ 旧 UI 相当（キーワード引数なし）→ **v1 ではなく v2** を引き継ぐ
+        v3 = admin.put_schema(tenant, doc_type, fields)
+        made.append(v3.id)
+        assert v3.exclude_regions[0].label == "v2", "最新版ではなく v1 から引き継いでいる"
+        assert v3.source_page_count == 2
+        # PUT 応答は引数由来ではなく INSERT した確定値であること（C28）
+        assert admin.get_schema_by_id(tenant, v3.id).exclude_regions == v3.exclude_regions
+
+        # ④ さらに legacy で put しても保たれる
+        v4 = admin.put_schema(tenant, doc_type, fields)
+        made.append(v4.id)
+        assert v4.exclude_regions[0].label == "v2"
+
+        # ⑤ 明示 [] はクリア
+        v5 = admin.put_schema(tenant, doc_type, fields, exclude_regions=[])
+        made.append(v5.id)
+        assert v5.exclude_regions == []
+        assert admin.get_schema_by_id(tenant, v5.id).exclude_regions == []
+        # クリア後の legacy put は空を引き継ぐ（v2 が復活しない）
+        v6 = admin.put_schema(tenant, doc_type, fields)
+        made.append(v6.id)
+        assert v6.exclude_regions == []
+
+        # ⑥ 別 tenant / 別 doc_type は混ざっていない
+        assert admin.get_schema(other_tenant, doc_type).exclude_regions[0].label == "other"
+        assert admin.get_schema(tenant, other_doc_type).exclude_regions[0].label == "other"
+
+        # region キーを持たない field は JSONB にも region を書かない（§4.7）
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            raw = c.execute(
+                text("SELECT fields FROM field_schemas WHERE id=:i"), {"i": v1.id}
+            ).scalar_one()
+        assert "region" not in raw[0]
+    finally:
+        with admin._engine.begin() as c:  # noqa: SLF001
+            for t in (tenant, other_tenant):
+                c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": t})
+                for sid in made:
+                    c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": sid})
+
+
+def test_pg_supersede_review_runs(repo, seeded) -> None:
+    """needs_review の run だけを superseded へ落とす（実 Pg）。
+
+    InMemory 版はモデル属性を書き換えるだけなので、SQL や RLS ヘルパの使い方の
+    誤りを一切検出できない。実際に PgRepository._rls（セッションを yield する
+    contextmanager）を PgAdminRepository._rls（接続に SET を撃つだけ）と同じ形で
+    呼んで本番だけ 500 になる事故を起こしたため、この経路は Pg で守る。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.records import RunRecord
+
+    tenant, doc_id, processing_run = seeded
+    review_run = f"run_{uuid.uuid4().hex[:12]}"
+    repo.create_run(
+        RunRecord(id=review_run, tenant_id=tenant, document_id=doc_id, status="needs_review")
+    )
+    try:
+        assert repo.supersede_review_runs(tenant, doc_id) == 1
+        with repo._engine.begin() as c:  # noqa: SLF001 - 状態の直接確認
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            rows = dict(
+                c.execute(
+                    text("SELECT id, status FROM extraction_runs WHERE document_id=:d"),
+                    {"d": doc_id},
+                ).all()
+            )
+        assert rows[review_run] == "superseded"
+        assert rows[processing_run] == "processing"  # 実行中の run は触らない
+        # 冪等（もう needs_review が無いので 0 件）
+        assert repo.supersede_review_runs(tenant, doc_id) == 0
+        # テナント境界
+        assert repo.supersede_review_runs("ten_other", doc_id) == 0
+    finally:
+        with repo._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(text("DELETE FROM extraction_runs WHERE id=:i"), {"i": review_run})
+
+
+def test_pg_get_latest_run_orders_by_start_time(repo, seeded) -> None:
+    """複数 run がある帳票で **開始時刻が最新の** run を返すこと。
+
+    実装は長く `ORDER BY id DESC` だった。run id は `run_` + ランダム uuid なので、
+    これは「最新」ではなく実質ランダムに 1 本を選ぶ。帳票に run が 1 本しか無い間は
+    表面化しないが、チャットの再抽出や supersede 付き再抽出で 2 本目ができた瞬間に
+    検証画面が古い結果を表示し始める（実機で 4 回中 1 回再現した）。
+
+    id の大小と時刻の順序を**逆**にした 2 本で、時刻が勝つことを確かめる。
+    InMemory 実装は started_at で並べているのでこの差は Pg でしか出ない。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.records import RunRecord
+
+    tenant, doc_id, _first = seeded
+    older_but_bigger_id = "run_zzzz_old"
+    newer_but_smaller_id = "run_aaaa_new"
+    repo.create_run(RunRecord(id=older_but_bigger_id, tenant_id=tenant, document_id=doc_id))
+    repo.create_run(RunRecord(id=newer_but_smaller_id, tenant_id=tenant, document_id=doc_id))
+    try:
+        with repo._engine.begin() as c:  # noqa: SLF001 - 開始時刻を明示的にずらす
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(
+                text("UPDATE extraction_runs SET started_at = now() - interval '1 hour'"
+                     " WHERE id = :i"),
+                {"i": older_but_bigger_id},
+            )
+        latest = repo.get_latest_run(tenant, doc_id)
+        assert latest is not None and latest.id == newer_but_smaller_id
+    finally:
+        with repo._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(
+                text("DELETE FROM extraction_runs WHERE id = ANY(:i)"),
+                {"i": [older_but_bigger_id, newer_but_smaller_id]},
+            )

@@ -64,3 +64,42 @@ def test_route_confidence_gate() -> None:
         == "hitl_review"
     )
     assert nodes.route_confidence_gate({"review_items": []}) == "finalize"
+
+
+# --- validate ノードとスキーマレス抽出（ADR-0006） ---
+
+
+def test_validate_skips_when_schemaless() -> None:
+    """スキーマレス自動発見では V-* 検証を掛けない。
+
+    型が無く正規化されない値（例: 日付が「2026年7月28日」のまま）に名前一致で
+    V-DATE が発火すると、正しい値を「不正な日付」と誤記録して validation JSONB と
+    結果 API に永続化される（敵対的レビュー確定）。検証はテンプレート化後の
+    型付き抽出から効き始める（ADR-0006 の段階設計）。
+    """
+    from newfan_schemas import ExtractedField
+
+    from newfan_orchestrator import nodes
+
+    f = ExtractedField(
+        name="invoice_date", value_raw="2026年7月28日", value_normalized="2026年7月28日",
+        span_ids=[1], confidence=0.9, grounding_score=1.0,
+    )
+    out = nodes.validate({"schema": {"doc_type": "", "fields": []}, "fields": [f], "tables": []})
+    assert out["fields"][0].validation is None  # 誤った不合格を記録しない
+
+
+def test_validate_runs_when_schema_present() -> None:
+    """スキーマ指定の抽出では従来どおり検証が走る（退行防止の対照）。"""
+    from newfan_schemas import ExtractedField
+
+    from newfan_orchestrator import nodes
+
+    f = ExtractedField(
+        name="invoice_date", value_raw="2026-07-28", value_normalized="2026-07-28",
+        span_ids=[1], confidence=0.9, grounding_score=1.0,
+    )
+    schema = {"doc_type": "invoice", "fields": [{"name": "invoice_date", "type": "date"}]}
+    out = nodes.validate({"schema": schema, "fields": [f], "tables": []})
+    v = out["fields"][0].validation
+    assert v is not None and v["passed"] is True

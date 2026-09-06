@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useMemo, useRef, useState } from "react";
 
 import { AppShell } from "@/components/AppShell";
+import { DeleteDocument } from "@/components/DeleteDocument";
 import { StatusChip } from "@/components/StatusChip";
 import { api } from "@/lib/api";
 import { useToasts } from "@/lib/toast";
@@ -137,6 +138,7 @@ function DocumentsInner() {
                   <th>ページ</th>
                   <th>状態</th>
                   <th>external_ref</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -151,6 +153,18 @@ function DocumentsInner() {
                       <StatusChip status={d.status} />
                     </td>
                     <td className="sub">{d.external_ref ?? "—"}</td>
+                    {/* 行クリックは詳細遷移。削除まで伝播すると押した直後に画面が変わる */}
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <DeleteDocument
+                        documentId={d.document_id}
+                        label={d.external_ref ?? d.document_id}
+                        onDeleted={() => {
+                          qc.invalidateQueries({ queryKey: ["documents"] });
+                          qc.invalidateQueries({ queryKey: ["review-queue"] });
+                          qc.invalidateQueries({ queryKey: ["metrics"] });
+                        }}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>

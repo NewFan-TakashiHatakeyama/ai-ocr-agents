@@ -44,11 +44,13 @@ def lint(
     auto_confirm: bool = False,
     schema_exists: Optional[ExistsFn] = None,
     connection_ok: Optional[ExistsFn] = None,
+    schema_is_latest: Optional[ExistsFn] = None,
 ) -> list[Finding]:
-    """L001〜L010 を評価して指摘を返す。error が 1 つでもあれば有効化不可。
+    """L001〜L012 を評価して指摘を返す。error が 1 つでもあれば有効化不可。
 
     - auto_confirm は workflows.auto_confirm（graph_json の外にある属性）
-    - schema_exists / connection_ok が None の規則（L009/L010）は skip される
+    - schema_exists / connection_ok / schema_is_latest が None の規則
+      （L009 / L010 / L012）は skip される
     """
     findings: list[Finding] = []
     adj = _adjacency(graph)
@@ -207,6 +209,27 @@ def lint(
                         "L009",
                         "error",
                         f"スキーマが存在しません: {node.config.schema_id!r}",
+                        node_id=node.id,
+                    )
+                )
+
+    # L012: extract の schema_id が当該 doc_type の最新版か（warning）
+    # put_schema は常に新 uuid の新版 INSERT だが、ワークフローの extract ノードは
+    # field_schemas.id を固定保持する。したがってテンプレート化や領域の編集で作った
+    # 新版は既存ワークフローに自動適用されず、運用者は「保存したのに印影が消えない」を
+    # 無音で踏む（L009 は存在するかしか見ないので警告も出ない）。
+    # **error にはしない**——既存ワークフローの有効化を塞ぐ副作用の方が大きい。
+    if schema_is_latest is not None:
+        for node in graph.nodes:
+            if isinstance(node, ExtractNode) and not schema_is_latest(node.config.schema_id):
+                findings.append(
+                    Finding(
+                        "L012",
+                        "warning",
+                        "extract.schema_id が当該 doc_type の最新版ではありません"
+                        f": {node.config.schema_id!r}"
+                        "（テンプレート化や領域編集で作った新版は自動適用されません。"
+                        "extract ノードのスキーマを選び直して再有効化してください）",
                         node_id=node.id,
                     )
                 )

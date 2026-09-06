@@ -5,9 +5,11 @@
 // スキーマを選んで抽出 → ジョブ完了までポーリング → 完了で結果画面へ切り替え。
 
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 
-import { ApiError, api } from "@/lib/api";
+import { api } from "@/lib/api";
+import { useExtractJob } from "@/lib/useExtractJob";
+import { newUuid } from "@/lib/uuid";
 import { useToasts } from "@/lib/toast";
 
 type Phase = "idle" | "running" | "error";
@@ -17,14 +19,7 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
   const [schemaId, setSchemaId] = useState<string>("");
   const [touched, setTouched] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
-  const alive = useRef(true);
-
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-    };
-  }, []);
+  const { poll } = useExtractJob();
 
   const schemas = useQuery({ queryKey: ["schemas"], queryFn: () => api.listSchemas() });
   const items = schemas.data?.items ?? [];
@@ -38,59 +33,30 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
   });
   const suggested = classify.data?.suggested_schema_id || "";
 
-  // 優先度: ユーザー選択 > 自動推定 > 先頭スキーマ（項目を出すにはスキーマ指定が要る）
-  const effectiveSchema = touched ? schemaId : (schemaId || suggested || items[0]?.id || "");
-
-  // ジョブ完了まで命令的にポーリング（react-query の refetchInterval より確実）。
-  // 締切・dead 終端・恒久エラーで必ず止める（停滞ジョブでの無限ループを防ぐ）。
-  function pollJob(jobId: string) {
-    const startedAt = Date.now();
-    const DEADLINE_MS = 3 * 60_000; // 3分で打ち切り（キュー滞留/ワーカー停止対策）
-    const fail = (message: string) => {
-      if (!alive.current) return;
-      setPhase("error");
-      push({ kind: "warn", message });
-    };
-    const tick = async () => {
-      if (!alive.current) return;
-      if (Date.now() - startedAt > DEADLINE_MS) {
-        fail("抽出がタイムアウトしました。時間をおいて再試行してください。");
-        return;
-      }
-      try {
-        const j = await api.getJob(jobId);
-        if (!alive.current) return;
-        if (j.status === "succeeded") {
-          push({ kind: "ok", message: "抽出が完了しました。" });
-          onDone();
-          return;
-        }
-        // dead も終端（再配信枯渇）。failed と同じく失敗として止める
-        if (j.status === "failed" || j.status === "dead") {
-          fail("抽出に失敗しました。時間をおいて再試行してください。");
-          return;
-        }
-      } catch (e) {
-        // 一時的な 5xx/ネットワークは継続。ジョブ未検出(E1001)や 4xx 恒久エラーは打ち切る
-        if (e instanceof ApiError && (e.code === "E1001" || (e.status >= 400 && e.status < 500))) {
-          fail("抽出状況を取得できませんでした。時間をおいて再試行してください。");
-          return;
-        }
-      }
-      if (alive.current) setTimeout(tick, 1500);
-    };
-    tick();
-  }
+  // 優先度: ユーザー選択 > 自動推定 > スキーマなし（自動発見）。
+  // 以前は先頭スキーマへ強制割当していたが、テンプレートが未整備の段階で
+  // 無関係なスキーマに当てはめるのは誤抽出のもと（設計見直し: まず値を見てから
+  // テンプレート化する。ADR-0006）。推定が付かなければスキーマなしで抽出する。
+  const effectiveSchema = touched ? schemaId : (schemaId || suggested || "");
 
   const start = useMutation({
     mutationFn: () =>
       api.extract(documentId, {
         schema_id: effectiveSchema || undefined,
-        idempotencyKey: crypto.randomUUID(),
+        idempotencyKey: newUuid(),
       }),
     onSuccess: (r) => {
       setPhase("running");
-      pollJob(r.job_id);
+      poll(r.job_id, {
+        onDone: () => {
+          push({ kind: "ok", message: "抽出が完了しました。" });
+          onDone();
+        },
+        onFail: (message) => {
+          setPhase("error");
+          push({ kind: "warn", message });
+        },
+      });
     },
     onError: (e) =>
       push({ kind: "warn", message: `抽出を開始できません（${(e as Error).message}）。` }),
@@ -102,7 +68,10 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
     <div className="extract-start">
       <div className="emoji">📄</div>
       <h2>まだ抽出していません</h2>
-      <p>この帳票の AI-OCR 抽出を開始します。使用するスキーマ（抽出する項目の定義）を選んでください。</p>
+      <p>
+        この帳票の AI-OCR 抽出を開始します。スキーマ（抽出する項目の定義）が未登録でも、
+        まず項目を自動発見して値を抽出できます。結果を見てからテンプレート化できます。
+      </p>
 
       {suggested && !touched && classify.data?.doc_type && (
         <div className="extract-suggest" role="status">
@@ -125,7 +94,15 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
             setSchemaId(e.target.value);
           }}
         >
-          {items.length === 0 && <option value="">（スキーマ未登録）</option>}
+          {/* スキーマ指定は任意。未登録の帳票種でも行き止まりにしない（ADR-0006） */}
+          <option value="">スキーマなし — 項目を自動発見</option>
+          {/* GET /schemas は admin 限定のため、reviewer 等では一覧が空のまま
+              分類推定だけが付くことがある。選択肢に無い値を select に入れると
+              「自動発見と表示しながら推定スキーマで抽出する」嘘になるので、
+              推定分を明示の選択肢として足す */}
+          {suggested && !items.some((s) => s.id === suggested) && (
+            <option value={suggested}>推定: {classify.data?.doc_type ?? suggested}</option>
+          )}
           {items.map((s) => (
             <option key={s.id} value={s.id}>
               {s.doc_type}（v{s.version}）
@@ -134,7 +111,14 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
         </select>
       </label>
 
-      <button className="btn grad" disabled={running || !effectiveSchema} onClick={() => start.mutate()}>
+      {!effectiveSchema && (
+        <p className="sub" style={{ margin: "4px 0 0" }}>
+          帳票から見出しと値の組を AI が自動で見つけます。抽出後、結果画面から
+          スキーマとして保存（テンプレート化）できます。
+        </p>
+      )}
+
+      <button className="btn grad" disabled={running} onClick={() => start.mutate()}>
         {running ? "抽出中…（数十秒かかります）" : "抽出を開始"}
       </button>
       {running && <p className="extract-hint">完了すると自動でこの画面に結果が表示されます。</p>}

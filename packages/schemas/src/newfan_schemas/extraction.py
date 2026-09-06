@@ -83,6 +83,11 @@ class ExtractionState(TypedDict, total=False):
     document_id: str
     tenant_id: str
     schema: dict[str, Any]
+    # 除外領域とテンプレート化時のページ数（設計 §4.6）。**schema dict には入れない**
+    # ——make_kie_extract が schema を json.dumps でプロンプトに埋めるため、座標や
+    # ページ数がプロンプトを汚染する。トップレベルの独立キーとして持つ。
+    exclude_regions: list[dict[str, Any]]
+    source_page_count: Optional[int]
     pages: list[dict[str, Any]]
     spans: list[Span]
     layout: list[LayoutBlock]

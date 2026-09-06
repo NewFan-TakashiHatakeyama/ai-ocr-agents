@@ -24,6 +24,14 @@ WebhookFn = Callable[[str, dict[str, Any]], None]
 logger = logging.getLogger(__name__)
 
 
+class RunGoneError(Exception):
+    """処理対象の run（または帳票）が既に無い。再配信しても永久に直らない。
+
+    帳票の削除（DELETE /v1/documents/{id}）が in-flight のジョブと競合すると起きる。
+    通常の失敗と違って再試行に意味が無いので、ジョブを dead 終端にして ACK する。
+    """
+
+
 class ExtractionWorker:
     def __init__(
         self,
@@ -118,6 +126,13 @@ class ExtractionWorker:
         run_id = payload["run_id"]
         tenant_id = payload["tenant_id"]
         config = {"configurable": {"thread_id": run_id}}
+
+        # 帳票が消えていたら何もせず降りる。resume 分岐より前に見るのが要点で、
+        # Command(resume=...) は checkpointer だけを見て走るため、DB に run が
+        # 無くても finalize まで進んでしまう（そこで FK 違反 → 無限再配信）。
+        if not self._store.run_exists(tenant_id, run_id):
+            raise RunGoneError(run_id)
+
         self._job(payload, "running")
 
         if "resume" in payload:  # 再開ジョブ（feedback は None/空でも可＝上書きなし確定）
@@ -140,6 +155,9 @@ class ExtractionWorker:
                 review_items=state.get("review_items", []),
                 status="needs_review",
                 fallback_pages=state.get("fallback_pages", []),
+                # finalize を通らない経路なので、ここでも渡さないと除外バッジが
+                # レビュー中だけ出なくなる（マスク発動 run は必ずここを通る）
+                region_stats=state.get("metrics", {}).get("region"),
             )
             if self._webhook is not None:
                 self._webhook(
@@ -164,6 +182,17 @@ class ExtractionWorker:
                 self.process(payload)
                 self._consumer.ack(message_id)
                 processed += 1
+            except RunGoneError:
+                # 参照先が消えている＝再試行しても永久に直らない。ACK しないと
+                # xautoclaim が 60 秒ごとに拾い続ける（試行上限が無い）。
+                logger.warning(
+                    "[worker] 対象の run が存在しないためジョブを破棄: message_id=%s run_id=%s",
+                    message_id,
+                    payload.get("run_id"),
+                )
+                self._job(payload, "dead", "E1001")
+                self._consumer.ack(message_id)
+                continue
             except Exception:  # noqa: BLE001 - 失敗ジョブは ACK せず再配信に委ねる（§9）
                 # 握り潰すと本番で原因究明できない（pending が増えるだけで無言になる）。
                 # ACK しない方針は維持しつつ、必ずスタックトレースを残す。

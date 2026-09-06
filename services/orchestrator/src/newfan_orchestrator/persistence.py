@@ -19,6 +19,10 @@ class LoadedContext:
     schema: dict[str, Any]
     pages: list[dict[str, Any]]
     tenant_settings: dict[str, Any] = field(default_factory=dict)
+    # 除外領域とテンプレート化時のページ数（設計 §4.6）。schema dict とは別に持つ
+    # （schema はそのままプロンプトへ埋まるため、座標を入れると出力が変わる）。
+    exclude_regions: list[dict[str, Any]] = field(default_factory=list)
+    source_page_count: Optional[int] = None
 
 
 class ContextStore(Protocol):
@@ -36,11 +40,27 @@ class ContextStore(Protocol):
         review_items: list[ReviewItem],
         status: str,
         fallback_pages: Optional[list[int]] = None,
+        region_stats: Optional[dict[str, Any]] = None,
     ) -> None:
         """extraction_fields/tables を保存し、run/document の status を遷移する（§4.3 finalize）。
 
         fallback_pages（VL フォールバックしたページ, §5.4/DD-09）は run の metrics に記録し、
         UI がバッジ/バナーで露出できるようにする。
+
+        region_stats（除外領域で消した件数, 設計 §5.4）も同じく metrics へマージする。
+        **needs_review 保存の時点で載っている必要がある**: セル/行マスクが起きた run は
+        必ず hitl_review で interrupt 停止するため、ここを漏らすとレビュー中だけ
+        バッジが出ず、「N セルを未取込」という所見だけが根拠なく浮く。
+        """
+        ...
+
+    def run_exists(self, tenant_id: str, run_id: str) -> bool:
+        """run と、その帳票がまだ存在するか（§6.2 帳票削除との競合検知）。
+
+        帳票が削除されると extraction_runs は FK CASCADE で消えるが、キューに
+        積まれたジョブは残る。存在しない run を処理しようとすると finalize の
+        INSERT が ForeignKeyViolation で落ち、ACK されないまま 60 秒ごとに
+        xautoclaim で無限再配信される（試行上限が無い）。処理前に見切るための問い。
         """
         ...
 
@@ -77,6 +97,8 @@ class _RunSeed:
     schema: dict[str, Any]
     pages: list[dict[str, Any]]
     tenant_settings: dict[str, Any] = field(default_factory=dict)
+    exclude_regions: list[dict[str, Any]] = field(default_factory=list)
+    source_page_count: Optional[int] = None
 
 
 class InMemoryContextStore:
@@ -89,6 +111,7 @@ class InMemoryContextStore:
         self._saved_fields: dict[str, list[ExtractedField]] = {}
         self._saved_tables: dict[str, list[TableResult]] = {}
         self._saved_fallback: dict[str, list[int]] = {}
+        self._saved_region_stats: dict[str, Optional[dict[str, Any]]] = {}
         self._result_version: dict[str, int] = {}
         self.run_metrics: dict[str, dict[str, float]] = {}
         self._job_status: dict[str, tuple[str, Optional[str]]] = {}
@@ -102,6 +125,8 @@ class InMemoryContextStore:
         schema: dict[str, Any],
         pages: list[dict[str, Any]],
         tenant_settings: Optional[dict[str, Any]] = None,
+        exclude_regions: Optional[list[dict[str, Any]]] = None,
+        source_page_count: Optional[int] = None,
     ) -> None:
         self._runs[run_id] = _RunSeed(
             tenant_id=tenant_id,
@@ -109,6 +134,8 @@ class InMemoryContextStore:
             schema=schema,
             pages=pages,
             tenant_settings=tenant_settings or {},
+            exclude_regions=list(exclude_regions or []),
+            source_page_count=source_page_count,
         )
         self._document_status[document_id] = "processing"
         self._run_status[run_id] = "processing"
@@ -123,6 +150,8 @@ class InMemoryContextStore:
             schema=seed.schema,
             pages=seed.pages,
             tenant_settings=seed.tenant_settings,
+            exclude_regions=list(seed.exclude_regions),
+            source_page_count=seed.source_page_count,
         )
 
     def save_result(
@@ -135,6 +164,7 @@ class InMemoryContextStore:
         review_items: list[ReviewItem],
         status: str,
         fallback_pages: Optional[list[int]] = None,
+        region_stats: Optional[dict[str, Any]] = None,
     ) -> None:
         seed = self._runs.get(run_id)
         if seed is None or seed.tenant_id != tenant_id:
@@ -142,9 +172,20 @@ class InMemoryContextStore:
         self._saved_fields[run_id] = list(fields)
         self._saved_tables[run_id] = list(tables)
         self._saved_fallback[run_id] = list(fallback_pages or [])
+        # 渡し漏れがローカルテストで検出できるよう観測可能にしておく
+        # （キーワード引数は省略しても通ってしまうため）
+        self._saved_region_stats[run_id] = dict(region_stats) if region_stats else None
         self._run_status[run_id] = status
         self._document_status[seed.document_id] = status
         self._result_version[run_id] = self._result_version.get(run_id, 1)
+
+    def run_exists(self, tenant_id: str, run_id: str) -> bool:
+        seed = self._runs.get(run_id)
+        return seed is not None and seed.tenant_id == tenant_id
+
+    def drop_run(self, run_id: str) -> None:
+        """帳票削除で run ごと消えた状況を再現する（テスト用）。"""
+        self._runs.pop(run_id, None)
 
     def add_run_metrics(self, tenant_id: str, run_id: str, patch: dict[str, float]) -> None:
         m = self.run_metrics.setdefault(run_id, {})
@@ -166,6 +207,10 @@ class InMemoryContextStore:
     # --- テスト用アクセサ ---
     def job_status(self, job_id: str) -> Optional[tuple[str, Optional[str]]]:
         return self._job_status.get(job_id)
+
+    def saved_region_stats(self, run_id: str) -> Optional[dict[str, Any]]:
+        """save_result に渡された region_stats（未保存なら None）。"""
+        return self._saved_region_stats.get(run_id)
 
     def run_status(self, run_id: str) -> Optional[str]:
         return self._run_status.get(run_id)

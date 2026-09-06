@@ -58,7 +58,10 @@ jobs:
         run: |
           uv run --no-sync pytest -q \
             services/gateway/tests/test_pg_repository_integration.py \
+            services/gateway/tests/test_pg_document_delete_integration.py \
             services/orchestrator/tests/test_pg_jobs_integration.py \
+            services/orchestrator/tests/test_pg_save_result_integration.py \
+            services/orchestrator/tests/test_pg_load_context_integration.py \
             db/tests/test_rls_isolation.py \
             -o addopts="" --no-header -rN | tee /tmp/pg.txt
           grep -qE '[0-9]+ passed' /tmp/pg.txt

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, U
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
+from newfan_schemas import resolve_regions
 from newfan_workflow import WorkflowGraph, build_candidate, catalog, classify_text, has_errors, lint
 from newfan_workflow.lint import Finding
 from pydantic import ValidationError
@@ -27,6 +28,7 @@ from newfan_gateway.deps import (
     get_chat_agent,
     get_ingestor,
     get_lock_store,
+    get_object_store,
     get_orchestrator,
     get_queue,
     get_repo,
@@ -57,7 +59,7 @@ from newfan_gateway.records import (
     WorkflowRecord,
     WorkflowRunRecord,
 )
-from newfan_gateway.repository import Repository
+from newfan_gateway.repository import DocumentGoneError, Repository
 from newfan_ingest import IngestError, UploadInput
 
 router = APIRouter(prefix="/v1")
@@ -166,12 +168,111 @@ def get_document(
     repo: Repository = Depends(get_repo),
 ) -> dto.DocumentMeta:
     doc = _require_document(repo, principal.tenant_id, document_id)
+    # ページ寸法は**単体取得でのみ**埋める（設計 §6）。一覧 API は DocumentMeta を
+    # 共用しており、そちらで埋めると帳票 1 件ごとに pages を引く N+1 になる。
+    pages = repo.get_pages(principal.tenant_id, document_id)
     return dto.DocumentMeta(
         document_id=doc.id,
         status=doc.status,
         doc_type=doc.doc_type,
         external_ref=doc.external_ref,
         page_count=doc.page_count,
+        pages=[
+            dto.PageDim(page_no=p.page_no, width=p.width, height=p.height)
+            for p in sorted(pages, key=lambda x: x.page_no)
+        ],
+    )
+
+
+@router.delete("/documents/{document_id}", response_model=dto.DocumentDeleted)
+def delete_document(
+    document_id: str,
+    principal: Principal = Depends(require_role("reviewer")),
+    repo: Repository = Depends(get_repo),
+    wf: WorkflowsRepository = Depends(get_workflows),
+    locks: LockStore = Depends(get_lock_store),
+    store: Any = Depends(get_object_store),
+    settings: Settings = Depends(get_settings),
+) -> dto.DocumentDeleted:
+    """取り込んだ帳票を消す（原本・ページ画像・抽出結果・学習例まで）。
+
+    復元手段は用意していない。UI 側で必ず確認ダイアログを挟むこと。
+
+    順序は S3 → DB。逆にすると、S3 の削除が失敗したときに storage_uri を失って
+    孤児オブジェクトを辿る手段が消える。この順なら失敗しても DB は無傷で、
+    帳票は一覧に残ったまま再試行できる。
+    """
+    doc = _require_document(repo, principal.tenant_id, document_id)
+
+    # 実行中のものを消すと、ワーカーが参照先を失って無限に再配信される。
+    reason = repo.get_delete_blocker(
+        principal.tenant_id, document_id, stale_minutes=settings.document_delete_stale_minutes
+    )
+    if reason == "document_busy":
+        raise ApiError(
+            "E1005",
+            "処理中のため削除できません",
+            details={"document_id": document_id, "reason": reason, "status": doc.status},
+        )
+    if reason == "processing":
+        raise ApiError(
+            "E1005",
+            "抽出処理中のため削除できません",
+            details={"document_id": document_id, "reason": reason},
+        )
+    if wf.has_running_workflow_run(principal.tenant_id, document_id):
+        raise ApiError(
+            "E1005",
+            "ワークフロー実行中のため削除できません",
+            details={"document_id": document_id, "reason": "workflow_active"},
+        )
+    # ソフトロックは助言的（§8.2）。gateway は複数タスクで動き InMemoryLockStore は
+    # プロセス内なので、これは安全境界ではなく「同僚の作業を踏まない」ための配慮。
+    info = locks.get(principal.tenant_id, document_id)
+    if info is not None and info.holder_sub != principal.sub:
+        raise ApiError(
+            "E1005",
+            "他のユーザーが確認中です",
+            details={
+                "document_id": document_id,
+                "reason": "locked",
+                "holder": info.holder_name,
+            },
+        )
+
+    prefix = f"{principal.tenant_id}/{document_id}/"
+    try:
+        objects_deleted = int(store.delete_prefix(prefix))
+    except Exception as exc:  # noqa: BLE001 — 実体が残る限り DB は消さない
+        raise ApiError(
+            "E2000",
+            "帳票ファイルの削除に失敗しました。時間をおいて再試行してください。",
+            details={"document_id": document_id},
+        ) from exc
+
+    try:
+        counts = repo.delete_document(
+            principal.tenant_id,
+            document_id,
+            actor_id=principal.sub,
+            detail={"objects_deleted": objects_deleted, "prefix": prefix},
+        )
+    except DocumentGoneError:
+        # 同時に 2 回 DELETE した敗者側。実体はもう無いので「見つかりません」で正しい。
+        counts = None
+    if counts is None:
+        # S3 を消したあとで DB から消えていた（同時削除）。実体はもう無いので
+        # 「見つかりません」で正しい。
+        raise ApiError(
+            "E1001", "ドキュメントが見つかりません", details={"document_id": document_id}
+        )
+
+    locks.release(principal.tenant_id, document_id, principal.sub)
+    return dto.DocumentDeleted(
+        document_id=document_id,
+        objects_deleted=objects_deleted,
+        corrections_deleted=counts.get("corrections_deleted", 0),
+        runs_deleted=counts.get("runs_deleted", 0),
     )
 
 
@@ -243,6 +344,7 @@ def extract(
     repo: Repository = Depends(get_repo),
     queue: Queue = Depends(get_queue),
     settings: Settings = Depends(get_settings),
+    admin: AdminRepository = Depends(get_admin),
 ) -> dto.ExtractAccepted:
     _require_document(repo, principal.tenant_id, document_id)
 
@@ -250,7 +352,34 @@ def extract(
     if cached is not None:
         return dto.ExtractAccepted(**cached)
 
-    if repo.has_active_run(principal.tenant_id, document_id):
+    # 空文字の schema_id は「未指定」として扱う。そのまま INSERT すると
+    # extraction_runs の FK 違反で 500（E2000 内部エラー）になり、利用者には
+    # 原因が一切見えない（API 直叩きで実際に発生）。存在しない ID も 404 で明示する。
+    schema_id = (body.schema_id or "").strip() or None
+    if schema_id is not None and admin.get_schema_by_id(principal.tenant_id, schema_id) is None:
+        raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
+
+    # 既定の競合判定は processing + needs_review（外部連携の二重投入防止）。
+    # supersede_review=true のときだけ「今まさに処理中」だけを競合とみなす
+    # （chat の rerun_extract と同じ意味論）。テンプレート化直後の再抽出は
+    # 「自動発見 run が needs_review」が典型状態で、既定のままでは必ず 409 になる。
+    if body.supersede_review:
+        if repo.has_processing_run(principal.tenant_id, document_id):
+            raise ApiError(
+                "E1005", "実行中の Run と競合しています", details={"document_id": document_id}
+            )
+        latest = repo.get_latest_run(principal.tenant_id, document_id)
+        if latest is not None and latest.status in ("confirmed", "exported"):
+            # 確定済み（会計連携済みを含む）を無警告で置き換えない
+            raise ApiError(
+                "E1005",
+                "確定済みの結果があります。再抽出すると確定値が置き換わります",
+                details={"document_id": document_id, "status": latest.status},
+            )
+        # 新 run を作る前に旧 needs_review を終端させる。残すと get_latest_run・
+        # 削除ブロッカー・ワークフローの hitl_gate が古い run を見続ける。
+        repo.supersede_review_runs(principal.tenant_id, document_id)
+    elif repo.has_active_run(principal.tenant_id, document_id):
         raise ApiError("E1005", "実行中の Run と競合しています", details={"document_id": document_id})
 
     run_id = new_id("run")
@@ -260,7 +389,7 @@ def extract(
             id=run_id,
             tenant_id=principal.tenant_id,
             document_id=document_id,
-            schema_id=body.schema_id,
+            schema_id=schema_id,
             status="processing",
             options=body.options.model_dump(),
         )
@@ -295,21 +424,42 @@ def get_result(
     document_id: str,
     principal: Principal = Depends(require_role("viewer")),
     repo: Repository = Depends(get_repo),
+    admin: AdminRepository = Depends(get_admin),
 ) -> dto.ResultResponse:
     _require_document(repo, principal.tenant_id, document_id)
     run = repo.get_latest_run(principal.tenant_id, document_id)
     if run is None:
         raise ApiError("E1001", "抽出 Run がありません", details={"document_id": document_id})
+
+    # 適用された除外領域と doc_type はスキーマ側から採る。db の 1 SELECT で取る案は
+    # 採らない——admin リポジトリなら Pg / InMemory の両実装を通るので、
+    # 「InMemory では常に空が返るので UI 実装者が本番との差に気づけない」盲点が消える。
+    applied: list[dto.ResolvedRegion] = []
+    schema_doc_type: Optional[str] = None
+    if run.schema_id:
+        rec = admin.get_schema_by_id(principal.tenant_id, run.schema_id)
+        if rec is not None:
+            schema_doc_type = rec.doc_type
+            page_count = len(repo.get_pages(principal.tenant_id, document_id))
+            applied = [
+                dto.ResolvedRegion(**r)
+                for r in resolve_regions(list(rec.exclude_regions), page_count)
+            ]
+
     return dto.ResultResponse(
         document_id=document_id,
         run_id=run.id,
         status=run.status,
+        schema_id=run.schema_id,
         result_version=run.result_version,
         engine_versions=run.engine_versions,
         fields=run.fields,
         tables=run.tables,
         review_summary=run.review_summary,
         fallback_pages=run.fallback_pages,
+        region_stats=run.region_stats,
+        applied_exclude_regions=applied,
+        schema_doc_type=schema_doc_type,
     )
 
 
@@ -571,6 +721,10 @@ def _schema_dto(rec: Any) -> dto.SchemaDto:
         doc_type=rec.doc_type,
         version=rec.version,
         fields=[dto.SchemaFieldDto(**f.model_dump()) for f in rec.fields],
+        # 応答忠実性がこの機能の生命線（設計 §6）。ここが欠けると旧編集画面の
+        # 「取得 → 編集 → 新版として保存」往復で region / exclude が全滅する。
+        exclude_regions=list(getattr(rec, "exclude_regions", []) or []),
+        source_page_count=getattr(rec, "source_page_count", None),
     )
 
 
@@ -629,8 +783,28 @@ def put_schema(
             "同名のスキーマが既に存在します。既存スキーマを選んで編集してください",
             details={"doc_type": body.doc_type},
         )
+    # RegionRect 自体の形式（0..1 / x1<x2 / 面積）は pydantic が検証済み。ここでは
+    # **文脈依存の制約**だけを見る: include（fields[].region）に page:null は許さない。
+    # 「どのページのどこを読むか」の指定にならず、全ページに同座標を当てる意図とも
+    # 区別できないため。exclude は page:null（全ページ）が正当な指定。
+    for f in body.fields:
+        if f.region is not None and f.region.page is None:
+            raise ApiError(
+                "E1003",
+                "読取領域にはページ指定が必要です（全ページ指定は除外領域のみ）",
+                details={"field": f.name},
+            )
     fields = [SchemaFieldDef(**f.model_dump()) for f in body.fields]
-    rec = admin.put_schema(principal.tenant_id, body.doc_type, fields)  # 常に新版
+    # exclude_regions / source_page_count は None のまま渡す（= 直前版から引き継ぎ）。
+    # 旧編集画面・chat 経路はこれらを送らないので、ここで [] に潰すと保存 1 回で
+    # 除外設定が消える（設計 §4.4）。
+    rec = admin.put_schema(  # 常に新版
+        principal.tenant_id,
+        body.doc_type,
+        fields,
+        exclude_regions=body.exclude_regions,
+        source_page_count=body.source_page_count,
+    )
     return _schema_dto(rec)
 
 
@@ -798,6 +972,7 @@ def _lint_workflow(
         auto_confirm=rec.auto_confirm,
         schema_exists=lambda sid: wf.schema_exists(tenant_id, sid),
         connection_ok=lambda cid: wf.connection_ok(tenant_id, cid),
+        schema_is_latest=lambda sid: wf.schema_is_latest(tenant_id, sid),
     )
     unsupported = sorted(str(t) for t in {n.type for n in graph.nodes} - IMPLEMENTED_NODE_TYPES)
     return findings, unsupported
@@ -1126,8 +1301,12 @@ def create_connection(
         )
     # secret_ref はテナントの名前空間（.../conn/<tenant_id>/...）内だけを許す。
     # これが無いと他テナントの秘密名/ARN を自分の接続に張り、自分の config.host へ
-    # パスワードとして送出させられる（クロステナント窃取。レビューで実証）
-    if body.secret_ref and f"/conn/{principal.tenant_id}/" not in body.secret_ref:
+    # パスワードとして送出させられる（クロステナント窃取。レビューで実証）。
+    # 例外: フォルダ監視系（gdrive/m365/box）の `env:NAME` はローカル/compose の
+    # 実 OAuth 検証用に許可する。これらの秘密は固定の各社トークンエンドポイントへ
+    # しか送られない（利用者が宛先を差し替えられる db_write とは攻撃面が異なる）
+    env_ref_ok = body.type in _FOLDER_SOURCE_TYPES and (body.secret_ref or "").startswith("env:")
+    if body.secret_ref and not env_ref_ok and f"/conn/{principal.tenant_id}/" not in body.secret_ref:
         raise ApiError(
             "E4001",
             "secret_ref は自テナントの名前空間にある必要があります"

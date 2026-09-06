@@ -64,3 +64,41 @@ def test_extra_fields_preserved(layout_parsing_raw: dict[str, Any]) -> None:
     resp = LayoutParsingResponse.model_validate(env.result)
     dumped = resp.layout_parsing_results[0].pruned_result.model_dump()
     assert dumped["future_field"] == {"x": 1}
+
+
+def test_小数座標の応答でページが欠落しない() -> None:
+    """PP-StructureV3 は解像度によって座標を**小数**で返す。
+
+    rec_boxes を int で受けていたため、小数を含むページは pydantic の
+    int_from_float で**応答全体が検証エラー**になり、ocr_nodes のページ単位
+    except に吸われてページごと欠落していた。抽出は「成功」のまま結果だけが
+    減るので、運用からは原因が分からない（実機の 3 ページ PDF で 2 ページが消えた）。
+    """
+    from newfan_paddle_client import build_spans
+    from newfan_paddle_client.schema import LayoutParsingResponse
+
+    payload = {
+        "layoutParsingResults": [
+            {
+                "prunedResult": {
+                    "parsing_res_list": [],
+                    "overall_ocr_res": {
+                        "rec_texts": ["¥128,000"],
+                        "rec_scores": [0.9],
+                        "rec_polys": [[[2033.13, 183.37], [2615.42, 183.37],
+                                       [2615.42, 338.91], [2033.13, 338.91]]],
+                        "rec_boxes": [[2033.1346435546875, 183.3798828125,
+                                       2615.4228515625, 338.91253662109375]],
+                    },
+                },
+                "markdown": {"text": ""},
+            }
+        ]
+    }
+    resp = LayoutParsingResponse.model_validate(payload)
+    assert resp.layout_parsing_results, "小数座標で応答が丸ごと落ちている"
+
+    spans = build_spans(resp.layout_parsing_results[0].pruned_result, page=1)
+    # 座標の整数化は使う側（spans）が行う。poly_to_bbox と同じ丸め。
+    assert spans[0].bbox == [2033, 183, 2615, 339]
+    assert all(isinstance(v, int) for v in spans[0].bbox)

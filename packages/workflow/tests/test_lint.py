@@ -197,6 +197,24 @@ def test_L009_スキーマの実在を検査する() -> None:
     assert "L009" not in _rules(lint(_graph()))
 
 
+def test_L012_旧版のスキーマ参照をwarningで知らせる() -> None:
+    """extract.schema_id が最新版でないことを warning で出す。
+
+    put_schema は常に新版 INSERT だが、ワークフローの extract ノードは
+    field_schemas.id を固定保持する。したがってテンプレート化や領域編集で作った
+    新版は既存ワークフローに自動適用されず、運用者は「保存したのに効かない」を
+    無音で踏む（L009 は存在するかしか見ないので警告も出ない）。
+    """
+    findings = lint(_graph(), schema_is_latest=lambda sid: False)
+    l012 = [f for f in findings if f.rule == "L012"]
+    assert [f.node_id for f in l012] == ["x1"]
+    # **error にはしない**（既存ワークフローの有効化を塞ぐ副作用の方が大きい）
+    assert l012[0].severity == "warning"
+    # 最新版なら出さない / resolver 未注入なら skip
+    assert "L012" not in _rules(lint(_graph(), schema_is_latest=lambda sid: True))
+    assert "L012" not in _rules(lint(_graph()))
+
+
 def test_L010_接続の実在と疎通を検査する() -> None:
     findings = lint(_graph(), connection_ok=lambda cid: cid == "con_pg")
     l010 = [f for f in findings if f.rule == "L010"]

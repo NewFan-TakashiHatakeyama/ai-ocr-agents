@@ -39,12 +39,56 @@ export interface ResultResponse {
   document_id: string;
   run_id: string;
   status: string;
+  // スキーマレス抽出（自動発見）なら null。テンプレート化バナーの出し分けに使う
+  schema_id?: string | null;
   result_version: number;
   engine_versions: Record<string, unknown>;
   fields: ExtractedField[];
   tables: TableResult[];
   review_summary: Record<string, number>;
   fallback_pages?: number[]; // VL フォールバックしたページ（§5.4）
+  /** 除外領域で消した件数。0 件なら UI は出さない */
+  region_stats?: RegionStats | null;
+  /** この run に適用された除外領域（ページ解決済み） */
+  applied_exclude_regions?: ResolvedRegion[];
+  /** run.schema_id から解決した doc_type（領域編集のプリロード起点） */
+  schema_doc_type?: string | null;
+}
+
+/** ページの正規寸法（前処理後 PNG 画素）。領域の正規化・逆正規化に使う。 */
+export interface PageDim {
+  page_no: number;
+  width?: number | null;
+  height?: number | null;
+}
+
+/**
+ * スキーマに保存する領域。ランタイムの bbox（画素 int）とは別物で、
+ * こちらは当該ページ寸法に対する正規化 [0,1] の rect。
+ * page: 1始まり int / "last"（最終ページ）/ null（全ページ・除外のみ）
+ */
+export interface RegionRect {
+  page?: number | "last" | null;
+  rect: [number, number, number, number];
+  label?: string | null;
+}
+
+/** サーバ側でページ番号まで解決済みの領域（検証画面のオーバーレイ用）。 */
+export interface ResolvedRegion {
+  page_no: number;
+  rect: [number, number, number, number];
+  label?: string | null;
+}
+
+/** 除外領域で消した件数（検証画面のバッジの材料）。 */
+export interface RegionStats {
+  excluded_spans?: number;
+  excluded_cells?: number;
+  excluded_rows?: number;
+  skipped_pages_no_dims?: number[];
+  markdown_dropped_pages?: number[];
+  mismatch_fields?: string[];
+  layout_mismatch?: boolean;
 }
 
 export interface DocumentMeta {
@@ -53,6 +97,8 @@ export interface DocumentMeta {
   doc_type?: string | null;
   external_ref?: string | null;
   page_count?: number | null;
+  /** 単体取得 GET /documents/{id} のみ充填。一覧では空（N+1 回避） */
+  pages?: PageDim[];
 }
 
 export interface DocumentList {
@@ -101,6 +147,8 @@ export interface SchemaFieldDto {
   required: boolean;
   critical: boolean;
   columns?: Record<string, unknown>[] | null;
+  /** 読取領域（hint）。null/未設定なら領域指定なし */
+  region?: RegionRect | null;
 }
 
 export interface SchemaDto {
@@ -108,6 +156,10 @@ export interface SchemaDto {
   doc_type: string;
   version: number;
   fields: SchemaFieldDto[];
+  /** 除外領域。doc_type（スキーマ版）単位で決定論的に適用される */
+  exclude_regions?: RegionRect[];
+  /** テンプレート化時点の帳票ページ数 */
+  source_page_count?: number | null;
 }
 
 export interface ExtractAccepted {
@@ -177,6 +229,15 @@ export interface DocumentCreated {
   document_id: string;
   page_count?: number | null;
   status: string;
+}
+
+/** DELETE /documents/{id} の受領書。件数は「何を失ったか」をトーストで伝えるために使う。 */
+export interface DocumentDeleted {
+  document_id: string;
+  deleted: boolean;
+  objects_deleted: number;
+  corrections_deleted: number;
+  runs_deleted: number;
 }
 
 export interface MetricsResponse {

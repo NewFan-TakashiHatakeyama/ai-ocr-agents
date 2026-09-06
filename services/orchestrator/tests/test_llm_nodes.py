@@ -1,5 +1,6 @@
 """kie_extract/llm_correct ノードが llm-adapter で実体化されることの検証（FakeProvider）。"""
 
+import copy
 import json
 
 from newfan_llm_adapter import FakeProvider, LLMAdapter, PromptBundle, default_bundle_dir
@@ -84,3 +85,105 @@ def test_correct_node_skips_high_confidence() -> None:
     node = llm_nodes.make_llm_correct(adapter, _BUNDLE)
     out = node({"fields": [field], "spans": [], "schema": _SCHEMA})
     assert out["fields"][0].correction is None
+
+
+# ---------- region キー除去とプロンプト同一性（設計 §5.6 / §4.7・C27/C29） ----------
+
+_KIE_RESP = json.dumps({"fields": [], "tables": [], "unmapped_required": []})
+_SPANS = [Span(span_id=11, page=1, text="¥128,000", conf=0.72, bbox=[0, 0, 1, 1])]
+_REGION = {"page": 1, "rect": [0.3, 0.02, 0.72, 0.09]}
+
+
+def _kie_prompt(schema: dict) -> tuple[str, str]:
+    """kie ノードを 1 回動かして、実際に provider へ渡った (system, user) を返す。"""
+    provider = FakeProvider([_KIE_RESP])
+    node = llm_nodes.make_kie_extract(LLMAdapter(provider), _BUNDLE)
+    node({"spans": _SPANS, "layout_markdown": "# 請求書", "schema": schema})
+    assert len(provider.calls) == 1
+    return provider.calls[0]
+
+
+def test_kie_prompt_unchanged_without_regions() -> None:
+    """region を使わないスキーマのプロンプトは 1 バイトも変わらない。
+
+    gateway と orchestrator-worker のローリング完了順は保証されないため、region を
+    知る gateway が先に出て ``"region": null`` を JSONB に書いた版が、region を
+    知らない orchestrator に読まれ得る。その場合でもプロンプトが変わらないことを
+    **全文一致**で押さえる（部分文字列検索では「どこかが変わった」を見逃す）。
+    """
+    baseline = _kie_prompt(
+        {"doc_type": "invoice", "fields": [{"name": "total_amount", "type": "money_jpy"}]}
+    )
+    # 旧 gateway 想定入力: region キー自体が無い
+    assert _kie_prompt(
+        {"doc_type": "invoice", "fields": [{"name": "total_amount", "type": "money_jpy"}]}
+    ) == baseline
+    # 新 gateway が誤って "region": null を書いてしまった版
+    assert _kie_prompt(
+        {
+            "doc_type": "invoice",
+            "fields": [{"name": "total_amount", "type": "money_jpy", "region": None}],
+        }
+    ) == baseline
+
+
+def test_region_key_stripped_from_schema_prompt() -> None:
+    """実座標が設定された版でも、Phase 1 ではプロンプトに載せない。
+
+    region は正規化座標（0.30 等）であり、素通しすると LLM に意味不明な数値が
+    渡る。プロンプトへのヒント注入は Phase 4 で画素へ射影した形として別途設計・
+    計測する。
+    """
+    baseline_system, baseline_user = _kie_prompt(
+        {"doc_type": "invoice", "fields": [{"name": "total_amount", "type": "money_jpy"}]}
+    )
+    system, user = _kie_prompt(
+        {
+            "doc_type": "invoice",
+            "fields": [{"name": "total_amount", "type": "money_jpy", "region": _REGION}],
+        }
+    )
+    assert (system, user) == (baseline_system, baseline_user)
+    # プロンプトへ埋まる schema JSON そのものに座標が残っていないこと
+    # （"region" は kie テンプレート本文にも現れ得るので、user 全文の
+    #   部分文字列検索では判定できない）
+    schema_json = json.dumps(
+        llm_nodes._schema_for_prompt(
+            {
+                "doc_type": "invoice",
+                "fields": [{"name": "total_amount", "type": "money_jpy", "region": _REGION}],
+            }
+        ),
+        ensure_ascii=False,
+    )
+    assert "region" not in schema_json and "0.72" not in schema_json
+
+
+def test_state_schema_not_mutated() -> None:
+    """state の schema を破壊しない。
+
+    LangGraph の state は他ノードと共有され checkpoint にも載る。ここで書き換えると
+    HITL 再開時の入力が変わり、再現しないバグになる。
+    """
+    schema = {
+        "doc_type": "invoice",
+        "fields": [{"name": "total_amount", "type": "money_jpy", "region": _REGION}],
+    }
+    before = copy.deepcopy(schema)
+    node = llm_nodes.make_kie_extract(LLMAdapter(FakeProvider([_KIE_RESP])), _BUNDLE)
+    node({"spans": _SPANS, "layout_markdown": "", "schema": schema})
+    assert schema == before
+
+
+def test_schema_for_prompt_handles_malformed_fields() -> None:
+    """fields が list でない / 要素が dict でない版でも落ちない（fail-open）。
+
+    field_schemas.fields は JSONB で、過去の書き込みや手動修正で形が崩れ得る。
+    ここで例外を投げるとノードごと落ち、worker が ACK しないまま再配信ループに入る。
+    """
+    assert llm_nodes._schema_for_prompt({"doc_type": "x", "fields": None}) == {
+        "doc_type": "x",
+        "fields": None,
+    }
+    out = llm_nodes._schema_for_prompt({"doc_type": "x", "fields": ["junk", {"name": "a"}]})
+    assert out["fields"] == ["junk", {"name": "a"}]

@@ -8,15 +8,29 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Any
 
 from newfan_memory import TenantRule, apply_rule
 from newfan_metrics import current_tenant, rule_auto_apply_total
 from newfan_normalizers import NormContext, normalize
-from newfan_schemas import ExtractedField, ExtractionState, FieldSchema, FieldType, ReviewStatus
+from newfan_schemas import (
+    ExtractedField,
+    ExtractionState,
+    FieldSchema,
+    FieldType,
+    ReviewItem,
+    ReviewStatus,
+)
 from newfan_validators import run_validations
 
+from newfan_orchestrator.region_mask import (
+    REGION_GUARD_MIN_FIELDS_FOR_LAYOUT,
+    guard_enforced,
+    region_mismatches,
+    regions_by_field,
+)
 from newfan_orchestrator.confidence import (
     auto_elevate,
     compute_confidence,
@@ -27,6 +41,8 @@ from newfan_orchestrator.gate import Thresholds, confidence_gate
 
 # --- 外部サービス接続ノード（スタブ） ---------------------------------------
 
+
+logger = logging.getLogger(__name__)
 
 def load_context(state: ExtractionState) -> dict[str, Any]:
     """DB から document/pages/schema/テナント設定をロード（§4.3, DD-08 検証はここ）。"""
@@ -176,6 +192,17 @@ def validate(state: ExtractionState) -> dict[str, Any]:
     """
     fields = state.get("fields", [])
     tables = state.get("tables", [])
+
+    # スキーマレス自動発見（ADR-0006）では検証を掛けない。V-* は名前一致で発火するが、
+    # 型が無く正規化されていない値（例: 日付が「2026年7月28日」のまま）に対しては
+    # 「正しい値を不正と誤記録する」だけになる。検証はテンプレート化後の
+    # 型付き抽出から効き始める（ADR-0006 の段階設計）。
+    # schema キー自体が無い（スタブ/旧テスト経路）場合は従来どおり検証する。
+    # 実グラフでは load_context が必ず schema を入れる（スキーマレスは fields=[]）。
+    schema = state.get("schema")
+    if schema is not None and not schema.get("fields"):
+        return {"fields": fields}
+
     results = run_validations(fields, tables, today=date.today())
 
     by_field: dict[str, list[dict[str, Any]]] = {}
@@ -201,16 +228,205 @@ def validate(state: ExtractionState) -> dict[str, Any]:
 
 
 def confidence_gate_node(state: ExtractionState) -> dict[str, Any]:
-    """閾値表と always_review で review_items を生成する（実装済み, §2.5）。"""
+    """閾値表と always_review で review_items を生成する（§2.5）。
+
+    上流の ReviewItem を引き継ぎ、所見の付いた field を pending に倒す。
+    どちらも「レビューが必要と判定したのに人に届かない」既存欠陥の修正:
+
+    - carry-forward: review_items は reducer 無しの LastValue チャネルなので、
+      ここで置換 return すると vl_fallback が積んだ「未抽出ページ」の ReviewItem
+      （ocr_nodes の VL 失敗経路）がグラフ通過時に消える。ノード単体のテストは
+      戻り値しか見ないため検出できていなかった。
+    - review_status: 検証画面の「要確認」は extraction_fields.review_status のみを
+      見るが、PENDING を立てるのは llm_correct 経路だけだった。このため
+      confidence_gate の所見（低確信・根拠なし・always_review）は run を
+      needs_review に倒すのに画面上は「確定済み」に見えていた。
+    """
     schema = FieldSchema.model_validate(state.get("schema", {"doc_type": "", "fields": []}))
     always = set(state.get("schema", {}).get("always_review_fields", []) or [])
+    fields = state.get("fields", [])
     items = confidence_gate(
-        state.get("fields", []),
+        fields,
         schema,
         thresholds=Thresholds(),
         always_review_fields=always,
     )
-    return {"review_items": items}
+
+    # 所見の付いた field を pending にする。人手確定（corrected/approved）は
+    # 触らない（save_result の巻き戻し防止 WHERE と同じ意図。resume 後の
+    # apply_feedback で確定した値をここで差し戻さない）。
+    flagged = {i.field_name for i in items}
+    for f in fields:
+        if f.name in flagged and f.review_status not in (
+            ReviewStatus.CORRECTED,
+            ReviewStatus.APPROVED,
+        ):
+            f.review_status = ReviewStatus.PENDING
+
+    region_items, metrics = _region_observations(state, fields, schema)
+    items = list(items) + _lost_page_items(state) + region_items
+    # 位置ガードが per-field 所見を出した場合も「要確認」に出す
+    for f in fields:
+        if f.name in {i.field_name for i in region_items} and f.review_status not in (
+            ReviewStatus.CORRECTED,
+            ReviewStatus.APPROVED,
+        ):
+            f.review_status = ReviewStatus.PENDING
+
+    # 上流（vl_fallback 等）の ReviewItem を先頭に残す。(field_name, reason) で
+    # 重複を落とす（同じ所見を二重に見せない）。
+    merged: list[Any] = []
+    seen: set[tuple[str, str]] = set()
+    for it in list(state.get("review_items", [])) + list(items):
+        key = (it.field_name, it.reason)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(it)
+    return {"review_items": merged, "fields": fields, "metrics": metrics}
+
+
+# 集約 ReviewItem の擬似 field 名。実 field と衝突しないよう区切り文字を使う。
+REGION_AGGREGATE_FIELD = "__region__"
+LOST_PAGE_FIELD = "__pages__"
+
+
+def _lost_page_items(state: ExtractionState) -> list[ReviewItem]:
+    """何も読み取れなかったページがある run を自動確定させない。
+
+    ページ処理の失敗（OCR サービスのエラー・応答の形式不一致・タイムアウト）は
+    ``errors`` に積んで継続する設計だが、``errors`` はどこにも永続化されず画面にも
+    出ない。そのため**ページが丸ごと欠けた結果がそのまま自動確定され、会計連携まで
+    素通りする**経路が空いていた。実際に 3 ページの PDF で 2 ページが落ち、合計金額
+    として別ページの数字が採用された（座標型の不一致が原因。paddle_client 側で修正
+    済みだが、タイムアウト等の別要因では今後も起こり得る）。
+
+    VL フォールバックで拾えたページは対象外にする（結果が欠けていないため）。
+    """
+    failed: set[int] = set()
+    for e in state.get("errors", []) or []:
+        page = e.get("page")
+        if isinstance(page, int):
+            failed.add(page)
+    if not failed:
+        return []
+    covered = {s.page for s in state.get("spans", []) or []}
+    lost = sorted(failed - covered)
+    if not lost:
+        return []
+    return [
+        ReviewItem(
+            field_name=LOST_PAGE_FIELD,
+            critical=True,
+            reason=(
+                "読み取れなかったページがあります（"
+                + "・".join(f"p.{p}" for p in lost)
+                + "）。結果がそのページ分だけ欠けています"
+            ),
+        )
+    ]
+
+
+def _region_observations(
+    state: ExtractionState, fields: list[ExtractedField], schema: FieldSchema
+) -> tuple[list[ReviewItem], dict[str, Any]]:
+    """除外領域と位置ガードの観測（設計 §5.4 / §5.5）。値は一切変えない。
+
+    ここに集約する理由は 2 つ。ReviewItem の生成箇所を gate 1 点に寄せて二重経路を
+    作らないこと、そして位置ガードは confidence を触ってはいけないこと——
+    グラフ順は confidence_score → llm_correct → validate → confidence_gate なので、
+    上流で confidence を下げると validate の auto_elevate に巻き戻され、さらに
+    llm_correct の起動条件（0.80 未満）を毎回踏んで文字補正 LLM が誤課金と
+    値書き換えのリスクを負う。
+    """
+    metrics = dict(state.get("metrics", {}))
+    region = dict(metrics.get("region", {}) or {})
+    items: list[ReviewItem] = []
+
+    excluded_spans = int(region.get("excluded_spans", 0) or 0)
+    excluded_cells = int(region.get("excluded_cells", 0) or 0)
+    excluded_rows = int(region.get("excluded_rows", 0) or 0)
+
+    # (a) セル/行マスク: 明細に領域が重なっている可能性。運用上いちばん痛い誤設定。
+    if excluded_cells or excluded_rows:
+        items.append(
+            ReviewItem(
+                field_name=REGION_AGGREGATE_FIELD,
+                reason=(
+                    f"除外領域により {excluded_cells}セル/{excluded_rows}行を未取込"
+                    "（設定領域が明細に重なっていないか確認してください）"
+                ),
+            )
+        )
+
+    # (b) 除外 span が全体の 20% を超える: 本文に重なっている疑い。
+    total_spans = excluded_spans + len(state.get("spans", []))
+    if excluded_spans and total_spans and excluded_spans / total_spans > 0.20:
+        items.append(
+            ReviewItem(
+                field_name=REGION_AGGREGATE_FIELD,
+                reason=(
+                    f"除外領域が本文に重なっている可能性（{excluded_spans}/{total_spans} 件を除外）"
+                ),
+            )
+        )
+
+    # (c) 除外が起きた run で required/critical が空: 別レイアウトの取引先帳票から
+    #     実データを消した疑い。除外は doc_type 単位なので同座標が全帳票に当たる。
+    if excluded_spans or excluded_cells:
+        important = {f.name for f in schema.fields if f.required or f.critical}
+        lost = sorted(
+            f.name
+            for f in fields
+            if f.name in important and not (f.value_normalized or f.value_raw)
+        )
+        if lost:
+            items.append(
+                ReviewItem(
+                    field_name=REGION_AGGREGATE_FIELD,
+                    critical=True,
+                    reason=(
+                        "除外領域が必須項目を消した可能性: "
+                        + "、".join(lost)
+                        + "（オーバーレイで領域を確認してください）"
+                    ),
+                )
+            )
+
+    # (d) 読取領域の位置ガード。既定は shadow（metrics とログのみ）。
+    mismatched = region_mismatches(
+        fields,
+        dict(state.get("schema", {}) or {}),
+        list(state.get("pages", []) or []),
+        state.get("source_page_count"),
+    )
+    if mismatched:
+        region["mismatch_fields"] = mismatched
+        n_regions = len(regions_by_field(dict(state.get("schema", {}) or {})))
+        # region 付き項目の過半が同時にずれているなら「別レイアウトの帳票」と見て
+        # per-field レビューは出さない（取引先 B の帳票を全件レビュー化させない）。
+        # ただし n が小さいと「過半」が統計的な意味を持たないため下限を設ける。
+        layout_mismatch = (
+            n_regions >= REGION_GUARD_MIN_FIELDS_FOR_LAYOUT
+            and len(mismatched) > n_regions / 2
+        )
+        region["layout_mismatch"] = layout_mismatch
+        logger.info(
+            "[region_guard] mismatch fields=%s regions=%d layout_mismatch=%s enforce=%s",
+            mismatched,
+            n_regions,
+            layout_mismatch,
+            guard_enforced(),
+        )
+        if guard_enforced() and not layout_mismatch:
+            items.extend(
+                ReviewItem(field_name=name, reason="設定領域外の位置で検出")
+                for name in mismatched
+            )
+
+    if region:
+        metrics["region"] = region
+    return items, metrics
 
 
 def hitl_review(state: ExtractionState) -> dict[str, Any]:

@@ -184,9 +184,38 @@ def test_resumeジョブも_succeeded_になる() -> None:
 
 def test_失敗したジョブは_failed_になる() -> None:
     worker, store, _, _ = _build(conf=0.99)
-    worker._consumer.push({**_JOB, "run_id": "run_missing"})  # type: ignore[attr-defined]
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("boom")
+
+    worker._graph.invoke = _boom  # type: ignore[attr-defined]  # noqa: SLF001
+    worker._consumer.push(dict(_JOB))  # type: ignore[attr-defined]
     assert worker.run_once() == 0  # ACK せず再配信に委ねる（§9）
     assert store.job_status("job_1") == ("failed", "E9001")
+
+
+def test_run_が消えていればdead終端にしてACKする() -> None:
+    """帳票削除（DELETE /documents/{id}）と in-flight ジョブの競合。
+
+    参照先が消えたジョブは再試行しても永久に直らない。ACK しないと xautoclaim が
+    60 秒ごとに拾い続ける（redis_io に試行上限が無い）。
+    """
+    worker, store, _, _ = _build(conf=0.99)
+    worker._consumer.push({**_JOB, "run_id": "run_missing"})  # type: ignore[attr-defined]
+    assert worker.run_once() == 0  # 成功カウントには入れない
+    assert store.job_status("job_1") == ("dead", "E1001")
+    assert worker._consumer.consume(count=10) == []  # ACK 済み＝再配信されない  # noqa: SLF001
+
+
+def test_resumeでも先にrunの存在を見る() -> None:
+    """resume は checkpointer だけで走るため、DB に run が無くても finalize まで
+    進んでしまう。run_exists のチェックが resume 分岐より前にあることを固定する。"""
+    worker, store, _, _ = _build(conf=0.78)
+    worker.process(dict(_JOB))
+    store.drop_run("run_1")  # 帳票削除で run ごと消えた
+    worker._consumer.push({**_JOB, "job_id": "job_2", "resume": {"corrections": []}})  # type: ignore[attr-defined]
+    assert worker.run_once() == 0
+    assert store.job_status("job_2") == ("dead", "E1001")
 
 
 def test_job_idの無いpayloadでも落ちない() -> None:
@@ -280,3 +309,115 @@ def test_llm使用量が差分でrun_metricsへ永続化される() -> None:
     assert store.run_metrics["run_1"] == {
         "llm_input_tokens": 1200, "llm_output_tokens": 340, "llm_cost_jpy": 1.25,
     }
+
+
+def test_needs_review_run_saves_pending_fields_and_bbox() -> None:
+    """Phase 0 の受け入れ条件をグラフ全体で確認する。
+
+    (a) 保存された field に bbox が入る（F-0。以前は常に None で検証画面の
+        オーバーレイに出なかった）
+    (b) 要確認の field が pending で保存される（gate 所見が review_status に
+        反映されないと、run は needs_review なのに画面は全部確定済みに見える）
+
+    ノード単体テストは戻り値しか見ないため、この 2 つはグラフを通して初めて
+    「人に届くか」が確かめられる。
+    """
+    from newfan_schemas import ReviewStatus
+
+    worker, store, _, _ = _build(conf=0.78)  # 低確信 → needs_review
+    assert worker.process(dict(_JOB)) == "needs_review"
+
+    saved = store.saved_fields("run_1")
+    assert saved, "needs_review でも fields は保存される"
+    assert any(f.bbox for f in saved), "根拠 span のある field に bbox が付く"
+    assert any(f.review_status is ReviewStatus.PENDING for f in saved), (
+        "要確認の field が pending で保存される（検証画面の『要確認』の唯一の根拠）"
+    )
+
+
+# ---------- 除外領域のグラフ貫通（設計 §5.2 / §5.4） ----------
+
+# _layout の span bbox は [300,180,430,212]。1000x1000 のページで
+# [0.25,0.15,0.5,0.25] = [250,150,500,250] に全没する。
+_COVER_SPAN_REGION = {"page": 1, "rect": [0.25, 0.15, 0.5, 0.25]}
+
+
+def _build_with_regions(
+    conf: float, regions: list, *, dims: bool = True, source_page_count: int | None = 1
+):
+    store = InMemoryContextStore()
+    page: dict[str, Any] = {"page_no": 1, "image_uri": "x"}
+    if dims:
+        page |= {"width": 1000, "height": 1000}
+    store.seed_run(
+        "run_1",
+        tenant_id="ten_1",
+        document_id="doc_1",
+        schema=_SCHEMA,
+        pages=[page],
+        exclude_regions=regions,
+        source_page_count=source_page_count,
+    )
+    exports: list = []
+    webhooks: list = []
+    graph = build_graph(
+        checkpointer=MemorySaver(serde=newfan_serde()),
+        adapter=LLMAdapter(FakeProvider(handler=_llm_handler)),
+        bundle=_BUNDLE,
+        memory=MemoryService(HashingEmbedder(), InMemoryMemoryRepository()),
+        structure_client=_FakeStructure(conf),
+        image_loader=lambda uri: b"png",
+        context_store=store,
+        export_enqueue=lambda stream, msg: exports.append((stream, msg)),
+    )
+    worker = ExtractionWorker(
+        graph, store, InMemoryQueueConsumer(), webhook=lambda ev, d: webhooks.append((ev, d))
+    )
+    return worker, store, exports, webhooks
+
+
+def test_excluded_spans_absent_from_checkpoint_and_result() -> None:
+    """除外 span は checkpoint にも結果にも残らない。
+
+    ノード後段でフィルタすると checkpoint に印影テキストが永続化されてしまうため、
+    ノード内部で適用している。その効果をグラフ貫通で押さえる。
+    """
+    worker, store, _, _ = _build_with_regions(0.99, [_COVER_SPAN_REGION])
+    worker.process({"run_id": "run_1", "tenant_id": "ten_1"})
+    snapshot = worker._graph.get_state(  # noqa: SLF001 - checkpoint の中身を見るため
+        {"configurable": {"thread_id": "run_1"}}
+    )
+    assert snapshot.values.get("spans") == []
+    assert store.saved_region_stats("run_1")["excluded_spans"] == 1
+
+
+def test_needs_review_save_includes_region_stats() -> None:
+    """interrupt 停止**その時点**で region_stats が保存されていること（C1/C13/C20/C21）。
+
+    マスク発動 run は必ず hitl_review で止まるので、finalize 側だけに配線すると
+    レビュー中は検証画面の除外バッジが出ず、所見の文言だけが根拠なく浮く。
+    """
+    worker, store, _, _ = _build_with_regions(0.70, [_COVER_SPAN_REGION])
+    assert worker.process({"run_id": "run_1", "tenant_id": "ten_1"}) == "needs_review"
+    stats = store.saved_region_stats("run_1")
+    assert stats is not None and stats["excluded_spans"] == 1
+
+
+def test_region_stats_none_without_regions() -> None:
+    """領域機能を使っていない run には region_stats を作らない（既存挙動と同じ）。"""
+    worker, store, _, _ = _build_with_regions(0.99, [])
+    worker.process({"run_id": "run_1", "tenant_id": "ten_1"})
+    assert store.saved_region_stats("run_1") is None
+
+
+def test_exclude_run_completes_without_page_dims() -> None:
+    """寸法の無いページ（既存 seed 形式）でも exclude 有り run が完走する。
+
+    ここで例外を投げると worker は ACK せず 60 秒ごとに再配信され続ける。
+    適用しないことを記録に残して先へ進む。
+    """
+    worker, store, _, _ = _build_with_regions(0.99, [_COVER_SPAN_REGION], dims=False)
+    assert worker.process({"run_id": "run_1", "tenant_id": "ten_1"}) == "confirmed"
+    stats = store.saved_region_stats("run_1")
+    assert stats["excluded_spans"] == 0
+    assert stats["skipped_pages_no_dims"] == [1]

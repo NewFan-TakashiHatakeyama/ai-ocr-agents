@@ -35,13 +35,23 @@ class PgContextStore:
                 return None
             document_id, schema_id = run
             schema = dict(EMPTY_SCHEMA)
+            exclude_regions: list = []
+            source_page_count = None
             if schema_id is not None:
                 srow = c.execute(
-                    text("SELECT doc_type, fields FROM field_schemas WHERE id = :s"),
+                    text(
+                        "SELECT doc_type, fields, exclude_regions, source_page_count "
+                        "FROM field_schemas WHERE id = :s"
+                    ),
                     {"s": schema_id},
                 ).first()
                 if srow is not None:
+                    # exclude_regions / source_page_count は **schema dict に入れない**
+                    # （§4.6）。schema は make_kie_extract がそのまま json.dumps で
+                    # プロンプトへ埋めるため、座標を混ぜると LLM 出力が変わる。
                     schema = {"doc_type": srow[0], "fields": srow[1]}
+                    exclude_regions = list(srow[2] or [])
+                    source_page_count = srow[3]
             pages = [
                 {"page_no": r[0], "image_uri": r[1], "width": r[2], "height": r[3]}
                 for r in c.execute(
@@ -52,10 +62,41 @@ class PgContextStore:
                     {"d": document_id},
                 )
             ]
-            return LoadedContext(document_id=document_id, schema=schema, pages=pages)
+            return LoadedContext(
+                document_id=document_id,
+                schema=schema,
+                pages=pages,
+                exclude_regions=exclude_regions,
+                source_page_count=source_page_count,
+            )
+
+    def run_exists(self, tenant_id, run_id) -> bool:
+        # documents を JOIN する。帳票が消えると extraction_runs は FK CASCADE で
+        # 消えるので JOIN 無しでも足りるが、明示しておくと「なぜ run が消えるのか」が
+        # 読んで分かる。
+        with self._engine.begin() as c:
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
+            r = c.execute(
+                text(
+                    "SELECT 1 FROM extraction_runs r"
+                    " JOIN documents d ON d.id = r.document_id"
+                    " WHERE r.id = :r AND r.tenant_id = :t"
+                ),
+                {"r": run_id, "t": tenant_id},
+            ).first()
+        return r is not None
 
     def save_result(
-        self, tenant_id, run_id, *, fields, tables, review_items, status, fallback_pages=None
+        self,
+        tenant_id,
+        run_id,
+        *,
+        fields,
+        tables,
+        review_items,
+        status,
+        fallback_pages=None,
+        region_stats=None,
     ) -> None:
         with self._engine.begin() as c:
             c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
@@ -65,15 +106,34 @@ class PgContextStore:
                         "INSERT INTO extraction_fields "
                         "(id, tenant_id, run_id, field_name, value_raw, value_normalized, "
                         " final_value, confidence, grounding_score, page_no, bbox, source_quote, "
-                        " span_ids, review_status) "
+                        # correction/validation を落とすと SCR-03 の LLM補正候補・検証結果が
+                        # 本番で一度も出ない（DDL には列があるのに INSERT に無かった）
+                        " span_ids, review_status, correction, validation, label) "
                         "VALUES (:id,:t,:r,:fn,:vr,:vn,:fv,:cf,:gs,:pg, CAST(:bb AS jsonb), :sq, "
-                        " CAST(:si AS jsonb), :rs) "
+                        " CAST(:si AS jsonb), :rs, CAST(:co AS jsonb), CAST(:va AS jsonb), :lb) "
                         "ON CONFLICT (run_id, field_name) DO UPDATE SET "
+                        # 再配信の再実行では行全体を新抽出で書き直す。一部の列だけ更新すると
+                        # 「correction は新抽出・value_raw/bbox は旧抽出」のキメラ行になり、
+                        # SCR-03 が実在しない対立候補を提示する（敵対的レビュー確定）
+                        " value_raw = EXCLUDED.value_raw, "
                         " value_normalized = EXCLUDED.value_normalized, "
                         " final_value = EXCLUDED.final_value, "
                         " confidence = EXCLUDED.confidence, "
                         " grounding_score = EXCLUDED.grounding_score, "
-                        " review_status = EXCLUDED.review_status"
+                        " page_no = EXCLUDED.page_no, "
+                        " bbox = EXCLUDED.bbox, "
+                        " source_quote = EXCLUDED.source_quote, "
+                        " span_ids = EXCLUDED.span_ids, "
+                        " correction = EXCLUDED.correction, "
+                        " validation = EXCLUDED.validation, "
+                        " label = EXCLUDED.label, "
+                        " review_status = EXCLUDED.review_status "
+                        # 人手確定（corrected/approved）を機械の再抽出（pending/auto）で
+                        # 巻き戻さない。XACK 前クラッシュ→確定→再配信、の順で人手作業が
+                        # 消える経路を閉じる（敵対的レビュー確定）。finalize の再保存
+                        # （EXCLUDED も corrected/approved）は通る
+                        "WHERE NOT (extraction_fields.review_status IN ('corrected','approved')"
+                        " AND EXCLUDED.review_status IN ('pending','auto'))"
                     ),
                     {
                         "id": f"fld_{uuid.uuid4().hex[:20]}",
@@ -90,7 +150,24 @@ class PgContextStore:
                         "sq": f.source_quote,
                         "si": json.dumps(f.span_ids),
                         "rs": f.review_status.value,
+                        "lb": f.label,
+                        "co": json.dumps(f.correction, ensure_ascii=False) if f.correction else None,
+                        "va": json.dumps(f.validation, ensure_ascii=False) if f.validation else None,
                     },
+                )
+            # 再実行で今回の抽出に無い名前の旧行を掃除する。スキーマ指定なら名前集合は
+            # 固定だが、スキーマレス自動発見（ADR-0006）は名前を LLM が毎回発明するため、
+            # 再配信の再実行で名前が揺れると旧発見行が幽霊フィールドとして結果に並ぶ
+            # （UPSERT は「同名の上書き」しかせず、消えた名前を消さない）。
+            # 人手確定（corrected/approved）は上の WHERE ガードと同じ理由で残す。
+            if fields:
+                c.execute(
+                    text(
+                        "DELETE FROM extraction_fields WHERE run_id = :r"
+                        " AND NOT (field_name = ANY(:names))"
+                        " AND review_status NOT IN ('corrected','approved')"
+                    ),
+                    {"r": run_id, "names": [f.name for f in fields]},
                 )
             # 明細テーブル（構造由来, §5.3）を extraction_tables に永続化。冪等のため run 分を洗替。
             c.execute(text("DELETE FROM extraction_tables WHERE run_id = :r"), {"r": run_id})
@@ -120,24 +197,37 @@ class PgContextStore:
                     },
                 )
             # fallback_pages（VL 露出用, §5.4）は metrics JSONB へマージ（既存キーは保持）。
-            c.execute(
+            # confirmed の run を再配信の再実行が needs_review 等へ巻き戻さない
+            # （フィールドの人手確定ガードと同じ経路対策。confirmed→confirmed の
+            #   再保存は冪等に通す）
+            run_upd = c.execute(
                 text(
                     "UPDATE extraction_runs SET status = :st, finished_at = now(), "
-                    "metrics = COALESCE(metrics, '{}'::jsonb) || CAST(:m AS jsonb) WHERE id = :r"
+                    "metrics = COALESCE(metrics, '{}'::jsonb) || CAST(:m AS jsonb) "
+                    "WHERE id = :r AND NOT (status = 'confirmed' AND :st <> 'confirmed')"
                 ),
                 {
                     "st": status,
                     "r": run_id,
-                    "m": json.dumps({"fallback_pages": sorted(set(fallback_pages or []))}),
+                    # region は「除外で消した件数」。needs_review 保存の時点で載って
+                    # いないと、レビュー中だけ検証画面の除外バッジが出ない（§5.4）。
+                    "m": json.dumps(
+                        {
+                            "fallback_pages": sorted(set(fallback_pages or [])),
+                            **({"region": region_stats} if region_stats else {}),
+                        }
+                    ),
                 },
             )
-            c.execute(
-                text(
-                    "UPDATE documents SET status = :st, updated_at = now() "
-                    "WHERE id = (SELECT document_id FROM extraction_runs WHERE id = :r)"
-                ),
-                {"st": status, "r": run_id},
-            )
+            if run_upd.rowcount:
+                # ドキュメント状態は run が実際に遷移した時だけ追従させる
+                c.execute(
+                    text(
+                        "UPDATE documents SET status = :st, updated_at = now() "
+                        "WHERE id = (SELECT document_id FROM extraction_runs WHERE id = :r)"
+                    ),
+                    {"st": status, "r": run_id},
+                )
 
     def add_run_metrics(self, tenant_id, run_id, patch) -> None:
         # 加算で追記（resume ジョブでも積み上がる）。metrics 全体の上書きはしない

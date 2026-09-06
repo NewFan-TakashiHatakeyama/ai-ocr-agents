@@ -198,3 +198,107 @@ def test_review_queue_reflects_hitl_boost(ctx: SimpleNamespace) -> None:
     assert [i["document_id"] for i in items][0] == doc_b  # boost 側が先頭
     by_doc = {i["document_id"]: i["priority"] for i in items}
     assert by_doc[doc_b] == 26.0 and by_doc[doc_a] == 1.0
+
+
+def test_result_exposes_schema_id_for_templatize(ctx: SimpleNamespace) -> None:
+    """テンプレート化バナー（ADR-0006）の出し分け根拠。
+
+    スキーマレス抽出の run は schema_id=null、スキーマ指定なら id が入る。
+    ここが落ちると UI は「どの run が自動発見か」を判定できず、スキーマ指定済みの
+    run にまでテンプレート化を出すか、逆に一切出せなくなる。
+    """
+    # スキーマなし（自動発見）
+    doc_a = _upload(ctx)
+    ctx.repo.create_run(
+        RunRecord(id="run_nosch", tenant_id="ten_1", document_id=doc_a, status="needs_review")
+    )
+    r = ctx.client.get(f"/v1/documents/{doc_a}/result", headers=auth("viewer"))
+    assert r.status_code == 200
+    assert r.json()["schema_id"] is None
+
+    # スキーマ指定（conftest の sch_1）
+    doc_b = _upload(ctx)
+    ctx.repo.create_run(
+        RunRecord(
+            id="run_sch", tenant_id="ten_1", document_id=doc_b,
+            schema_id="sch_1", status="needs_review",
+        )
+    )
+    r = ctx.client.get(f"/v1/documents/{doc_b}/result", headers=auth("viewer"))
+    assert r.status_code == 200
+    assert r.json()["schema_id"] == "sch_1"
+
+
+def test_extract_without_schema_is_accepted(ctx: SimpleNamespace) -> None:
+    """スキーマ未指定でも 202（テンプレートレス既定, ADR-0006）。
+
+    UI（ExtractStart）はスキーマ選択を任意にした。サーバ側が必須化へ退行すると
+    「スキーマ未登録の帳票は永遠に抽出できない」行き止まりが再発する。
+    """
+    doc_id = _upload(ctx)
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={"schema_id": None}
+    )
+    assert r.status_code == 202
+
+
+# ---------- supersede_review（設計 §3.1 再抽出ボタン / C2・C3・C6） ----------
+
+
+def test_extract_needs_review_rejected_by_default(ctx: SimpleNamespace) -> None:
+    """既定は従来どおり needs_review も競合として弾く（外部連携の二重投入防止）。"""
+    doc_id = _upload(ctx)
+    _seed_needs_review_run(ctx, doc_id)
+    r = ctx.client.post(f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "E1005"
+
+
+def test_extract_supersede_review_accepts_needs_review(ctx: SimpleNamespace) -> None:
+    """テンプレート化直後の再抽出は「自動発見 run が needs_review」が典型状態。
+
+    既定のままではこのボタンが必ず 409 になるので、明示フラグのときだけ通す。
+    旧 run は superseded へ落とす——残すと get_latest_run・削除ブロッカー・
+    ワークフローの hitl_gate が古い run を見続ける。
+    """
+    doc_id = _upload(ctx)
+    old_run = _seed_needs_review_run(ctx, doc_id)
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"supersede_review": True},
+    )
+    assert r.status_code == 202
+    assert ctx.repo.get_run("ten_1", old_run).status == "superseded"
+    # 検証画面は新しい run を見る
+    latest = ctx.repo.get_latest_run("ten_1", doc_id)
+    assert latest is not None and latest.id == r.json()["run_id"]
+
+
+def test_extract_supersede_review_still_rejects_processing(ctx: SimpleNamespace) -> None:
+    """処理中の run は supersede_review でも弾く（worker が走っている）。"""
+    doc_id = _upload(ctx)
+    ctx.client.post(f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={})
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"supersede_review": True},
+    )
+    assert r.status_code == 409 and r.json()["error"]["code"] == "E1005"
+
+
+def test_extract_rejects_confirmed_document(ctx: SimpleNamespace) -> None:
+    """確定済みは supersede_review でも拒否する。
+
+    会計連携済みの確定値を無警告で置き換えないため。UI 側でもボタンを出さないが、
+    API 直叩きでも守る。
+    """
+    doc_id = _upload(ctx)
+    run = _seed_needs_review_run(ctx, doc_id)
+    ctx.repo.get_run("ten_1", run).status = "confirmed"
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"supersede_review": True},
+    )
+    assert r.status_code == 409 and r.json()["error"]["code"] == "E1005"
+    assert ctx.repo.get_run("ten_1", run).status == "confirmed"  # 触っていない

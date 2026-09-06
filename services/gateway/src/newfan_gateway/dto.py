@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from newfan_schemas import ExtractedField, TableResult
+from newfan_schemas import ExtractedField, RegionRect, TableResult
 
 
 class DocumentCreated(BaseModel):
@@ -15,12 +15,39 @@ class DocumentCreated(BaseModel):
     status: str
 
 
+class DocumentDeleted(BaseModel):
+    """DELETE /documents/{id} の受領書（§6.2）。
+
+    件数を返すのは、学習例（correction_logs）まで消えることを UI が黙らずに
+    伝えられるようにするため。204 にすると本文を返せず、web の request<T> も
+    無条件に res.json() する。
+    """
+
+    document_id: str
+    deleted: bool = True
+    objects_deleted: int = 0
+    corrections_deleted: int = 0
+    runs_deleted: int = 0
+
+
+class PageDim(BaseModel):
+    """ページの正規寸法（前処理後 PNG の画素）。領域の正規化・逆正規化に使う。"""
+
+    page_no: int
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+
 class DocumentMeta(BaseModel):
     document_id: str
     status: str
     doc_type: Optional[str] = None
     external_ref: Optional[str] = None
     page_count: Optional[int] = None
+    # 未訪問ページの領域も正規化できるようにページ寸法を返す（設計 §6）。
+    # **一覧 API と共用の型なので既定は空配列**であり、埋めるのは単体取得だけ。
+    # 一覧で埋めると帳票 1 件ごとに pages を引く N+1 になる。
+    pages: list[PageDim] = Field(default_factory=list)
 
 
 class DocumentList(BaseModel):
@@ -36,6 +63,13 @@ class ExtractOptions(BaseModel):
 
 class ExtractRequest(BaseModel):
     schema_id: Optional[str] = None
+    # レビュー待ちの帳票を取り直す（設計 §3.1）。既定 false のときの競合判定は
+    # processing と needs_review の両方（外部連携の二重投入防止）だが、テンプレート化
+    # 直後の再抽出は「自動発見 run が needs_review」が典型状態なので必ず 409 になる。
+    # true のときだけ processing のみを競合とみなし、旧 needs_review run は
+    # superseded へ落とす。confirmed / exported は true でも拒否する
+    # （会計連携済みの確定値を無警告で置き換えないため）。
+    supersede_review: bool = False
     options: ExtractOptions = Field(default_factory=ExtractOptions)
 
 
@@ -51,16 +85,38 @@ class JobStatus(BaseModel):
     error_code: Optional[str] = None
 
 
+class ResolvedRegion(BaseModel):
+    """ページ番号まで解決済みの領域（検証画面のオーバーレイ用）。"""
+
+    page_no: int
+    rect: list[float]
+    label: Optional[str] = None
+
+
 class ResultResponse(BaseModel):
     document_id: str
     run_id: str
     status: str
+    # スキーマレス抽出（自動発見, §5.5.1）なら None。UI はこれで「テンプレート化」
+    # 導線を出し分ける（スキーマ指定済みの run に出しても意味がない）
+    schema_id: Optional[str] = None
     result_version: int
     engine_versions: dict[str, Any]
     fields: list[ExtractedField]
     tables: list[TableResult]
     review_summary: dict[str, Any]
     fallback_pages: list[int] = Field(default_factory=list)  # VL フォールバックしたページ（§5.4）
+    # 除外領域で消した件数（設計 §5.4）。検証画面のバッジの唯一の到達経路
+    # （ReviewItem は永続化されないため）。0 件なら UI は出さない。
+    region_stats: Optional[dict[str, Any]] = None
+    # この run に適用された除外領域を**ページ解決済み**で返す（§6）。"last" / null の
+    # 解決を web に再実装させると、最終ページ限定の承認印除外が全ページに描かれる
+    # ／描かれない事故になる。
+    applied_exclude_regions: list[ResolvedRegion] = Field(default_factory=list)
+    # run.schema_id から解決した doc_type（編集モードのプリロード起点）。
+    # list_schemas は doc_type ごと最新版しか返さず、run.schema_id は旧版であり得るので
+    # id 突合ができない。
+    schema_doc_type: Optional[str] = None
 
 
 class CorrectionItem(BaseModel):
@@ -130,6 +186,10 @@ class SchemaFieldDto(BaseModel):
     required: bool = False
     critical: bool = False
     columns: Optional[list[dict[str, Any]]] = None
+    # records.SchemaFieldDef と**同一コミットで**追加すること。pydantic v2 の既定は
+    # extra="ignore" なので、DTO 側を忘れると GET /schemas の応答から region が
+    # 静かに消え、旧編集画面の「新版として保存」往復で region が全滅する（§4.2）。
+    region: Optional[RegionRect] = None
 
 
 class SchemaDto(BaseModel):
@@ -139,6 +199,8 @@ class SchemaDto(BaseModel):
     doc_type: str
     version: int
     fields: list[SchemaFieldDto]
+    exclude_regions: list[RegionRect] = Field(default_factory=list)
+    source_page_count: Optional[int] = None
 
 
 class SchemaList(BaseModel):
@@ -152,6 +214,12 @@ class PutSchemaRequest(BaseModel):
     # 一覧が陳腐化していると素通りし、既存スキーマを黙って新版で置換してしまうため、
     # 「作成のつもり」はサーバ側で守る。省略時（false）は従来どおり常に新版作成（§7.2）。
     create: bool = False
+    # **None = 直前版から引き継ぎ / 明示 [] = クリア**（設計 §4.4）。
+    # 旧編集画面と chat 経路は body に exclude_regions を含めないため、「省略時 []」に
+    # すると旧経路の保存 1 回で除外設定が全滅する。引き継ぎは put_schema の内部で
+    # 行うので、旧経路はコード無変更のまま安全。
+    exclude_regions: Optional[list[RegionRect]] = None
+    source_page_count: Optional[int] = None
 
 
 class RuleDto(BaseModel):

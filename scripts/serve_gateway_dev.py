@@ -8,7 +8,6 @@ web UI のブラウザ検証用。needs_review の帳票を1件 seed し、レ�
 
 from __future__ import annotations
 
-import base64
 import json
 from pathlib import Path
 
@@ -41,8 +40,18 @@ _SAMPLE2 = _ROOT / "sample2.png"  # 請求書(Pyxis) 740x1046
 
 
 def _page_data_uri(path: Path = _SAMPLE) -> str:
-    b64 = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:image/png;base64,{b64}"
+    """ページ画像を storage_root（./data）配下へ複製し file:// URI を返す。
+
+    以前は data: URI を直接返していたが、現行の署名付き画像配信
+    （/pages/{n}/content, page_images.read_local_image）は file:// 限定のため
+    storage_root 配下の実ファイルを指す URI に変更した。
+    """
+    dest_dir = Path("./data/dev_pages").resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / path.name
+    if not dest.exists():
+        dest.write_bytes(path.read_bytes())
+    return dest.as_uri()
 
 
 # 実 PP-StructureV3 の記録 fixture（各 sample を推論した /layout-parsing 実応答）。

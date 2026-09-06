@@ -33,6 +33,11 @@ def get_ingestor(request: Request) -> Ingestor:
     return request.app.state.ingestor  # type: ignore[no-any-return]
 
 
+def get_object_store(request: Request) -> Any:
+    """帳票実体の保管先（§2.3）。削除で prefix ごと消すのに使う。"""
+    return request.app.state.object_store
+
+
 def get_orchestrator(request: Request) -> OrchestratorClient:
     return request.app.state.orchestrator  # type: ignore[no-any-return]
 

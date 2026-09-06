@@ -62,6 +62,7 @@ class WorkflowsRepository(Protocol):
 
     # activate 時の lint L009/L010 の参照解決
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool: ...
+    def schema_is_latest(self, tenant_id: str, schema_id: str) -> bool: ...
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool: ...
 
     # 実行（§16 設計 v0.2 §11 / P3）
@@ -76,6 +77,13 @@ class WorkflowsRepository(Protocol):
         limit: int = 50,
     ) -> list[WorkflowRunRecord]: ...
     def list_node_runs(self, tenant_id: str, run_id: str) -> list[WorkflowNodeRunRecord]: ...
+    def has_running_workflow_run(self, tenant_id: str, document_id: str) -> bool:
+        """当該帳票を掴んで実行中（running）のワークフロー実行があるか。
+
+        削除の拒否判定に使う。waiting_hitl は含めない（止める API が無いので
+        含めると永久に削除できなくなる。削除側で failed に終端化する）。
+        """
+        ...
 
     # §16.8: config 変更・有効化/停止は audit_logs へ（actor=human/agent）
     def record_audit(
@@ -151,6 +159,11 @@ class InMemoryWorkflowsRepository:
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool:
         return (tenant_id, schema_id) in self._schemas
 
+    def schema_is_latest(self, tenant_id: str, schema_id: str) -> bool:
+        # InMemory は版を持たないので「存在すれば最新」とみなす。版固定の検出は
+        # Pg 実装が担う（L012 は warning なので過検出より未検出に倒す）。
+        return (tenant_id, schema_id) in self._schemas
+
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool:
         return (tenant_id, connection_id) in self._connections
 
@@ -184,6 +197,12 @@ class InMemoryWorkflowsRepository:
         if self.get_run(tenant_id, run_id) is None:
             return []
         return list(self._node_runs.get(run_id, []))
+
+    def has_running_workflow_run(self, tenant_id: str, document_id: str) -> bool:
+        return any(
+            r.tenant_id == tenant_id and r.document_id == document_id and r.status == "running"
+            for r in self._runs.values()
+        )
 
     def record_audit(
         self,
