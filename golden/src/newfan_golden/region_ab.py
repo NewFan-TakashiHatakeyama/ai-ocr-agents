@@ -276,37 +276,46 @@ def run(
                 },
             )
 
-            document_id = _upload(client, image)
-            print(f"[region_ab] {doc.document_id}: doc={document_id}", flush=True)
+            print(f"[region_ab] {doc.document_id}: {image.name}", flush=True)
 
             for i in range(trials):
                 # 交互に回す（時間帯によるモデル側の揺れを両条件へ均等に散らす）
                 for arm, schema in (("control", control), ("treat", treat)):
-                    status = _extract(client, document_id, str(schema["id"]), timeout_sec)
-                    if status != "succeeded":
-                        print(f"  trial {i} {arm}: 抽出 {status}（この試行は捨てる）", flush=True)
-                        continue
-                    res = _result(client, document_id)
-                    got = {
-                        f["name"]: _norm(f.get("value_normalized") or f.get("value_raw"))
-                        for f in res.get("fields", [])
-                    }
-                    hits = 0
-                    for name, want in gold.items():
-                        hit = bool(want) and got.get(name, "") == want
-                        hits += int(hit)
-                        tally.note(doc.document_id, name, name in positional, arm, hit, i)
-                    row = {
-                        "document_id": doc.document_id,
-                        "trial": i,
-                        "hits": hits,
-                        "total": sum(1 for v in gold.values() if v),
-                        "run_id": res.get("run_id"),
-                    }
-                    (tally.control_runs if arm == "control" else tally.treat_runs).append(row)
-                    print(f"  trial {i} {arm}: {hits}/{row['total']}", flush=True)
-
-            client.delete(f"/documents/{document_id}")
+                    # **1 抽出ごとに帳票を上げ直す。** 同じ帳票を使い回すと、
+                    # 抽出が自動確定した時点で次の抽出が 409 で弾かれる
+                    # （確定値を無警告で置き換えないためのサーバ側の正しい振る舞い。
+                    #  supersede_review は needs_review にしか効かない）。
+                    # 前回の計測は全 run が needs_review に落ちていたので踏まなかった。
+                    document_id = _upload(client, image)
+                    try:
+                        status = _extract(client, document_id, str(schema["id"]), timeout_sec)
+                        if status != "succeeded":
+                            print(f"  trial {i} {arm}: 抽出 {status}（この試行は捨てる）",
+                                  flush=True)
+                            continue
+                        res = _result(client, document_id)
+                        got = {
+                            f["name"]: _norm(f.get("value_normalized") or f.get("value_raw"))
+                            for f in res.get("fields", [])
+                        }
+                        hits = 0
+                        for name, want in gold.items():
+                            hit = bool(want) and got.get(name, "") == want
+                            hits += int(hit)
+                            tally.note(doc.document_id, name, name in positional, arm, hit, i)
+                        row = {
+                            "document_id": doc.document_id,
+                            "trial": i,
+                            "hits": hits,
+                            "total": sum(1 for v in gold.values() if v),
+                            "run_id": res.get("run_id"),
+                        }
+                        (tally.control_runs if arm == "control" else tally.treat_runs).append(
+                            row
+                        )
+                        print(f"  trial {i} {arm}: {hits}/{row['total']}", flush=True)
+                    finally:
+                        client.delete(f"/documents/{document_id}")
 
     fields = [t.as_dict() for t in tally.per_field.values()]
     pos = [f for f in fields if f["position_dependent"]]

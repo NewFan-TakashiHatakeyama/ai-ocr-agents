@@ -105,34 +105,38 @@ def run(
                     },
                 )
 
-            document_id = _upload(client, Path(doc.image_uri))
-            print(f"[guard] {doc.document_id}: doc={document_id}", flush=True)
+            print(f"[guard] {doc.document_id}: {Path(doc.image_uri).name}", flush=True)
             for i in range(trials):
                 for arm, schema in schemas.items():
-                    status = _extract(client, document_id, str(schema["id"]), timeout_sec)
-                    if status != "succeeded":
-                        print(f"  trial {i} {arm}: 抽出 {status}（捨てる）", flush=True)
-                        continue
-                    res = _result(client, document_id)
-                    stats = res.get("region_stats") or {}
-                    mismatched = list(stats.get("mismatch_fields", []) or [])
-                    graded = [
-                        f["name"] for f in res.get("fields", [])
-                        if f.get("bbox") and f["name"] in arms[arm]
-                    ]
-                    rows.append({
-                        "document_id": doc.document_id,
-                        "arm": arm,
-                        "trial": i,
-                        "regions": len(arms[arm]),
-                        "graded": len(graded),
-                        "mismatched": len(mismatched),
-                        "mismatch_fields": mismatched,
-                        "layout_mismatch": bool(stats.get("layout_mismatch")),
-                    })
-                    print(f"  trial {i} {arm}: 判定対象 {len(graded)} / mismatch "
-                          f"{len(mismatched)} {mismatched}", flush=True)
-            client.delete(f"/documents/{document_id}")
+                    # **1 抽出ごとに帳票を上げ直す。** 使い回すと自動確定した
+                    # 時点で次の抽出が 409 で弾かれる（region_ab.py と同じ理由）。
+                    document_id = _upload(client, Path(doc.image_uri))
+                    try:
+                        status = _extract(client, document_id, str(schema["id"]), timeout_sec)
+                        if status != "succeeded":
+                            print(f"  trial {i} {arm}: 抽出 {status}（捨てる）", flush=True)
+                            continue
+                        res = _result(client, document_id)
+                        stats = res.get("region_stats") or {}
+                        mismatched = list(stats.get("mismatch_fields", []) or [])
+                        graded = [
+                            f["name"] for f in res.get("fields", [])
+                            if f.get("bbox") and f["name"] in arms[arm]
+                        ]
+                        rows.append({
+                            "document_id": doc.document_id,
+                            "arm": arm,
+                            "trial": i,
+                            "regions": len(arms[arm]),
+                            "graded": len(graded),
+                            "mismatched": len(mismatched),
+                            "mismatch_fields": mismatched,
+                            "layout_mismatch": bool(stats.get("layout_mismatch")),
+                        })
+                        print(f"  trial {i} {arm}: 判定対象 {len(graded)} / mismatch "
+                              f"{len(mismatched)} {mismatched}", flush=True)
+                    finally:
+                        client.delete(f"/documents/{document_id}")
 
     def _agg(arm: str) -> dict[str, Any]:
         sel = [r for r in rows if r["arm"] == arm]
