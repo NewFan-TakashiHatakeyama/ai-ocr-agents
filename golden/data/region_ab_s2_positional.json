@@ -1,0 +1,39 @@
+{
+ "_positional": {
+  "s2_sample5": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s2_sample18": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s2_sample8": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s2_sample15": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s2_sample21": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ]
+ }
+}
