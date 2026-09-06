@@ -811,6 +811,29 @@ def _rule_dto(rec: Any) -> dto.RuleDto:
     )
 
 
+@router.get("/doc-types", response_model=dto.DocTypeList)
+def list_doc_types(
+    principal: Principal = Depends(require_role("viewer")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.DocTypeList:
+    """登録済み帳票種別の一覧（取込時の種別指定に使う候補）。
+
+    GET /schemas とは別に置く。アップロードは uploader で通るのに /schemas は
+    admin 限定なので、そちらを候補源にすると「アップロードできる人には選択肢が
+    見えない」。fields も exclude_regions も返さない——名前と最新版 id だけが要る。
+    露出は POST /documents/{id}/classify の candidates（viewer）と同等で、
+    新しい情報は増えない。
+
+    スキーマ 0 件のテナントは空配列を返す。エラーにしない（ADR-0006）。
+    """
+    return dto.DocTypeList(
+        items=[
+            dto.DocTypeItem(doc_type=s.doc_type, schema_id=s.id, version=s.version)
+            for s in admin.list_schemas(principal.tenant_id)
+        ]
+    )
+
+
 @router.get("/schemas", response_model=dto.SchemaList)
 def list_schemas(
     principal: Principal = Depends(require_role("admin")),

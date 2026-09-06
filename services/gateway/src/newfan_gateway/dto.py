@@ -207,6 +207,16 @@ class SchemaList(BaseModel):
     items: list[SchemaDto]
 
 
+class DocTypeItem(BaseModel):
+    doc_type: str
+    schema_id: str
+    version: int
+
+
+class DocTypeList(BaseModel):
+    items: list[DocTypeItem] = Field(default_factory=list)
+
+
 class PutSchemaRequest(BaseModel):
     doc_type: str
     fields: list[SchemaFieldDto]
