@@ -187,3 +187,169 @@ def test_schema_for_prompt_handles_malformed_fields() -> None:
     }
     out = llm_nodes._schema_for_prompt({"doc_type": "x", "fields": ["junk", {"name": "a"}]})
     assert out["fields"] == ["junk", {"name": "a"}]
+
+
+# ---------- Phase 4: 読取領域を KIE ヒントとして渡す（既定 off・計測ゲート付き） ----------
+
+_PAGES_1 = [{"page_no": 1, "width": 1000, "height": 2000}]
+_PAGES_3 = [
+    {"page_no": 1, "width": 1000, "height": 2000},
+    {"page_no": 2, "width": 1000, "height": 2000},
+    {"page_no": 3, "width": 800, "height": 1600},
+]
+_SCHEMA_REGION = {
+    "doc_type": "invoice",
+    "fields": [
+        {"name": "total_amount", "type": "money_jpy", "region": {"page": 1, "rect": [0.3, 0.1, 0.7, 0.2]}},
+        {"name": "memo", "type": "string"},
+    ],
+}
+
+
+def test_ヒント既定offならプロンプトは現行と完全一致(monkeypatch) -> None:
+    """設計の約束は「精度改善を実測できた場合のみ出荷」。既定では領域を持つ
+    スキーマでも現行と 1 バイトも変わらないこと。
+    """
+    monkeypatch.delenv("REGION_KIE_HINTS", raising=False)
+    baseline = _kie_prompt(
+        {"doc_type": "invoice", "fields": [
+            {"name": "total_amount", "type": "money_jpy"}, {"name": "memo", "type": "string"}]}
+    )
+    assert llm_nodes._schema_for_prompt(_SCHEMA_REGION, _PAGES_1)["fields"][0].keys() == {
+        "name", "type"
+    }
+    provider = FakeProvider([_KIE_RESP])
+    llm_nodes.make_kie_extract(LLMAdapter(provider), _BUNDLE)(
+        {"spans": _SPANS, "layout_markdown": "# 請求書", "schema": _SCHEMA_REGION, "pages": _PAGES_1}
+    )
+    assert provider.calls[0] == baseline
+
+
+def test_ヒント有効時は画素へ射影した_region_px_を載せる(monkeypatch) -> None:
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    out = llm_nodes._schema_for_prompt(_SCHEMA_REGION, _PAGES_1)
+    assert out["fields"][0]["region_px"] == {"page": 1, "bbox": [300, 200, 700, 400]}
+    assert "region" not in out["fields"][0], "正規化座標をそのまま渡さない"
+    # 領域を持たない項目には何も足さない
+    assert out["fields"][1] == {"name": "memo", "type": "string"}
+
+
+def test_last_は総ページ数へ解決しページごとの寸法を使う(monkeypatch) -> None:
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    schema = {
+        "doc_type": "invoice",
+        "fields": [{"name": "total", "type": "money_jpy",
+                    "region": {"page": "last", "rect": [0.5, 0.5, 1.0, 0.75]}}],
+    }
+    out = llm_nodes._schema_for_prompt(schema, _PAGES_3)
+    # p3 は 800x1600
+    assert out["fields"][0]["region_px"] == {"page": 3, "bbox": [400, 800, 800, 1200]}
+
+
+def test_存在しないページを指す領域はヒントごと落とす(monkeypatch) -> None:
+    """1 ページ目へ縮退させると、まったく違う場所を指すヒントになり誤誘導になる。"""
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    schema = {
+        "doc_type": "invoice",
+        "fields": [{"name": "total", "type": "money_jpy",
+                    "region": {"page": 9, "rect": [0.1, 0.1, 0.2, 0.2]}}],
+    }
+    out = llm_nodes._schema_for_prompt(schema, _PAGES_1)
+    assert "region_px" not in out["fields"][0]
+    assert "region" not in out["fields"][0]
+
+
+def test_寸法の無いページの領域はヒントごと落とす(monkeypatch) -> None:
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    out = llm_nodes._schema_for_prompt(_SCHEMA_REGION, [{"page_no": 1, "image_uri": "x"}])
+    assert "region_px" not in out["fields"][0]
+
+
+def test_ヒントがあるときだけ_span_に座標を載せる(monkeypatch) -> None:
+    """座標を常に載せると領域を使っていない run のプロンプトまで膨らむ。"""
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    provider = FakeProvider([_KIE_RESP])
+    llm_nodes.make_kie_extract(LLMAdapter(provider), _BUNDLE)(
+        {"spans": _SPANS, "layout_markdown": "", "schema": _SCHEMA_REGION, "pages": _PAGES_1}
+    )
+    user = provider.calls[0][1]
+    assert '"bbox"' in user and '"region_px"' in user
+
+    provider2 = FakeProvider([_KIE_RESP])
+    llm_nodes.make_kie_extract(LLMAdapter(provider2), _BUNDLE)(
+        {"spans": _SPANS, "layout_markdown": "",
+         "schema": {"doc_type": "invoice", "fields": [{"name": "memo", "type": "string"}]},
+         "pages": _PAGES_1}
+    )
+    assert '"bbox"' not in provider2.calls[0][1]
+
+
+def test_領域を使わないプロンプトはスナップショットと完全一致(monkeypatch) -> None:
+    """**コミット済みの実文字列**と突き合わせる。
+
+    以前の不変テストは「現行コードを 2 回呼んで比べる」形だったので、プロンプト
+    テンプレート自体を書き換えても常に緑だった。実際に Phase 4 の作業で
+    kie_extract.yaml へヒント文を足してしまい、ヒント off でも全テナントのプロンプトが
+    1016 バイト変わった状態に気付けなかった。テンプレートは全 KIE 呼び出しが読むので、
+    領域を 1 つも使っていないテナントまで巻き込む。外部の固定値で縛る。
+    """
+    import pathlib
+
+    monkeypatch.delenv("REGION_KIE_HINTS", raising=False)
+    snap = pathlib.Path(__file__).parent / "snapshots" / "kie_prompt_no_region.txt"
+    want_system, want_user = snap.read_text(encoding="utf-8").split("\n---8<---\n", 1)
+
+    provider = FakeProvider([_KIE_RESP])
+    llm_nodes.make_kie_extract(LLMAdapter(provider), _BUNDLE)(
+        {
+            "spans": [Span(span_id=11, page=1, text="¥128,000", conf=0.72, bbox=[0, 0, 1, 1])],
+            "layout_markdown": "# 請求書",
+            "schema": {"doc_type": "invoice", "fields": [{"name": "total_amount", "type": "money_jpy"}]},
+            "pages": [{"page_no": 1, "width": 1000, "height": 2000}],
+        }
+    )
+    got_system, got_user = provider.calls[0]
+    assert got_system == want_system
+    assert got_user == want_user, "領域を使わない run のプロンプトが変わっている"
+
+
+def test_ヒント有効でも領域なしスキーマのプロンプトは変わらない(monkeypatch) -> None:
+    """フラグを立てても、領域を持たないスキーマには何も足さない。"""
+    import pathlib
+
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    snap = pathlib.Path(__file__).parent / "snapshots" / "kie_prompt_no_region.txt"
+    _, want_user = snap.read_text(encoding="utf-8").split("\n---8<---\n", 1)
+
+    provider = FakeProvider([_KIE_RESP])
+    llm_nodes.make_kie_extract(LLMAdapter(provider), _BUNDLE)(
+        {
+            "spans": [Span(span_id=11, page=1, text="¥128,000", conf=0.72, bbox=[0, 0, 1, 1])],
+            "layout_markdown": "# 請求書",
+            "schema": {"doc_type": "invoice", "fields": [{"name": "total_amount", "type": "money_jpy"}]},
+            "pages": [{"page_no": 1, "width": 1000, "height": 2000}],
+        }
+    )
+    assert provider.calls[0][1] == want_user
+
+
+def test_明細フィールドにはヒントを注入しない(monkeypatch) -> None:
+    """行数が増えたり次ページへ続いた帳票で「領域に近い行だけ」を選ばせると、
+    行が静かに切り捨てられる。位置ガードは TableResult を見ないので気付けない。
+    """
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    schema = {
+        "doc_type": "invoice",
+        "fields": [
+            {
+                "name": "line_items",
+                "type": "table",
+                "columns": [{"name": "item", "type": "string"}],
+                "region": {"page": 1, "rect": [0.1, 0.4, 0.9, 0.8]},
+            }
+        ],
+    }
+    out = llm_nodes._schema_for_prompt(schema, [{"page_no": 1, "width": 1000, "height": 2000}])
+    assert "region_px" not in out["fields"][0]
+    assert "region" not in out["fields"][0]
+    assert out["fields"][0]["columns"] == [{"name": "item", "type": "string"}]

@@ -1,0 +1,9 @@
+// 読取領域ヒント（Phase 4）の A/B 実測用フィクスチャ（設計 §5.6 の計測ゲート）。
+// リリースゲートの dev.jsonl とは別物。ここは「**位置でしか区別できない項目**を
+// 含むこと」が目的で、指標も別（region_ab.py が項目ごとの勝敗を数える）。
+//
+// 位置依存の中核は sample2.png の発行元 vs 宛先。どちらも会社名で、語彙では
+// 区別できず、紙面上の左右でしか決まらない（請求書として最も普通の形）。
+// image_uri はローカルパス。実帳票は顧客データなのでリポジトリに置かない（§14.2）。
+{"document_id": "ab_invoice_001", "doc_type": "invoice", "image_uri": "data/dev_pages/sample2.png", "fields": [{"name": "issuer_name", "value": "わくわく物産株式会社", "critical": true}, {"name": "customer_name", "value": "株式会社エイピーエム", "critical": true}, {"name": "issuer_address", "value": "東京都新宿区四谷9-9-9サプライビル2F"}, {"name": "customer_address", "value": "神奈川県横浜市港北区樽町エイピービル"}, {"name": "invoice_no", "value": "GS0001"}, {"name": "total_amount", "value": "7003", "critical": true}]}
+{"document_id": "ab_quotation_001", "doc_type": "quotation", "image_uri": "data/dev_pages/sample.png", "fields": [{"name": "addressee_name", "value": "AAA食品株式会社AAA支社御中", "critical": true}, {"name": "quote_total_amount", "value": "136998", "critical": true}, {"name": "subtotal_amount", "value": "126850"}, {"name": "tax_amount", "value": "10148"}]}

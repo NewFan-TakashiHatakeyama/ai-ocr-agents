@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "region_ab.jsonl の各項目に与える読取領域（Phase 4 の介入条件）。",
+    "座標はスキーマレス抽出で実際に得られた bbox を正規化し、UI のゴースト確定と同じく",
+    "各辺へおよそ 2% のゆとりを付けたもの。人が矩形を描いたときの精度を模している。",
+    "_positional は「位置でしか区別できない項目」。全体平均はもともと簡単な項目に",
+    "薄められて効果が見えなくなるので、この集合だけを別建てで数える。"
+  ],
+  "_positional": {
+    "invoice": ["issuer_name", "customer_name", "issuer_address", "customer_address"],
+    "quotation": ["addressee_name", "quote_total_amount"]
+  },
+  "invoice": {
+    "issuer_name": { "page": 1, "rect": [0.51, 0.115, 0.72, 0.168] },
+    "issuer_address": { "page": 1, "rect": [0.51, 0.142, 0.76, 0.208] },
+    "customer_name": { "page": 1, "rect": [0.065, 0.152, 0.27, 0.208] },
+    "customer_address": { "page": 1, "rect": [0.065, 0.096, 0.31, 0.165] },
+    "invoice_no": { "page": 1, "rect": [0.669, 0.063, 0.836, 0.117] },
+    "total_amount": { "page": 1, "rect": [0.77, 0.689, 0.857, 0.748] }
+  },
+  "quotation": {
+    "addressee_name": { "page": 1, "rect": [0.032, 0.121, 0.229, 0.184] },
+    "quote_total_amount": { "page": 1, "rect": [0.276, 0.255, 0.422, 0.314] },
+    "subtotal_amount": { "page": 1, "rect": [0.546, 0.786, 0.651, 0.838] },
+    "tax_amount": { "page": 1, "rect": [0.554, 0.797, 0.651, 0.85] }
+  }
+}
