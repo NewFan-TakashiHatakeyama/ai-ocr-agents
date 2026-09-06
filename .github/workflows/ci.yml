@@ -101,6 +101,30 @@ jobs:
         # critical は片方だけ直すと critical_exact_match が実態とずれる。機械で突き合わせる。
         run: uv run --no-sync python golden/scripts/check_critical.py
 
+  web:
+    name: web (typecheck / build)
+    runs-on: ubuntu-latest
+    # web には自動テストが 1 本も無く、CI にも載っていなかった。検証画面の変更が
+    # 機械的に守られないと、型が合わない・ビルドが通らない状態でマージできてしまう。
+    # `next lint` は入れない: eslint の依存も設定ファイルも無く、対話セットアップを
+    # 要求して失敗する（入れるなら eslint 一式の導入とセットで別途）。
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: npm ci
+        run: npm ci
+        working-directory: web
+      - name: typecheck
+        run: npm run typecheck
+        working-directory: web
+      - name: build
+        run: npm run build
+        working-directory: web
+
   images:
     name: docker build (軽量イメージ)
     runs-on: ubuntu-latest

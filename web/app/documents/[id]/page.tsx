@@ -21,6 +21,10 @@ import { useToasts } from "@/lib/toast";
 import { fmtRemaining, useDocumentLock } from "@/lib/useDocumentLock";
 import { useSchemaSaved, type SchemaSaved } from "@/lib/useSchemaSaved";
 
+// 位置ガードの参考表示に必ず添える断り。これを外すと「エラーが出ている」と読まれる。
+const NOTE_NO_EFFECT =
+  "\n参考表示です。値・確信度・「要確認」の件数には影響しません。";
+
 // SCR-03 検証画面（HITL, §8.2/§8.3）。本プロダクトの中核。全操作キーボード完結（§8.4）。
 export default function ReviewPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -118,8 +122,28 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     (r: SchemaSaved) => {
       rememberCreated({ docType: r.docType, schemaId: r.schemaId });
       afterSchemaSaved(r, true);
+      // この帳票の種別を確定する。**作成（テンプレート化）のときだけ**行う。
+      // onRegionsEdited（領域編集）でも呼ぶと、領域を直すたびに、利用者が取込時に
+      // 指定した種別を黙って上書きしてしまう。
+      // 書き戻しは非同期だが、この画面はテンプレート化後も残るので中断されない
+      // （ボタン側に置くとバナーごとアンマウントされて消える）。
+      // 失敗しても致命ではない（スキーマは既に出来ている）ので警告に留める。
+      void api
+        .patchDocument(id, { doc_type: r.docType })
+        .then(() => {
+          qc.invalidateQueries({ queryKey: ["documents"] });
+          // classify は staleTime 5 分。落とさないと「declared になったのに
+          // 推定バナーが古いまま」になる
+          qc.invalidateQueries({ queryKey: ["classify", id] });
+        })
+        .catch(() => {
+          push({
+            kind: "warn",
+            message: "スキーマは作成できましたが、この帳票の種別の記録に失敗しました。",
+          });
+        });
     },
-    [rememberCreated, afterSchemaSaved],
+    [id, qc, push, rememberCreated, afterSchemaSaved],
   );
   const onRegionsEdited = useCallback(
     (r: SchemaSaved) => afterSchemaSaved(r, false),
@@ -348,6 +372,17 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   // 件数 0 でバッジを出さないと、KIE の主要入力が 1 つ欠けたことが誰にも見えない。
   const mdDropped = regionStats.markdown_dropped_pages ?? [];
   const showExcludeBadge = excludedTotal > 0 || mdDropped.length > 0;
+  // 位置ガード（読取領域と違う位置で項目が見つかった）の所見。**参考表示に閉じる**：
+  // サーバは既定 shadow で、この値からレビュー項目も確信度も作らない。ここでも
+  // pend / auto / total / 確定ボタンの活性のいずれにも入れない（入れた瞬間に
+  // 「表示しただけのつもりがレビューが増える」になる）。
+  const mismatchFields: string[] = regionStats.mismatch_fields ?? [];
+  // 過半がずれているなら「別レイアウトの帳票」とみなし、項目ごとのマークは出さない。
+  // 全項目に印が付くと「取引先 B の帳票が全部エラー」に見えるため、サーバ側も同じ
+  // 条件で per-field の所見を抑止している。UI もそれに揃える。
+  const layoutMismatch = regionStats.layout_mismatch === true;
+  const labelOfField = (name: string) =>
+    data.fields.find((f) => f.name === name)?.label ?? name;
   // 編集対象の doc_type は「サーバが解決した doc_type → このセッションで作成した
   // doc_type」の順。どちらも取れないときは編集させない（空のプリロードで保存すると
   // 既存の定義を空の新版で上書きしてしまう）。
@@ -414,6 +449,23 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             )}
           </span>
         )}
+        {mismatchFields.length > 0 && (
+          <span
+            className="rv-rgnbadge"
+            title={
+              layoutMismatch
+                ? "設定した読取領域の多くと違う位置で項目が見つかりました。別レイアウトの帳票（別の取引先など）の可能性があります。" +
+                  NOTE_NO_EFFECT
+                : `設定した読取領域の外で見つかった項目: ${mismatchFields
+                    .map(labelOfField)
+                    .join("・")}` + NOTE_NO_EFFECT
+            }
+          >
+            {layoutMismatch
+              ? "📐 別レイアウトの可能性（参考）"
+              : `📐 領域外で検出 ${mismatchFields.length} 項目（参考）`}
+          </span>
+        )}
         {canEditRegions && (
           <EditRegions
             documentId={id}
@@ -440,8 +492,12 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           「自動発見」バナーが出る（敵対的レビュー確定）。undefined なら出さない側に倒す */}
       {data.schema_id === null && createdDocType === null && (
         <div className="tpl-banner" role="status">
+          {/* 「自動抽出できます」とは書かない: 実際には次回もアップロード後に人が
+              「抽出を開始」を押す必要があり、テンプレートが自動で選ばれるのは
+              種別を判定できた場合だけ（gateway routers.py の classify_document）。
+              能力を先取りした文言は「効くと言われて効かない」体験になる */}
           🧩 この抽出は<b>スキーマなしの自動発見</b>です。項目を確認して
-          テンプレート化すると、次回から同じ定義で自動抽出できます。
+          テンプレート化すると、次回の同種帳票でこの定義を選んで抽出できます。
           <span className="spacer" />
           {hasRole(me.role, "admin") ? (
             <TemplatizeSchema
@@ -458,9 +514,11 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
       )}
       {createdDocType !== null && (
         <div className="tpl-banner" role="status">
+          {/* 「自動抽出できます」とは書かない: 抽出の開始は明示クリックのまま
+              （ADR-0006）。ここで約束できるのは「定義が既定で選ばれる」ところまで */}
           ✅ スキーマ「<b>{createdDocType}</b>」を作成しました。この帳票の値はこのまま
-          確認・確定できます。次回の同種帳票は、ファイル名に種別を含めるか取込時に
-          種別を指定すると、このスキーマが自動で選ばれます（抽出画面でも選べます）。
+          確認・確定できます。次回の同種帳票は、取り込むときに種別
+          「<b>{createdDocType}</b>」を選ぶと、この定義が抽出画面で自動的に選ばれます。
         </div>
       )}
       {readOnly && (
@@ -500,7 +558,12 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             excludeRegions={data.applied_exclude_regions ?? []}
           />
         </div>
-        <FieldPanel fields={data.fields} tables={data.tables} readOnly={readOnly} />
+        <FieldPanel
+          fields={data.fields}
+          tables={data.tables}
+          readOnly={readOnly}
+          mismatchFields={layoutMismatch ? undefined : new Set(mismatchFields)}
+        />
       </div>
 
       <div className="rv-foot">

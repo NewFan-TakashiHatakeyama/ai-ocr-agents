@@ -162,6 +162,13 @@ export interface SchemaDto {
   source_page_count?: number | null;
 }
 
+/** 取込時の種別指定・分類の候補（GET /doc-types）。fields は含まない軽い一覧。 */
+export interface DocTypeDto {
+  doc_type: string;
+  schema_id: string;
+  version: number;
+}
+
 export interface ExtractAccepted {
   job_id: string;
   run_id: string;

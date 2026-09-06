@@ -161,16 +161,13 @@ def _require_document(repo: Repository, tenant_id: str, document_id: str) -> Doc
     return doc
 
 
-@router.get("/documents/{document_id}", response_model=dto.DocumentMeta)
-def get_document(
-    document_id: str,
-    principal: Principal = Depends(require_role("viewer")),
-    repo: Repository = Depends(get_repo),
-) -> dto.DocumentMeta:
-    doc = _require_document(repo, principal.tenant_id, document_id)
-    # ページ寸法は**単体取得でのみ**埋める（設計 §6）。一覧 API は DocumentMeta を
-    # 共用しており、そちらで埋めると帳票 1 件ごとに pages を引く N+1 になる。
-    pages = repo.get_pages(principal.tenant_id, document_id)
+def _document_meta(repo: Repository, tenant_id: str, doc: DocumentRecord) -> dto.DocumentMeta:
+    """単体取得の DocumentMeta（pages 込み）。
+
+    ページ寸法は**単体取得でのみ**埋める（設計 §6）。一覧 API は DocumentMeta を
+    共用しており、そちらで埋めると帳票 1 件ごとに pages を引く N+1 になる。
+    """
+    pages = repo.get_pages(tenant_id, doc.id)
     return dto.DocumentMeta(
         document_id=doc.id,
         status=doc.status,
@@ -182,6 +179,49 @@ def get_document(
             for p in sorted(pages, key=lambda x: x.page_no)
         ],
     )
+
+
+@router.get("/documents/{document_id}", response_model=dto.DocumentMeta)
+def get_document(
+    document_id: str,
+    principal: Principal = Depends(require_role("viewer")),
+    repo: Repository = Depends(get_repo),
+) -> dto.DocumentMeta:
+    doc = _require_document(repo, principal.tenant_id, document_id)
+    return _document_meta(repo, principal.tenant_id, doc)
+
+
+@router.patch("/documents/{document_id}", response_model=dto.DocumentMeta)
+def patch_document(
+    document_id: str,
+    body: dto.PatchDocumentRequest,
+    principal: Principal = Depends(require_role("admin")),
+    repo: Repository = Depends(get_repo),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.DocumentMeta:
+    """帳票の種別を後から確定する（テンプレート化からの書き戻し）。
+
+    **登録済みスキーマの doc_type しか受け付けない。** classify の declared 分岐は
+    `doc.doc_type in latest` の完全一致で、canonical_doc_type（「請求書」→ invoice）を
+    通さない。任意文字列を許すと「書き戻したのに declared にならない」が無言で成立する。
+    llm_hint の登録が未登録 doc_type を弾いているのと同じ理由。
+
+    権限は admin。唯一の呼び出し元がテンプレート化（PUT /schemas ＝ admin）なので、
+    緩めると「テンプレート化はできないのに種別だけ直せる」逆向きの穴になる。
+
+    ロックは取らない。doc_type は原本にも抽出結果にも触らないため、他者が確認中でも
+    通す。web 側の発火点は「admin が自分でテンプレート化した直後」だけで競合窓が無い。
+    """
+    doc_type = body.doc_type.strip()
+    if not doc_type:
+        raise ApiError("E1003", "帳票種別（doc_type）を指定してください")
+    doc = _require_document(repo, principal.tenant_id, document_id)
+    if admin.get_schema(principal.tenant_id, doc_type) is None:
+        raise ApiError("E1001", "スキーマ未登録の帳票種別です", details={"doc_type": doc_type})
+    if doc.doc_type != doc_type:
+        repo.set_document_doc_type(principal.tenant_id, document_id, doc_type)
+        doc = _require_document(repo, principal.tenant_id, document_id)
+    return _document_meta(repo, principal.tenant_id, doc)
 
 
 @router.delete("/documents/{document_id}", response_model=dto.DocumentDeleted)
@@ -768,6 +808,29 @@ def _rule_dto(rec: Any) -> dto.RuleDto:
         # 再現率ゲートが必要。
         activatable=(rec.rule_type == "llm_hint" and rec.created_by != "agent")
         or is_activatable(rec.validation_report),
+    )
+
+
+@router.get("/doc-types", response_model=dto.DocTypeList)
+def list_doc_types(
+    principal: Principal = Depends(require_role("viewer")),
+    admin: AdminRepository = Depends(get_admin),
+) -> dto.DocTypeList:
+    """登録済み帳票種別の一覧（取込時の種別指定に使う候補）。
+
+    GET /schemas とは別に置く。アップロードは uploader で通るのに /schemas は
+    admin 限定なので、そちらを候補源にすると「アップロードできる人には選択肢が
+    見えない」。fields も exclude_regions も返さない——名前と最新版 id だけが要る。
+    露出は POST /documents/{id}/classify の candidates（viewer）と同等で、
+    新しい情報は増えない。
+
+    スキーマ 0 件のテナントは空配列を返す。エラーにしない（ADR-0006）。
+    """
+    return dto.DocTypeList(
+        items=[
+            dto.DocTypeItem(doc_type=s.doc_type, schema_id=s.id, version=s.version)
+            for s in admin.list_schemas(principal.tenant_id)
+        ]
     )
 
 

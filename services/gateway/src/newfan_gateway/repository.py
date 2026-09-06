@@ -42,6 +42,16 @@ class Repository(Protocol):
     def get_latest_run(self, tenant_id: str, document_id: str) -> Optional[RunRecord]: ...
     def supersede_review_runs(self, tenant_id: str, document_id: str) -> int: ...
     def set_document_status(self, tenant_id: str, document_id: str, status: str) -> None: ...
+    def set_document_doc_type(self, tenant_id: str, document_id: str, doc_type: str) -> None:
+        """帳票種別を確定する（テンプレート化からの書き戻し）。
+
+        **updated_at は進めない。** documents.updated_at の読み手は
+        get_delete_blocker の「確定処理中の窓」判定だけで、set_document_status が
+        そこを進めるのは status 遷移＝処理が動いた証拠だから。種別というメタ情報の
+        更新でそこを進めると「種別を直しただけで削除が stale_minutes 分ブロック
+        される」副作用が出る。
+        """
+        ...
 
     def get_delete_blocker(
         self, tenant_id: str, document_id: str, *, stale_minutes: int
@@ -184,6 +194,12 @@ class InMemoryRepository:
         if doc is not None:
             doc.status = status
             self._doc_touched[document_id] = datetime.now(timezone.utc)
+
+    def set_document_doc_type(self, tenant_id: str, document_id: str, doc_type: str) -> None:
+        doc = self.get_document(tenant_id, document_id)
+        if doc is not None:
+            doc.doc_type = doc_type
+            # _doc_touched は**触らない**（Pg 側で updated_at を進めないのと対称）
 
     # --- 削除（§6.2 DELETE /documents/{id}） ---
 

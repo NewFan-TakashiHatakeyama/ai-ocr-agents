@@ -623,6 +623,26 @@ a {
   background: var(--surface); color: inherit; font-size: 13px; min-width: 200px;
 }
 .extract-hint { color: var(--ink3); font-size: 12px; }
+/* 位置ガード（shadow）の参考表示。**確定的な指摘ではない**ことを破線で示す。
+   赤系は使わない（赤は除外領域バッジと低確信 bbox が既に予約している） */
+.rv-rgnbadge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px; border-radius: 7px;
+  background: rgba(70, 100, 150, 0.09);
+  border: 1px dashed rgba(70, 100, 150, 0.35);
+  color: var(--ink2); font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.rgn-mark {
+  padding: 1px 5px; border-radius: 5px; font-size: 10px;
+  border: 1px dashed rgba(70, 100, 150, 0.45); color: var(--ink3);
+  background: rgba(70, 100, 150, 0.06); white-space: nowrap;
+}
+/* 一覧トップバーの取込種別ピッカー（任意指定。未選択が既定） */
+.upload-doctype { display: inline-flex; align-items: center; gap: 6px; }
+.upload-doctype select {
+  padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface); color: inherit; font-size: 12px; max-width: 190px;
+}
 .extract-suggest {
   background: #f6fbfa;
   border: 1px solid var(--line);

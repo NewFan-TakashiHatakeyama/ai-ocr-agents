@@ -207,6 +207,16 @@ class SchemaList(BaseModel):
     items: list[SchemaDto]
 
 
+class DocTypeItem(BaseModel):
+    doc_type: str
+    schema_id: str
+    version: int
+
+
+class DocTypeList(BaseModel):
+    items: list[DocTypeItem] = Field(default_factory=list)
+
+
 class PutSchemaRequest(BaseModel):
     doc_type: str
     fields: list[SchemaFieldDto]
@@ -430,6 +440,17 @@ class WebhookEndpointList(BaseModel):
 
 class PatchRuleRequest(BaseModel):
     status: str  # "active"（有効化）/ "retired"（退役）
+
+
+class PatchDocumentRequest(BaseModel):
+    """帳票メタの部分更新。v1 は doc_type のみ。
+
+    doc_type は**必須・非 null**にする。「種別を消す」需要が無いのに Optional に
+    すると、「キー省略」と「null 明示」の区別（model_fields_set）を呼び出し側が
+    全員意識する必要が出る。将来ほかのフィールドを足すときに、その規律ごと入れる。
+    """
+
+    doc_type: str
 
 
 class CreateLlmHintRequest(BaseModel):

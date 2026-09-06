@@ -203,8 +203,16 @@ class PgContextStore:
             run_upd = c.execute(
                 text(
                     "UPDATE extraction_runs SET status = :st, finished_at = now(), "
-                    "metrics = COALESCE(metrics, '{}'::jsonb) || CAST(:m AS jsonb) "
-                    "WHERE id = :r AND NOT (status = 'confirmed' AND :st <> 'confirmed')"
+                    "metrics = (COALESCE(metrics, '{}'::jsonb) || CAST(:m AS jsonb))"
+                    # region_stats が空なら **キーごと落とす**。単に書かないだけ
+                    # だと、同じ run を再実行したときに前回の mismatch_fields が
+                    # 残り、検証画面が解消済みの所見を出し続ける（state 側は
+                    # ocr_nodes / nodes が毎回 pop して対策済みだが DB 側は
+                    # 素通しだった）。全 run に region:null を書く案は採らない
+                    # ——「領域を使っていない run は完全に no-op」という後方互換を
+                    # DB 側で破ってしまう。
+                    + ("" if region_stats else " - 'region'") +
+                    " WHERE id = :r AND NOT (status = 'confirmed' AND :st <> 'confirmed')"
                 ),
                 {
                     "st": status,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from gw_helpers import auth
+from gw_helpers import auth, make_token
 
 
 # ---- スキーマ（SCR-06） ----
@@ -115,3 +115,40 @@ def test_metrics_summary(ctx: SimpleNamespace) -> None:
 
 def test_metrics_require_admin(ctx: SimpleNamespace) -> None:
     assert ctx.client.get("/v1/metrics/summary", headers=auth("uploader")).status_code == 403
+
+
+def test_doc_types_はuploaderでも引ける(ctx: SimpleNamespace) -> None:
+    """このエンドポイントの存在理由そのもの。
+
+    取込時に種別を選ばせたいが、アップロードは uploader で通るのに
+    GET /schemas は admin 限定。/schemas を候補源にすると
+    「アップロードできる人には選択肢が見えない」。
+    """
+    forbidden = ctx.client.get("/v1/schemas", headers=auth("uploader"))
+    assert forbidden.status_code == 403, forbidden.text
+
+    r = ctx.client.get("/v1/doc-types", headers=auth("uploader"))
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert [i for i in items if i["doc_type"] == "invoice"]
+    # fields は返さない（候補を配るだけ）
+    assert set(items[0]) == {"doc_type", "schema_id", "version"}
+
+
+def test_doc_types_は種別ごと最新版だけを返す(ctx: SimpleNamespace) -> None:
+    body = {
+        "doc_type": "invoice",
+        "fields": [{"name": "total_amount", "label": "合計", "type": "money_jpy"}],
+    }
+    assert ctx.client.put("/v1/schemas", headers=auth("admin"), json=body).status_code == 200
+    r = ctx.client.get("/v1/doc-types", headers=auth("uploader"))
+    invoices = [i for i in r.json()["items"] if i["doc_type"] == "invoice"]
+    assert len(invoices) == 1
+    assert invoices[0]["version"] == 5  # seed が v4
+
+
+def test_doc_types_は他テナントに漏れない(ctx: SimpleNamespace) -> None:
+    other = {"Authorization": f"Bearer {make_token(role='admin', tenant='ten_2')}"}
+    r = ctx.client.get("/v1/doc-types", headers=other)
+    assert r.status_code == 200, r.text
+    assert r.json()["items"] == []

@@ -268,3 +268,60 @@ def test_フィールドのbboxがNULLでなく保存される(env) -> None:
         ).mappings().first()
     assert row["bbox"] == [300, 180, 430, 212]
     assert row["page_no"] == 1
+
+
+def test_領域を外した再実行で古いregionが消える(env) -> None:
+    """同じ run を領域なしで保存し直したら、前回の所見を残さないこと。
+
+    metrics は浅いマージなので、単に「region を書かない」だけだと前回の
+    mismatch_fields が残り、検証画面が解消済みの所見を出し続ける
+    （参考表示を始めて初めて人の目に見えるようになった穴）。
+    """
+    from sqlalchemy import text
+
+    owner, store, _doc, run_id = env
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review", fallback_pages=[2],
+        region_stats={"mismatch_fields": ["issuer_name"], "layout_mismatch": False},
+    )
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review", fallback_pages=[2],
+        region_stats=None,
+    )
+    with owner.begin() as c:
+        m = c.execute(
+            text("SELECT metrics FROM extraction_runs WHERE id=:r"), {"r": run_id}
+        ).scalar_one()
+    assert "region" not in m
+    assert m["fallback_pages"] == [2]  # 他のキーは巻き込まない
+
+
+def test_needs_reviewからconfirmedの再保存でregionが残る(env) -> None:
+    """所見つきの run を確定しても region が消えないこと。
+
+    finalize も同じ region を渡すので消えないはず——これが落ちるなら、
+    上の「空なら落とす」変更は確定時に所見を消してしまうので入れてはいけない。
+    """
+    from sqlalchemy import text
+
+    owner, store, _doc, run_id = env
+    stats = {"mismatch_fields": ["issuer_name"], "layout_mismatch": False}
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review", region_stats=stats,
+    )
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="confirmed", region_stats=stats,
+    )
+    with owner.begin() as c:
+        m = c.execute(
+            text("SELECT metrics FROM extraction_runs WHERE id=:r"), {"r": run_id}
+        ).scalar_one()
+    assert m["region"] == stats

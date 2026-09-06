@@ -28,9 +28,23 @@ function DocumentsInner() {
   const queue = useQuery({ queryKey: ["review-queue"], queryFn: () => api.reviewQueue() });
   const queueCount = queue.data?.items.length ?? 0;
 
+  // 取込時の種別指定。"" = 未指定（＝スキーマなしの自動発見。ADR-0006 の既定）。
+  // 候補は GET /doc-types から取る。listSchemas は admin 限定で、アップロードは
+  // uploader で通るため、そちらを使うと権限の低い人には選択肢が空になる。
+  const [docType, setDocType] = useState("");
+  const docTypes = useQuery({
+    queryKey: ["doc-types"],
+    queryFn: () => api.listDocTypes(),
+    staleTime: 5 * 60_000,
+    retry: false, // 取れなくてもアップロード導線は成立する（未指定で通す）
+  });
+
   // アップロード → 一覧更新 → その帳票ページへ（そこで「抽出を開始」できる）
   const upload = useMutation({
-    mutationFn: (file: File) => api.uploadDocument(file),
+    // docType は**引数で渡さない**。onFiles はボタン経路と D&D 経路の両方から
+    // 呼ばれるので、引数にすると片方の配線漏れが「D&D のときだけ無指定」という
+    // 気付きにくい壊れ方になる。クロージャで読めば両経路が構造的に同じ値を使う。
+    mutationFn: (file: File) => api.uploadDocument(file, docType || undefined),
     onSuccess: (created) => {
       qc.invalidateQueries({ queryKey: ["documents"] });
       push({ kind: "ok", message: "アップロードしました。抽出を開始できます。" });
@@ -76,6 +90,28 @@ function DocumentsInner() {
             aria-label="検索"
           />
         </span>
+        {/* 候補が 1 件も無いテナントでは**描画しない**。初回の 1 枚を取り込む人に
+            「選ぶべき何かがある」と誤解させないため（ADR-0006 のテンプレートレス優先）。
+            既定は必ず「未指定」で、選ばなければリクエストは従来と 1 バイトも変わらない。 */}
+        {(docTypes.data?.items.length ?? 0) > 0 && (
+          <label className="upload-doctype">
+            <span className="sub">種別</span>
+            <select
+              value={docType}
+              onChange={(e) => setDocType(e.target.value)}
+              disabled={upload.isPending}
+              aria-label="帳票種別（任意）"
+              title="指定すると、この帳票の抽出画面でその定義が既定で選ばれます。未指定でも取り込めます。"
+            >
+              <option value="">未指定（自動発見）</option>
+              {docTypes.data!.items.map((t) => (
+                <option key={t.schema_id} value={t.doc_type}>
+                  {t.doc_type}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <input
           ref={fileRef}
           type="file"

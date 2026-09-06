@@ -345,6 +345,17 @@ class PgRepository:
                 {"s": status, "t": tenant_id, "d": document_id},
             )
 
+    def set_document_doc_type(self, tenant_id, document_id, doc_type):
+        # set_document_status と違い **updated_at を進めない**（Protocol の docstring
+        # 参照）。意図を SQL の見た目で示すため ORM ではなく生 SQL に揃える。
+        # RLS ポリシーは USING のみで WITH CHECK が無いため、WHERE から tenant_id を
+        # 落とすと DB 側は他テナント行の更新を止めない。WHERE が唯一の防御になる。
+        with self._rls(tenant_id) as s:
+            s.execute(
+                text("UPDATE documents SET doc_type=:dt WHERE tenant_id=:t AND id=:d"),
+                {"dt": doc_type, "t": tenant_id, "d": document_id},
+            )
+
     # --- 削除（§6.2 DELETE /documents/{id}） ---
 
     def get_delete_blocker(self, tenant_id, document_id, *, stale_minutes):
