@@ -3,7 +3,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { use, useCallback, useEffect, useMemo, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DeleteDocument } from "@/components/DeleteDocument";
 import { DocViewer } from "@/components/DocViewer";
@@ -126,6 +126,23 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     [afterSchemaSaved],
   );
 
+  // **表示している run が入れ替わったら編集バッファを捨てる。**
+  // edits はモジュールグローバルで、これまで clearEdits は確定成功時にしか呼ばれて
+  // いなかった。再抽出は「画面を開いたまま run を差し替える」初めての導線なので、
+  // 残しておくと旧 run に入力した値が 500ms デバウンスの自動保存で**新 run の
+  // corrections として送られ、そのまま確定される**（新しい抽出で正しく取れた値を
+  // 古い手入力が上書きする）。
+  const shownRunId = data?.run_id ?? null;
+  const lastRunRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!shownRunId) return;
+    if (lastRunRef.current !== null && lastRunRef.current !== shownRunId) {
+      clearEdits();
+      select(null);
+    }
+    lastRunRef.current = shownRunId;
+  }, [shownRunId, clearEdits, select]);
+
   const pending = useMemo(
     () => (data ? sortFields(data.fields).filter((f) => f.review_status === "pending") : []),
     [data],
@@ -139,6 +156,11 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     staleTime: 5 * 60_000,
   });
   const pageDims = useMemo(() => meta.data?.pages ?? [], [meta.data]);
+  // ページ寸法が揃うまで領域の画面を開かせない。開けてしまうと、プリロードの
+  // 非同期コールバックが**マウント時の空の寸法表**を掴んだまま既存領域を復元できず、
+  // その後に寸法が届いても「警告は消えているのに領域は見えない」画面になる。
+  // 保全ロジックが最終防波堤として残るが、そもそも入口を閉じる方が確実。
+  const pageDimsReady = pageDims.length > 0;
 
   const fallbackPages = useMemo(() => new Set(data?.fallback_pages ?? []), [data]);
   const pages = useMemo(() => {
@@ -320,6 +342,12 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     (regionStats.excluded_spans ?? 0) +
     (regionStats.excluded_cells ?? 0) +
     (regionStats.excluded_rows ?? 0);
+  // 除外領域を置いたページは、レイアウト解析結果（本文テキスト）を**ページ単位で**
+  // 抽出 AI の入力から落としている。座標を持たないので部分的に消せないため。
+  // 印影のように文字を持たない対象だと span もセルも 0 件で、この事実だけが残る。
+  // 件数 0 でバッジを出さないと、KIE の主要入力が 1 つ欠けたことが誰にも見えない。
+  const mdDropped = regionStats.markdown_dropped_pages ?? [];
+  const showExcludeBadge = excludedTotal > 0 || mdDropped.length > 0;
   // 編集対象の doc_type は「サーバが解決した doc_type → このセッションで作成した
   // doc_type」の順。どちらも取れないときは編集させない（空のプリロードで保存すると
   // 既存の定義を空の新版で上書きしてしまう）。
@@ -329,6 +357,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   const canEditRegions =
     hasRole(me.role, "admin") &&
     !readOnly &&
+    pageDimsReady &&
     Boolean(editDocType) &&
     (typeof data.schema_id === "string" || created !== null);
 
@@ -361,12 +390,28 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           確定 {auto} ·{" "}
           <b style={{ color: pend ? "var(--amber-ink)" : "var(--green)" }}>要確認 {pend}</b>
         </div>
-        {excludedTotal > 0 && (
-          <span className="rv-exbadge" title="除外領域の設定により取り込まれなかった件数">
-            🚫 除外領域: span {regionStats.excluded_spans ?? 0} 件
-            {(regionStats.excluded_cells ?? 0) > 0 && ` / セル ${regionStats.excluded_cells} 件`}
-            {(regionStats.excluded_rows ?? 0) > 0 && ` / 行 ${regionStats.excluded_rows} 件`}
-            を未取込
+        {showExcludeBadge && (
+          <span
+            className="rv-exbadge"
+            title={
+              "除外領域の設定により取り込まれなかった内容です。" +
+              (mdDropped.length
+                ? `\np.${mdDropped.join("・p.")} は本文テキスト全体を抽出 AI の入力から除いています（領域は座標を持つが本文は持たないため、ページ単位でしか除けません）。`
+                : "")
+            }
+          >
+            🚫 除外領域:{" "}
+            {excludedTotal > 0 ? (
+              <>
+                span {regionStats.excluded_spans ?? 0} 件
+                {(regionStats.excluded_cells ?? 0) > 0 &&
+                  ` / セル ${regionStats.excluded_cells} 件`}
+                {(regionStats.excluded_rows ?? 0) > 0 && ` / 行 ${regionStats.excluded_rows} 件`}
+                を未取込
+              </>
+            ) : (
+              <>p.{mdDropped.join("・p.")} の本文を未使用</>
+            )}
           </span>
         )}
         {canEditRegions && (
@@ -403,6 +448,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
               documentId={id}
               fields={data.fields}
               pages={pageDims}
+              disabled={!pageDimsReady}
               onSaved={onTemplatized}
             />
           ) : (

@@ -23,12 +23,15 @@ export function TemplatizeSchema({
   fields,
   pages,
   suggestedDocType,
+  disabled,
   onSaved,
 }: {
   documentId: string;
   fields: ExtractedField[];
   pages: PageDim[];
   suggestedDocType?: string | null;
+  // ページ寸法が届くまでは押させない（空の寸法表で開くと領域を復元できない）
+  disabled?: boolean;
   // **保存後の処理はこのコンポーネントでは行わない**。作成に成功するとバナーごと
   // このボタンが消えるため、ここに再抽出のポーリングを置くと即座にアンマウントされ、
   // 「再抽出は走ったのに画面が更新されず完了も通知されない」状態になる
@@ -39,7 +42,12 @@ export function TemplatizeSchema({
 
   return (
     <>
-      <button className="btn sm primary" onClick={() => setOpen(true)}>
+      <button
+        className="btn sm primary"
+        onClick={() => setOpen(true)}
+        disabled={disabled}
+        title={disabled ? "ページ情報を読み込み中です" : undefined}
+      >
         🧩 テンプレート化
       </button>
       {open && (

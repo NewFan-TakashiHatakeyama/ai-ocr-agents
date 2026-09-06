@@ -407,3 +407,29 @@ def test_VLで拾えたページは欠落として扱わない() -> None:
     )
     assert out["review_items"] == []
     assert nodes.route_confidence_gate(out) == "finalize"
+
+
+def test_解消した_mismatch_が前回実行から残らない(monkeypatch) -> None:
+    """再配信で mismatch が解消しても前回の mismatch_fields を残すと、
+    Phase 5 の許容パラメータを決める shadow 実測が実際より悪く見える。
+    """
+    monkeypatch.delenv("REGION_GUARD_ENFORCE", raising=False)
+    out = _gate(
+        {
+            "schema": _REGION_SCHEMA,
+            "fields": [_good_field()],  # 領域内に収まっている
+            "pages": _PAGES,
+            "source_page_count": 1,
+            "metrics": {
+                "region": {
+                    "excluded_spans": 1,
+                    "mismatch_fields": ["title"],  # 前回実行の残骸
+                    "layout_mismatch": True,
+                }
+            },
+        }
+    )
+    region = out["metrics"]["region"]
+    assert "mismatch_fields" not in region, region
+    assert "layout_mismatch" not in region, region
+    assert region["excluded_spans"] == 1  # 除外件数は消さない

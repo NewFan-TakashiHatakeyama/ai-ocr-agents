@@ -41,6 +41,18 @@ export function useSchemaSaved({
 
   const rerun = useCallback(
     (schemaId: string) => {
+      // 再抽出は今の抽出結果を丸ごと置き換える。この run に入力済みの修正は
+      // 新しい結果へは引き継がれない（correction_logs には監査として残るが、
+      // 新 run の確定では参照されない）ので、押す前に必ず断りを入れる。
+      if (
+        !window.confirm(
+          "この帳票を新しい定義で取り直します。\n" +
+            "いまの抽出結果と、この結果に対して入力済みの修正は引き継がれません。\n" +
+            "実行してよろしいですか？",
+        )
+      ) {
+        return;
+      }
       // トーストの action は同期 onClick（戻り値を捨てる）なので、await せずに
       // 起動する。await すると未処理 rejection になる。
       void (async () => {
@@ -63,7 +75,12 @@ export function useSchemaSaved({
           });
         } catch (e) {
           if (e instanceof ApiError && e.status === 409) {
-            push({ kind: "warn", message: "処理中です。完了をお待ちください。" });
+            // 409 は「処理中」だけではない。確定済み・実行中でそれぞれ理由が違うので、
+            // サーバが返した文言をそのまま出す（潰すと「待てば終わる」と誤読される）。
+            push({
+              kind: "warn",
+              message: e.message || "現在このドキュメントは再抽出できません。",
+            });
           } else {
             push({ kind: "err", message: `再抽出を開始できません（${(e as Error).message}）。` });
           }

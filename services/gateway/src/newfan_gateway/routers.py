@@ -359,6 +359,8 @@ def extract(
     if schema_id is not None and admin.get_schema_by_id(principal.tenant_id, schema_id) is None:
         raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
 
+    # 再抽出で置き換える旧 run から引き継ぐ options（ワークフローの通知先など）
+    inherited_options: dict[str, Any] = {}
     # 既定の競合判定は processing + needs_review（外部連携の二重投入防止）。
     # supersede_review=true のときだけ「今まさに処理中」だけを競合とみなす
     # （chat の rerun_extract と同じ意味論）。テンプレート化直後の再抽出は
@@ -376,6 +378,14 @@ def extract(
                 "確定済みの結果があります。再抽出すると確定値が置き換わります",
                 details={"document_id": document_id, "status": latest.status},
             )
+        # ワークフロー起点の run は options に notify 先（hitl_gate を再開させる先）を
+        # 持つ。引き継がずに置き換えると、**待機中のワークフローが永久に再開されず、
+        # 下流の会計連携が黙って実行されない**。旧 run を終端させる前に控える。
+        if latest is not None:
+            for key in ("workflow_notify", "workflow_idem"):
+                value = (latest.options or {}).get(key)
+                if value is not None:
+                    inherited_options[key] = value
         # 新 run を作る前に旧 needs_review を終端させる。残すと get_latest_run・
         # 削除ブロッカー・ワークフローの hitl_gate が古い run を見続ける。
         repo.supersede_review_runs(principal.tenant_id, document_id)
@@ -391,7 +401,7 @@ def extract(
             document_id=document_id,
             schema_id=schema_id,
             status="processing",
-            options=body.options.model_dump(),
+            options={**body.options.model_dump(), **inherited_options},
         )
     )
     repo.create_job(
@@ -650,6 +660,18 @@ def confirm(
     )
     if run is None:
         raise ApiError("E1001", "Run が見つかりません", details={"document_id": document_id})
+    # 終端済みの run は確定できない。特に superseded（再抽出で置き換えられた旧 run）を
+    # 通すと、その checkpoint が resume され **古い抽出結果が confirmed になって会計連携
+    # まで流れる**。再抽出を押した直後の画面は新 run に切り替わるまで旧 run を表示して
+    # いるので、そこで確定（またはショートカット）を押すと実際に踏む。
+    if run.status in ("superseded", "failed"):
+        raise ApiError(
+            "E1005",
+            "この抽出結果は新しい抽出に置き換えられています。最新の結果を読み込んでください"
+            if run.status == "superseded"
+            else "この抽出は失敗しています。再抽出してください",
+            details={"document_id": document_id, "run_id": run.id, "status": run.status},
+        )
 
     cached = _idempotency_hit(request, idempotency_key, principal.tenant_id)
     if cached is not None:
