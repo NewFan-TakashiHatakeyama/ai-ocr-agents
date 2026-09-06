@@ -440,8 +440,12 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           「自動発見」バナーが出る（敵対的レビュー確定）。undefined なら出さない側に倒す */}
       {data.schema_id === null && createdDocType === null && (
         <div className="tpl-banner" role="status">
+          {/* 「自動抽出できます」とは書かない: 実際には次回もアップロード後に人が
+              「抽出を開始」を押す必要があり、テンプレートが自動で選ばれるのは
+              種別を判定できた場合だけ（gateway routers.py の classify_document）。
+              能力を先取りした文言は「効くと言われて効かない」体験になる */}
           🧩 この抽出は<b>スキーマなしの自動発見</b>です。項目を確認して
-          テンプレート化すると、次回から同じ定義で自動抽出できます。
+          テンプレート化すると、次回の同種帳票でこの定義を選んで抽出できます。
           <span className="spacer" />
           {hasRole(me.role, "admin") ? (
             <TemplatizeSchema
@@ -458,9 +462,11 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
       )}
       {createdDocType !== null && (
         <div className="tpl-banner" role="status">
+          {/* 「取込時に種別を指定すると」とはまだ書かない: API は doc_type を受けるが
+              web のアップロード導線が渡していないため、画面上にその操作が存在しない */}
           ✅ スキーマ「<b>{createdDocType}</b>」を作成しました。この帳票の値はこのまま
-          確認・確定できます。次回の同種帳票は、ファイル名に種別を含めるか取込時に
-          種別を指定すると、このスキーマが自動で選ばれます（抽出画面でも選べます）。
+          確認・確定できます。次回の同種帳票は、抽出画面でこのスキーマを選べます
+          （ファイル名に種別が含まれていれば既定で選ばれます）。
         </div>
       )}
       {readOnly && (
