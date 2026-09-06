@@ -21,6 +21,10 @@ import { useToasts } from "@/lib/toast";
 import { fmtRemaining, useDocumentLock } from "@/lib/useDocumentLock";
 import { useSchemaSaved, type SchemaSaved } from "@/lib/useSchemaSaved";
 
+// 位置ガードの参考表示に必ず添える断り。これを外すと「エラーが出ている」と読まれる。
+const NOTE_NO_EFFECT =
+  "\n参考表示です。値・確信度・「要確認」の件数には影響しません。";
+
 // SCR-03 検証画面（HITL, §8.2/§8.3）。本プロダクトの中核。全操作キーボード完結（§8.4）。
 export default function ReviewPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -368,6 +372,17 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   // 件数 0 でバッジを出さないと、KIE の主要入力が 1 つ欠けたことが誰にも見えない。
   const mdDropped = regionStats.markdown_dropped_pages ?? [];
   const showExcludeBadge = excludedTotal > 0 || mdDropped.length > 0;
+  // 位置ガード（読取領域と違う位置で項目が見つかった）の所見。**参考表示に閉じる**：
+  // サーバは既定 shadow で、この値からレビュー項目も確信度も作らない。ここでも
+  // pend / auto / total / 確定ボタンの活性のいずれにも入れない（入れた瞬間に
+  // 「表示しただけのつもりがレビューが増える」になる）。
+  const mismatchFields: string[] = regionStats.mismatch_fields ?? [];
+  // 過半がずれているなら「別レイアウトの帳票」とみなし、項目ごとのマークは出さない。
+  // 全項目に印が付くと「取引先 B の帳票が全部エラー」に見えるため、サーバ側も同じ
+  // 条件で per-field の所見を抑止している。UI もそれに揃える。
+  const layoutMismatch = regionStats.layout_mismatch === true;
+  const labelOfField = (name: string) =>
+    data.fields.find((f) => f.name === name)?.label ?? name;
   // 編集対象の doc_type は「サーバが解決した doc_type → このセッションで作成した
   // doc_type」の順。どちらも取れないときは編集させない（空のプリロードで保存すると
   // 既存の定義を空の新版で上書きしてしまう）。
@@ -432,6 +447,23 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             ) : (
               <>p.{mdDropped.join("・p.")} の本文を未使用</>
             )}
+          </span>
+        )}
+        {mismatchFields.length > 0 && (
+          <span
+            className="rv-rgnbadge"
+            title={
+              layoutMismatch
+                ? "設定した読取領域の多くと違う位置で項目が見つかりました。別レイアウトの帳票（別の取引先など）の可能性があります。" +
+                  NOTE_NO_EFFECT
+                : `設定した読取領域の外で見つかった項目: ${mismatchFields
+                    .map(labelOfField)
+                    .join("・")}` + NOTE_NO_EFFECT
+            }
+          >
+            {layoutMismatch
+              ? "📐 別レイアウトの可能性（参考）"
+              : `📐 領域外で検出 ${mismatchFields.length} 項目（参考）`}
           </span>
         )}
         {canEditRegions && (
@@ -526,7 +558,12 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             excludeRegions={data.applied_exclude_regions ?? []}
           />
         </div>
-        <FieldPanel fields={data.fields} tables={data.tables} readOnly={readOnly} />
+        <FieldPanel
+          fields={data.fields}
+          tables={data.tables}
+          readOnly={readOnly}
+          mismatchFields={layoutMismatch ? undefined : new Set(mismatchFields)}
+        />
       </div>
 
       <div className="rv-foot">

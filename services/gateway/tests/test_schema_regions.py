@@ -392,3 +392,51 @@ def test_result_schemaless_run_has_empty_region_fields(ctx: SimpleNamespace) -> 
     assert body["applied_exclude_regions"] == []
     assert body["schema_doc_type"] is None
     assert body["region_stats"] is None
+
+
+def test_result_は位置ガードの所見を素通しで返す(ctx: SimpleNamespace) -> None:
+    """mismatch_fields / layout_mismatch を検証画面まで届ける唯一の経路。
+
+    region_stats は `dict[str, Any]` の素通しなので、将来ここを型付き DTO に
+    絞る変更が入ると **UI 側は静かに何も表示しなくなる**（pydantic v2 の既定は
+    extra="ignore"）。落ちるようにしておく。
+    """
+    sch = _put(
+        ctx,
+        {
+            "doc_type": "guard_view_probe",
+            "fields": [{"name": "total_amount", "type": "money_jpy"}],
+            "create": True,
+        },
+    ).json
+    doc_id = _doc_with_run(
+        ctx,
+        pages=1,
+        schema_id=sch["id"],
+        metrics_region={
+            "excluded_spans": 0,
+            "mismatch_fields": ["total_amount", "issuer_name"],
+            "layout_mismatch": False,
+        },
+    )
+    body = ctx.client.get(f"/v1/documents/{doc_id}/result", headers=auth("viewer")).json()
+    assert body["region_stats"]["mismatch_fields"] == ["total_amount", "issuer_name"]
+    assert body["region_stats"]["layout_mismatch"] is False
+
+
+def test_result_の所見なしはキー自体が無い(ctx: SimpleNamespace) -> None:
+    """0 件と「そもそも判定していない」を UI が取り違えないよう、キーの不在を固定する。"""
+    sch = _put(
+        ctx,
+        {
+            "doc_type": "guard_none_probe",
+            "fields": [{"name": "total_amount", "type": "money_jpy"}],
+            "create": True,
+        },
+    ).json
+    doc_id = _doc_with_run(
+        ctx, pages=1, schema_id=sch["id"], metrics_region={"excluded_spans": 4}
+    )
+    body = ctx.client.get(f"/v1/documents/{doc_id}/result", headers=auth("viewer")).json()
+    assert "mismatch_fields" not in body["region_stats"]
+    assert "layout_mismatch" not in body["region_stats"]

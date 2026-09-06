@@ -258,6 +258,11 @@ def test_region_guard_shadow_records_metrics_only(monkeypatch) -> None:
     assert out["review_items"] == []
     assert out["fields"][0].confidence == before
     assert out["fields"][0].review_status.value != "pending"
+    # **検証画面に参考表示するようになっても、run は needs_review に倒れない。**
+    # 「表示しただけのつもりがレビューが増えた」という疑いへの機械的な回答。
+    from newfan_orchestrator import nodes
+
+    assert nodes.route_confidence_gate(out) == "finalize"
 
 
 def test_region_guard_enforced_single_field_reviews(monkeypatch) -> None:
