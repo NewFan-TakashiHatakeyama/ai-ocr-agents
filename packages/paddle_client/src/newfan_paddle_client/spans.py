@@ -76,7 +76,8 @@ def build_spans(
     for i, text in enumerate(ocr.rec_texts):
         score = ocr.rec_scores[i] if i < len(ocr.rec_scores) else 0.0
         if ocr.rec_boxes is not None and i < len(ocr.rec_boxes):
-            bbox = [int(v) for v in ocr.rec_boxes[i][:4]]
+            # サービングは小数座標を返し得る。poly_to_bbox と同じ丸めに揃える
+            bbox = [int(round(v)) for v in ocr.rec_boxes[i][:4]]
         elif i < len(ocr.rec_polys):
             bbox = poly_to_bbox(ocr.rec_polys[i])
         else:
