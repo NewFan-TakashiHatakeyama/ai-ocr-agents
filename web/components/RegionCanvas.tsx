@@ -92,7 +92,11 @@ export function RegionCanvas({
   // 描画のたびに測り直す。キャッシュ済み画像では load がレイアウト前に発火して
   // clientWidth が 0 になり、矩形が左上に潰れる（DocViewer で実際に踏んだ）。
   // setScale は同値なら React が再描画を止めるので、この形でループしない。
+  // ドラッグ中は測らない: pointermove ごとに再描画が走るため、ここで clientWidth を
+  // 読むと 1 フレームごとに同期レイアウトを強制することになる（縮尺はドラッグ中に
+  // 変わらないので測る必要も無い）。
   useLayoutEffect(() => {
+    if (drag) return;
     measure();
   });
 

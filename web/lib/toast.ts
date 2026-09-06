@@ -24,7 +24,10 @@ export const useToasts = create<ToastState>((set) => ({
   push: (t) => {
     const id = ++seq;
     set((s) => ({ toasts: [...s.toasts, { ...t, id }] }));
-    if (t.kind !== "warn") {
+    // **操作を伴うトーストは自動で消さない**。選択肢を出しておきながら 5 秒で
+    // 引っ込めると、読み終わる前に押す機会が消える（実機の QA で「この帳票を
+    // 再抽出」を押せずに流れた）。warn も従来どおり残す。
+    if (t.kind !== "warn" && !t.action) {
       setTimeout(() => set((s) => ({ toasts: s.toasts.filter((x) => x.id !== id) })), 5000);
     }
   },

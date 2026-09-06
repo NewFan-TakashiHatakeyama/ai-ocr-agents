@@ -74,6 +74,34 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   const [created, setCreated] = useState<{ docType: string; schemaId: string } | null>(null);
   const createdDocType = created?.docType ?? null;
 
+  // テンプレート化した帳票と、そこから作ったスキーマの結び付きをブラウザに残す。
+  // 作成しただけでは run.schema_id は null のままなので、リロードすると
+  // 「この帳票から作った」手掛かりが消え、同じ帳票から領域を編集し直せなくなる
+  // （設計の受け入れ条件「作成後に領域を編集できる」が満たせない）。
+  // 参照のためだけの控えで、権限も正当性もサーバが判断する（スキーマが消えていれば
+  // プリロードが失敗し、編集画面は保存を止める）。
+  useEffect(() => {
+    if (created !== null) return;
+    try {
+      const raw = window.localStorage.getItem(`nf_created_schema:${id}`);
+      if (raw) setCreated(JSON.parse(raw));
+    } catch {
+      /* 保存不可・壊れた値は無視（無ければ編集ボタンが出ないだけ） */
+    }
+  }, [id, created]);
+
+  const rememberCreated = useCallback(
+    (r: { docType: string; schemaId: string }) => {
+      setCreated(r);
+      try {
+        window.localStorage.setItem(`nf_created_schema:${id}`, JSON.stringify(r));
+      } catch {
+        /* プライベートモード等で保存できなくても致命ではない */
+      }
+    },
+    [id],
+  );
+
   const pending = useMemo(
     () => (data ? sortFields(data.fields).filter((f) => f.review_status === "pending") : []),
     [data],
@@ -355,7 +383,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
               pages={pageDims}
               runStatus={data.status}
               readOnly={readOnly}
-              onCreated={setCreated}
+              onCreated={rememberCreated}
               onRefetch={() => refetch()}
             />
           ) : (
