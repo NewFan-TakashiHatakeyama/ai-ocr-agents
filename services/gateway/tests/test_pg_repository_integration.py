@@ -354,3 +354,48 @@ def test_pg_get_latest_run_orders_by_start_time(repo, seeded) -> None:
                 text("DELETE FROM extraction_runs WHERE id = ANY(:i)"),
                 {"i": [older_but_bigger_id, newer_but_smaller_id]},
             )
+
+
+def test_pg_set_document_doc_type_はupdated_atを進めない(repo, seeded) -> None:
+    """種別の書き戻しで documents.updated_at を触らないこと。
+
+    updated_at の読み手は get_delete_blocker の「確定処理中の窓」判定だけで、
+    set_document_status がそこを進めるのは status 遷移＝処理が動いた証拠だから。
+    メタ情報の更新でそこを進めると「種別を直しただけで削除が stale_minutes 分
+    ブロックされる」副作用が出る。ORM に updated_at が無いため、実 DB でしか見えない。
+    """
+    from sqlalchemy import text
+
+    tenant, doc_id, _run = seeded
+
+    def _row() -> tuple[str | None, object]:
+        with repo._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            return tuple(  # type: ignore[return-value]
+                c.execute(
+                    text("SELECT doc_type, updated_at FROM documents WHERE id = :d"),
+                    {"d": doc_id},
+                ).one()
+            )
+
+    before_type, before_updated = _row()
+    # seeded の doc_type は "invoice"。同じ値だと「書き換わったか」を観測できない
+    assert before_type == "invoice"
+    repo.set_document_doc_type(tenant, doc_id, "quotation")
+    after_type, after_updated = _row()
+    assert after_type == "quotation"
+    assert after_updated == before_updated
+
+
+def test_pg_set_document_doc_type_は他テナントの行を書き換えない(repo, seeded) -> None:
+    """RLS ポリシーは USING のみで WITH CHECK が無いため、WHERE 側が唯一の防御になる。"""
+    from sqlalchemy import text
+
+    tenant, doc_id, _run = seeded
+    repo.set_document_doc_type("ten_other", doc_id, "quotation")
+    with repo._engine.begin() as c:  # noqa: SLF001
+        c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+        got = c.execute(
+            text("SELECT doc_type FROM documents WHERE id = :d"), {"d": doc_id}
+        ).scalar()
+    assert got == "invoice"  # seeded のまま（他テナント指定では書き換わらない）
