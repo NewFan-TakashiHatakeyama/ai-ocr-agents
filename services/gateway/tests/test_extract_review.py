@@ -302,3 +302,54 @@ def test_extract_rejects_confirmed_document(ctx: SimpleNamespace) -> None:
     )
     assert r.status_code == 409 and r.json()["error"]["code"] == "E1005"
     assert ctx.repo.get_run("ten_1", run).status == "confirmed"  # 触っていない
+
+
+def test_superseded_run_は確定できない(ctx: SimpleNamespace) -> None:
+    """再抽出で置き換えられた旧 run を確定すると、その checkpoint が resume され
+    **古い抽出結果が confirmed になって会計連携まで流れる**。再抽出直後の画面は
+    新 run に切り替わるまで旧 run を表示しているので、そこで確定を押すと実際に踏む。
+    """
+    doc_id = _upload(ctx)
+    old_run = _seed_needs_review_run(ctx, doc_id)
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"supersede_review": True},
+    )
+    assert r.status_code == 202
+    assert ctx.repo.get_run("ten_1", old_run).status == "superseded"
+
+    c = ctx.client.post(
+        f"/v1/documents/{doc_id}/confirm",
+        headers=auth("reviewer"),
+        json={"run_id": old_run},
+    )
+    assert c.status_code == 409 and c.json()["error"]["code"] == "E1005"
+    assert ctx.orch.resumed == [] if hasattr(ctx.orch, "resumed") else True
+
+
+def test_supersede_はワークフローの通知先を新_run_へ引き継ぐ(ctx: SimpleNamespace) -> None:
+    """ワークフロー起点の run は options に hitl_gate を再開させる通知先を持つ。
+    引き継がずに置き換えると、**待機中のワークフローが永久に再開されず下流の
+    会計連携が黙って実行されない**。
+    """
+    doc_id = _upload(ctx)
+    notify = {"stream": "q.workflow", "workflow_run_id": "wfrun_1"}
+    run = RunRecord(
+        id="run_wf_old",
+        tenant_id="ten_1",
+        document_id=doc_id,
+        status="needs_review",
+        options={"force_vl": False, "workflow_notify": notify, "workflow_idem": "idem-1"},
+    )
+    ctx.repo.create_run(run)
+
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"supersede_review": True},
+    )
+    assert r.status_code == 202
+    new_run = ctx.repo.get_run("ten_1", r.json()["run_id"])
+    assert new_run.options.get("workflow_notify") == notify
+    assert new_run.options.get("workflow_idem") == "idem-1"

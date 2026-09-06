@@ -124,12 +124,21 @@ def file_uri_loader(uri: str) -> bytes:
 
 
 def _merge_region_metrics(
-    state: ExtractionState, stats: RegionStats, *, active: bool
+    state: ExtractionState, stats: RegionStats, *, active: bool, accumulate: bool
 ) -> dict[str, Any]:
-    """``metrics["region"]`` を積算する。
+    """``metrics["region"]`` を書く。
 
     metrics は reducer 無しの LastValue チャネルなので、既存値を読んでから返さないと
     先に走ったノードの記録が消える（structure_ocr → vl_fallback の順で両方が書く）。
+    そこで **同一実行の中では加算**する（accumulate=True）。
+
+    ただし加算しかしないと、**ジョブ再配信で同じ thread_id を START から流し直した
+    ときに前回の件数が残って二重計上される**（graph.invoke に dict を渡す再実行は
+    resume ではないが、チャネル値は checkpoint に残るため）。実測で除外 1 件の run が
+    再配信後に 2 件になり、検証画面のバッジが実件数の 2 倍を表示し、
+    「除外が本文に重なっている可能性」の 20% 判定まで誤発火した。
+    そこで **その実行で最初に書くノード（structure_ocr）はリセット**する
+    （accumulate=False）。以降のノードだけが積み増す。
 
     除外領域が 1 つも設定されていない run では **region キー自体を作らない**
     （active=False）。全 run に 0 埋めの region を書くと「領域を使っていない run は
@@ -138,9 +147,12 @@ def _merge_region_metrics(
     いない、という情報自体に意味がある）。
     """
     metrics = dict(state.get("metrics", {}))
-    if not active and "region" not in metrics:
+    if not active and (not accumulate or "region" not in metrics):
+        # 最初の書き手が「領域なし」と判定したなら、前回実行の残骸ごと落とす
+        if not accumulate:
+            metrics.pop("region", None)
         return metrics
-    cur = dict(metrics.get("region", {}) or {})
+    cur = dict(metrics.get("region", {}) or {}) if accumulate else {}
     add = stats.as_dict()
     for key in ("excluded_spans", "excluded_cells", "excluded_rows"):
         cur[key] = int(cur.get(key, 0)) + int(add[key])
@@ -197,6 +209,19 @@ def make_structure_ocr(
                 continue
 
             elem = resp.layout_parsing_results[0]
+            if elem.pruned_result.overall_ocr_res is None:
+                # 200 で返ってきたが OCR 結果の器が無い＝応答の形が想定と違う。
+                # paddle_client のモデルは extra="allow" で寛容なので、キー名が変わった
+                # 応答は例外にならず**空の PrunedResult**になる。放置するとそのページは
+                # spans 0・errors 0 で通過し、欠けたまま自動確定される（白紙ページは
+                # overall_ocr_res 自体は返るので、ここでは区別できている）。
+                logger.warning(
+                    "[structure_ocr] OCR 結果が応答に含まれません: page=%s", page_no
+                )
+                errors.append(
+                    {"page": page_no, "stage": "structure_ocr", "error": "no overall_ocr_res"}
+                )
+                continue
             page_spans = build_spans(elem.pruned_result, page=page_no, start_id=next_span_id)
             # 除外領域は **_backfill より前**に適用する。後だと印影の OCR ゴミに
             # crop 再認識の課金が乗る。span_id の採番はフィルタ**前**の件数で
@@ -241,7 +266,11 @@ def make_structure_ocr(
             "tables": tables,
             "layout_markdown": "\n\n".join(markdown_parts),
             "errors": errors,
-            "metrics": _merge_region_metrics(state, rstats, active=bool(exclude_regions)),
+            # この実行で最初に region を書くノード。再配信での二重計上を避けるため
+            # 前回実行の値は引き継がない。
+            "metrics": _merge_region_metrics(
+                state, rstats, active=bool(exclude_regions), accumulate=False
+            ),
         }
 
     return _node
@@ -321,7 +350,10 @@ def make_vl_fallback(
             "layout": layout,
             "review_items": review_items,
             "errors": errors,
-            "metrics": _merge_region_metrics(state, rstats, active=bool(exclude_regions)),
+            # structure_ocr が同じ実行で書いた件数に積み増す
+            "metrics": _merge_region_metrics(
+                state, rstats, active=bool(exclude_regions), accumulate=True
+            ),
         }
 
     return _node

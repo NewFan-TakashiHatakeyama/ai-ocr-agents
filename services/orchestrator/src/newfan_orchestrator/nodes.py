@@ -393,13 +393,31 @@ def _region_observations(
                 )
             )
 
-    # (d) 読取領域の位置ガード。既定は shadow（metrics とログのみ）。
+    # (d) 除外領域のあるページは layout_markdown を丸ごと落としている。span も
+    #     セルも 1 件も消えていない場合（画像だけの印影など）、ここまでの所見は
+    #     何も出ないのに KIE の主要入力が 1 つ欠けた状態で確定まで進む。
+    #     STP を壊さないよう needs_review には倒さず、件数として必ず残す
+    #     （検証画面のバッジが唯一の到達経路。§5.4）。
+    dropped = list(region.get("markdown_dropped_pages", []) or [])
+    if dropped and not (excluded_spans or excluded_cells or excluded_rows):
+        logger.info(
+            "[region] 除外領域によりページ %s のレイアウト解析結果を KIE 入力から除外しました"
+            "（span/セルの除外は 0 件）",
+            dropped,
+        )
+
+    # (e) 読取領域の位置ガード。既定は shadow（metrics とログのみ）。
     mismatched = region_mismatches(
         fields,
         dict(state.get("schema", {}) or {}),
         list(state.get("pages", []) or []),
         state.get("source_page_count"),
     )
+    # **毎回書き直す**。前回実行の値を残すと、再配信で mismatch が解消しても
+    # 古い mismatch_fields が永続化され、Phase 5 の許容パラメータを決める
+    # shadow 実測が実際より悪く見える。
+    region.pop("mismatch_fields", None)
+    region.pop("layout_mismatch", None)
     if mismatched:
         region["mismatch_fields"] = mismatched
         n_regions = len(regions_by_field(dict(state.get("schema", {}) or {})))

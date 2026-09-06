@@ -273,3 +273,68 @@ def test_region_metrics_accumulate_across_nodes() -> None:
     vl = ocr_nodes.make_vl_fallback(_FakeStructureClient(), _loader)
     out = vl({**state, **after_ocr, "fallback_pages": [1]})
     assert out["metrics"]["region"]["excluded_spans"] == 3  # 2 + 1（上書きされない）
+
+
+def test_再配信で除外件数が二重計上されない() -> None:
+    """ジョブ再配信は同じ thread_id を START から流し直すが、metrics は reducer 無しの
+    LastValue なので前回値が checkpoint に残る。加算しかしないと件数が倍になり、
+    検証画面のバッジが実件数の 2 倍を出し、「本文に重なっている可能性」の 20% 判定まで
+    誤発火する（実測で再現）。**最初に書くノードはリセットする**。
+    """
+    node = ocr_nodes.make_structure_ocr(_FakeStructureClient(), _loader)
+    state = {"pages": _pages(1, **_DIMS), "exclude_regions": [_COVER_SPAN]}
+    first = node(state)
+    assert first["metrics"]["region"]["excluded_spans"] == 1
+    # 前回実行の metrics を持ったまま再実行（再配信の再現）
+    again = node({**state, "metrics": first["metrics"]})
+    assert again["metrics"]["region"]["excluded_spans"] == 1, "二重計上している"
+
+
+def test_領域を外した再配信で前回のregionが残らない() -> None:
+    node = ocr_nodes.make_structure_ocr(_FakeStructureClient(), _loader)
+    stale = {"region": {"excluded_spans": 9, "excluded_cells": 0, "excluded_rows": 0,
+                        "skipped_pages_no_dims": [], "markdown_dropped_pages": []}}
+    out = node({"pages": _pages(1, **_DIMS), "exclude_regions": [], "metrics": stale})
+    assert "region" not in out["metrics"], "領域なしなのに前回値が残っている"
+
+
+def test_OCR結果の器が無い応答はページ失敗として記録する() -> None:
+    """200 で返るがキー名が違う応答は、寛容なモデル定義のせいで例外にならず
+    **空の PrunedResult** になる。放置するとそのページは spans 0・errors 0 で通過し、
+    欠けたまま自動確定される（白紙ページは overall_ocr_res 自体は返るので区別できる）。
+    """
+
+    class _ShapeMismatch:
+        def layout_parsing(self, file_b64: str, *, file_type: int = 1) -> LayoutParsingResponse:
+            # overall_ocr_res が無い（キー名変更などで解釈できなかった）応答
+            return LayoutParsingResponse.model_validate(
+                {"layoutParsingResults": [{"prunedResult": {"parsing_res_list": []}}]}
+            )
+
+    node = ocr_nodes.make_structure_ocr(_ShapeMismatch(), _loader)
+    out = node({"pages": _pages(2, **_DIMS)})
+    assert out["spans"] == []
+    assert [e["page"] for e in out["errors"]] == [1, 2]
+    assert all(e["error"] == "no overall_ocr_res" for e in out["errors"])
+
+
+def test_白紙ページはページ失敗として記録しない() -> None:
+    """OCR 結果の器はあるが中身が空＝本当に白紙。欠落ではないので errors に積まない。"""
+
+    class _BlankPage:
+        def layout_parsing(self, file_b64: str, *, file_type: int = 1) -> LayoutParsingResponse:
+            return LayoutParsingResponse.model_validate(
+                {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "parsing_res_list": [],
+                                "overall_ocr_res": {"rec_texts": [], "rec_scores": [], "rec_polys": []},
+                            }
+                        }
+                    ]
+                }
+            )
+
+    out = ocr_nodes.make_structure_ocr(_BlankPage(), _loader)({"pages": _pages(1, **_DIMS)})
+    assert out["errors"] == []

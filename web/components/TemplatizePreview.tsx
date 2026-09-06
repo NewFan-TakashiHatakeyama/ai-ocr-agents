@@ -439,9 +439,15 @@ export function TemplatizePreview({
       const saved = await api.putSchema(docType.trim(), body, {
         create: mode === "create",
         excludeRegions,
-        // 編集では既存の値を保つ（未記録の旧スキーマだけ今回の値で埋める）
-        sourcePageCount:
-          mode === "create" ? pageCount : (preserved.sourcePageCount ?? pageCount),
+        // 編集では既存の値を保つ（未記録の旧スキーマだけ今回の値で埋める）。
+        // ページ寸法が取れていないときは **記録しない**: pages が空だと pageCount が
+        // 1 に潰れるため、多ページ帳票のテンプレートに 1 が焼き付いてしまう。
+        // 未記録（NULL）なら位置ガードはページ判定を行わないので、誤った値より安全。
+        sourcePageCount: dimsUnavailable
+          ? (mode === "create" ? undefined : preserved.sourcePageCount)
+          : mode === "create"
+            ? pageCount
+            : (preserved.sourcePageCount ?? pageCount),
       });
       onSaved({
         docType: saved.doc_type,
