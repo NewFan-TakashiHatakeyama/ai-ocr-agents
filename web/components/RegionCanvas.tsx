@@ -43,6 +43,7 @@ export function RegionCanvas({
   selectedId,
   onDraw,
   onSelect,
+  onBackgroundDown,
   onGhostClick,
   onDelete,
 }: {
@@ -55,6 +56,10 @@ export function RegionCanvas({
   selectedId: string | null;
   onDraw: (bbox: Px) => void;
   onSelect: (id: string | null) => void;
+  // 背景（何も無い所）を押したとき。**矩形の選択だけ**を外す。ここで行の選択まで
+  // 消すと、「項目を選ぶ → その項目の領域をドラッグで描く」が成立しなくなる
+  // （pointerdown で選択が消え、pointerup の時点では紐づけ先が無い）。
+  onBackgroundDown: () => void;
   onGhostClick: (key: string) => void;
   onDelete: (id: string) => void;
 }) {
@@ -116,7 +121,7 @@ export function RegionCanvas({
     if (!ready || ev.button !== 0) return;
     const t = ev.target as HTMLElement;
     if (t.closest("[data-region]") || t.closest("[data-ghost]")) return; // 既存矩形の操作
-    onSelect(null);
+    onBackgroundDown();
     const p = stagePoint(ev);
     (ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId);
     setDrag({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });

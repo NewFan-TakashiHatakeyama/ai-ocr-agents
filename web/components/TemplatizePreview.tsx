@@ -51,7 +51,22 @@ type PreviewRegion = {
   page: number | "last" | null; // 保存する適用範囲（include は必ず drawnPage）
   rowId?: string; // include のみ
   label?: string; // exclude のみ（「印影」等・任意）
+  // 読み込み時の原本と、その時点の画素矩形。触っていない矩形を保存し直すときは
+  // **原本をそのまま**返すために持つ。正規化 → 画素（round）→ 正規化 の往復は
+  // 0.5px ぶんの丸めが乗るので、開いて保存するだけで座標が動き、開くたびに
+  // ずれが積み上がる（設計の受け入れ条件「矩形を触らなければ完全一致」に反する）。
+  origin?: RegionRect;
+  originBbox?: Px;
 };
+
+/** 画素矩形が読み込み時から変わっていないか（原本をそのまま返してよいか）。 */
+function isUntouched(r: PreviewRegion): boolean {
+  return (
+    !!r.origin &&
+    !!r.originBbox &&
+    r.originBbox.every((v, i) => v === r.bbox[i])
+  );
+}
 
 type Selection = { kind: "row"; rowId: string } | { kind: "region"; regionId: string } | null;
 
@@ -100,6 +115,20 @@ export function TemplatizePreview({
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(mode === "edit");
   const [prev, setPrev] = useState<{ id: string; version: number } | null>(null);
+  // **編集できないまま保全する領域**。ページ寸法（pages.width/height）が取れないと
+  // 正規化⇄画素の変換ができず矩形を描けないが、だからといって落としてはいけない。
+  // 落とすと保存が全置換なので、開いて保存しただけで既存の設定が消える
+  // （実機で再現した事故: ページ寸法 API が失敗した窓で領域が全消去された）。
+  // 読み込んだ値をそのまま持ち回し、保存時に無変換で戻す。
+  const [preserved, setPreserved] = useState<{
+    fieldRegions: Record<string, RegionRect>; // rowId -> 元の region
+    excludes: RegionRect[];
+    sourcePageCount: number | null;
+  }>({ fieldRegions: {}, excludes: [], sourcePageCount: null });
+
+  // ページ寸法がまったく無い＝領域の編集自体が成立しない。保存は既存値の保全に
+  // 徹し、利用者には理由を出す（黙って「何も無い」画面を見せない）。
+  const dimsUnavailable = pages.length === 0;
 
   // --- 初期化 ---
   useEffect(() => {
@@ -148,36 +177,59 @@ export function TemplatizePreview({
         }));
 
         const loaded: PreviewRegion[] = [];
+        const keptFields: Record<string, RegionRect> = {};
+        const keptExcludes: RegionRect[] = [];
         s.fields.forEach((f, i) => {
           if (!f.region) return;
           const resolved = resolvePage(f.region.page, pageCount);
           const d = dimsByPage.get(resolved);
-          if (!d?.width || !d?.height) return; // 寸法が無いページの領域は編集できない
+          if (!d?.width || !d?.height) {
+            // 寸法が無いページの領域は画素に戻せない → **編集させず、そのまま保全する**
+            keptFields[rows[i].rowId] = f.region;
+            return;
+          }
+          const px = denormalize(f.region.rect, d.width, d.height);
           loaded.push({
             id: newUuid(),
             kind: "include",
-            bbox: denormalize(f.region.rect, d.width, d.height),
+            bbox: px,
             drawnPage: resolved,
             page: resolved,
             rowId: rows[i].rowId,
+            origin: f.region,
+            originBbox: px,
           });
         });
         (s.exclude_regions ?? []).forEach((r) => {
           const resolved = resolvePage(r.page, pageCount);
           const d = dimsByPage.get(resolved);
-          if (!d?.width || !d?.height) return;
+          if (!d?.width || !d?.height) {
+            keptExcludes.push(r);
+            return;
+          }
+          const px = denormalize(r.rect, d.width, d.height);
           loaded.push({
             id: newUuid(),
             kind: "exclude",
-            bbox: denormalize(r.rect, d.width, d.height),
+            bbox: px,
             drawnPage: resolved,
             page: r.page ?? null,
             label: r.label ?? undefined,
+            origin: r,
+            originBbox: px,
           });
         });
 
         setDrafts(rows);
         setRegions(loaded);
+        setPreserved({
+          fieldRegions: keptFields,
+          excludes: keptExcludes,
+          // **テンプレート化した時点のページ数**は編集で書き換えない。編集画面を
+          // 開いた帳票のページ数で上書きすると、触っていないのに位置ガードの
+          // ページ判定条件が変わる（「矩形を触らず保存すれば完全一致」が破れる）。
+          sourcePageCount: s.source_page_count ?? null,
+        });
         setLoading(false);
       })
       .catch((e) => {
@@ -306,6 +358,14 @@ export function TemplatizePreview({
     setSelection(null);
   }
 
+  // 背景を押したときは矩形の選択だけ外し、対象項目の選択は残す
+  // （残さないと「項目を選ぶ → ドラッグで描く」が成立しない）
+  function onBackgroundDown() {
+    if (!selection || selection.kind === "row") return;
+    const r = regions.find((x) => x.id === selection.regionId);
+    setSelection(r?.rowId ? { kind: "row", rowId: r.rowId } : null);
+  }
+
   // --- 保存 ---
   function issue(): string | null {
     const dt = docType.trim();
@@ -313,7 +373,11 @@ export function TemplatizePreview({
     const chosen = drafts.filter((d) => d.include);
     if (chosen.length === 0) return "抽出する項目を 1 つ以上選んでください。";
     const names = chosen.map((d) => d.name.trim());
-    if (names.some((n) => !/^[A-Za-z][A-Za-z0-9_]*$/.test(n)))
+    // 命名規則は**新しく付けた／変えた名前**にだけ課す。chat の項目追加は任意の
+    // 名前を通すので、既存スキーマには日本語名の項目があり得る。既存名まで弾くと
+    // 「開いて保存するだけ」ができないスキーマができてしまう。
+    const renamed = chosen.filter((d) => d.name.trim() !== d.base?.name);
+    if (renamed.some((d) => !/^[A-Za-z][A-Za-z0-9_]*$/.test(d.name.trim())))
       return "項目名（name）は英字始まりの英数字・アンダースコアにしてください。";
     if (new Set(names).size !== names.length) return "項目名（name）が重複しています。";
     const orphan = includes.find((r) => !drafts.some((d) => d.rowId === r.rowId && d.include));
@@ -323,9 +387,13 @@ export function TemplatizePreview({
 
   function regionOf(rowId: string): RegionRect | null {
     const r = regionByRow.get(rowId);
-    if (!r) return null;
+    if (!r) {
+      // 画面で編集できなかった領域は、読み込んだ値をそのまま返す（消さない）
+      return preserved.fieldRegions[rowId] ?? null;
+    }
+    if (isUntouched(r)) return r.origin!; // 丸め往復で座標を動かさない
     const d = dimsByPage.get(r.drawnPage);
-    if (!d?.width || !d?.height) return null;
+    if (!d?.width || !d?.height) return preserved.fieldRegions[rowId] ?? null;
     return { page: r.drawnPage, rect: normalize(r.bbox, d.width, d.height) };
   }
 
@@ -347,14 +415,21 @@ export function TemplatizePreview({
           : { name, label, type: d.type, required: false, critical: false, region };
       });
 
-    const excludeRegions: RegionRect[] = [];
+    // 編集できなかったぶんを先に戻してから、画面で編集したぶんを足す
+    const excludeRegions: RegionRect[] = [...preserved.excludes];
     for (const r of excludes) {
+      const label = r.label?.trim() || null;
+      // 矩形も名前も適用範囲も変えていないなら原本をそのまま返す
+      if (isUntouched(r) && r.origin!.page === r.page && (r.origin!.label ?? null) === label) {
+        excludeRegions.push(r.origin!);
+        continue;
+      }
       const d = dimsByPage.get(r.drawnPage);
       if (!d?.width || !d?.height) continue;
       excludeRegions.push({
         page: r.page,
         rect: normalize(r.bbox, d.width, d.height),
-        label: r.label?.trim() || null,
+        label,
       });
     }
 
@@ -364,7 +439,9 @@ export function TemplatizePreview({
       const saved = await api.putSchema(docType.trim(), body, {
         create: mode === "create",
         excludeRegions,
-        sourcePageCount: pageCount,
+        // 編集では既存の値を保つ（未記録の旧スキーマだけ今回の値で埋める）
+        sourcePageCount:
+          mode === "create" ? pageCount : (preserved.sourcePageCount ?? pageCount),
       });
       onSaved({
         docType: saved.doc_type,
@@ -387,6 +464,8 @@ export function TemplatizePreview({
   }
 
   const activeRow = drafts.find((d) => d.rowId === activeRowId);
+  const preservedCount =
+    Object.keys(preserved.fieldRegions).length + preserved.excludes.length;
 
   return (
     <div className="tpl-overlay" role="dialog" aria-modal="true" aria-label="テンプレート化プレビュー">
@@ -453,6 +532,7 @@ export function TemplatizePreview({
               selectedId={selectedRegionId}
               onDraw={onDraw}
               onSelect={(id) => setSelection(id ? { kind: "region", regionId: id } : null)}
+              onBackgroundDown={onBackgroundDown}
               onGhostClick={onGhostClick}
               onDelete={deleteRegion}
             />
@@ -633,6 +713,19 @@ export function TemplatizePreview({
                   </p>
                 )}
 
+                {dimsUnavailable && (
+                  <div className="rgn-warn" role="alert">
+                    ⚠️ ページの寸法が取得できないため、この画面では領域を編集できません。
+                    保存しても<b>既存の領域設定はそのまま保たれます</b>が、領域を変更したい
+                    場合は画面を再読み込みしてからやり直してください。
+                  </div>
+                )}
+                {preservedCount > 0 && (
+                  <p className="sub" style={{ margin: 0 }}>
+                    ほかに {preservedCount} 件の領域が、ページ寸法が未登録のため編集対象外です
+                    （保存してもそのまま保持されます）。
+                  </p>
+                )}
                 {err && (
                   <div className="rgn-err" role="alert">
                     {err}
