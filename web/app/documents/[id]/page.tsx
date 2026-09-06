@@ -118,8 +118,28 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     (r: SchemaSaved) => {
       rememberCreated({ docType: r.docType, schemaId: r.schemaId });
       afterSchemaSaved(r, true);
+      // この帳票の種別を確定する。**作成（テンプレート化）のときだけ**行う。
+      // onRegionsEdited（領域編集）でも呼ぶと、領域を直すたびに、利用者が取込時に
+      // 指定した種別を黙って上書きしてしまう。
+      // 書き戻しは非同期だが、この画面はテンプレート化後も残るので中断されない
+      // （ボタン側に置くとバナーごとアンマウントされて消える）。
+      // 失敗しても致命ではない（スキーマは既に出来ている）ので警告に留める。
+      void api
+        .patchDocument(id, { doc_type: r.docType })
+        .then(() => {
+          qc.invalidateQueries({ queryKey: ["documents"] });
+          // classify は staleTime 5 分。落とさないと「declared になったのに
+          // 推定バナーが古いまま」になる
+          qc.invalidateQueries({ queryKey: ["classify", id] });
+        })
+        .catch(() => {
+          push({
+            kind: "warn",
+            message: "スキーマは作成できましたが、この帳票の種別の記録に失敗しました。",
+          });
+        });
     },
-    [rememberCreated, afterSchemaSaved],
+    [id, qc, push, rememberCreated, afterSchemaSaved],
   );
   const onRegionsEdited = useCallback(
     (r: SchemaSaved) => afterSchemaSaved(r, false),
@@ -462,11 +482,11 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
       )}
       {createdDocType !== null && (
         <div className="tpl-banner" role="status">
-          {/* 「取込時に種別を指定すると」とはまだ書かない: API は doc_type を受けるが
-              web のアップロード導線が渡していないため、画面上にその操作が存在しない */}
+          {/* 「自動抽出できます」とは書かない: 抽出の開始は明示クリックのまま
+              （ADR-0006）。ここで約束できるのは「定義が既定で選ばれる」ところまで */}
           ✅ スキーマ「<b>{createdDocType}</b>」を作成しました。この帳票の値はこのまま
-          確認・確定できます。次回の同種帳票は、抽出画面でこのスキーマを選べます
-          （ファイル名に種別が含まれていれば既定で選ばれます）。
+          確認・確定できます。次回の同種帳票は、取り込むときに種別
+          「<b>{createdDocType}</b>」を選ぶと、この定義が抽出画面で自動的に選ばれます。
         </div>
       )}
       {readOnly && (

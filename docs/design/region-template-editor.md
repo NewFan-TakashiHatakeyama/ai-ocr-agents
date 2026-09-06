@@ -599,7 +599,7 @@ web 側: `web/lib/types.ts` に `RegionRect` / `ResolvedRegion` / `PageDim`、`S
 15. **pg_persistence の EMPTY_SCHEMA / schema dict への exclude 追加**: プロンプト汚染経路になるため置き場を LoadedContext/state トップレベルに一本化（批評 scope B-4 により草案から削除）。
 16. **ワークフロー固定版の自動追従（repoint / `ExtractConfig.doc_type` による最新版解決）**: 本件スコープ外（敵対的レビュー第2回 C5 / D17）。理由は「有効化済みワークフローの抽出挙動が、管理者の操作なしに別の版へ切り替わる」副作用が本設計の検証範囲を超えるため。v1 は**可視化**（保存トーストの旧版参照警告 + lint L012 warning）に留め、恒久策は別チケットで判断する。§4.4b。
 17. **`ExtractionState.review_items` への `Annotated[list, operator.add]` reducer 導入**: `apply_feedback` / resume 経路で ReviewItem が累積蓄積するリスクがあるため採らない。**gate ノード内での明示 carry-forward** で対応する（Phase 0。敵対的レビュー第2回 C12 / C23）。
-18. **`documents.doc_type` のテンプレート化時自動更新**: 再抽出は `schema_id` の明示送信で足りるため行わない（classify の `method="declared"` に乗せるかは §11-11 で別途検討。敵対的レビュー第2回 C11）。
+18. ~~**`documents.doc_type` のテンプレート化時自動更新**: 再抽出は `schema_id` の明示送信で足りるため行わない~~ → **反転済み（2026-09-06）**。`PATCH /v1/documents/{id}`（admin・登録済み doc_type のみ）で書き戻す。理由: 再抽出（1 通目）には確かに不要だが、**2 通目以降の再利用**が成立しない。web のアップロード導線が doc_type を渡していなかったため classify の `declared` 経路が実運用で一度も発火せず、残る信号はファイル名だけで、実際のファイル名では何も推定できなかった。`PUT /schemas` への相乗りは採らない（領域編集でも同じ API が飛ぶため、領域を直すだけで取込時に指定した種別を無言で上書きする）。
 19. **矩形の移動・リサイズを編集モードにだけ入れる等の例外**: v1 は作成・編集で同一操作セット（§10-8）。
 
 ---
@@ -616,7 +616,7 @@ web 側: `web/lib/types.ts` に `RegionRect` / `ResolvedRegion` / `PageDim`、`S
 8. **exclude の適用単位が doc_type（スキーマ版）であることの副作用**（敵対的レビュー第2回 C19 / D18）: 現行の分類は宣言 doc_type とファイル名語彙のみで取引先を区別できないため、取引先 A の帳票で描いた「承認印」矩形が、同じ `doc_type=invoice` を使う取引先 B/C の帳票にも適用され、その座標にある印字値（合計・発行者・登録番号）の span が除去され得る。span 数件では §5.4 の 20% 条件にもセル条件にも掛からず、grounding 喪失で値が null になっても現状は「要確認」に出ない（→ Phase 0 の `review_status` 修正と「除外 span > 0 かつ required/critical が null」の集約 ReviewItem で最低線を張る）。運用者の回避策が「取引先ごとに doc_type を分ける」しかない状態は製品を座標テンプレート必須品へ退行させるため、**v2 でレイアウト単位のスコープ化（取引先 / レイアウト ID での適用条件、または本文分類の導入後に不一致 run で exclude を降格）を検討する**。v1 は保存前警告 + オーバーレイ + ReviewItem による検知に留める。
 9. **ワークフローの版固定（D17 / §4.4b）**: v1 は可視化のみで、有効化済みワークフローは旧版の除外設定を使い続ける。運用者が警告と lint L012 を無視した場合「保存したのに印影が消えない」は残る。自動 repoint を入れるかは実運用での踏み方を見てから判断する。
 10. **markdown 除外のページ粒度（敵対的レビュー第2回 C24）**: 現行 fixture では markdown が空なので実質 no-op だが、structure-svc が markdown を返す構成に変わると、除外領域を持つページ（単ページ帳票では全文）の KIE レイアウト文脈が丸ごと失われる。精度影響は Phase 4 の計測に含め、部分除去方式への切り替えを判断する。
-11. **`documents.doc_type` はテンプレート化時に更新されない**（§10-18）。再抽出は `schema_id` 明示で足りるが、classify の `method="declared"` に乗せて自動取込側の推定精度を上げるかは別途検討する。
+11. ~~**`documents.doc_type` はテンプレート化時に更新されない**~~ → **解決済み（2026-09-06、§10-18 参照）**。ただし**自動取込（S3 / GDrive / M365）経路には配線していない**: `workflow_store` の `INSERT INTO documents` は doc_type 列を持たず、埋めると `process.classify` の許可リスト照合が初めて効き始めて `on_unknown="halt"` のワークフローが正当な帳票で止まり得る。またトリガーが複数マッチしたとき documents 行 1 つにどの種別を入れるかが未定義。別チケット。
 12. **`superseded` run status の追加（D15）**: `get_latest_run` / 削除ブロッカー / `workflow_graph.py:487` の hitl_gate / 一覧の絞り込みなど、`extraction_runs.status` を読む全経路の棚卸しが Phase 2 の実装時に必要。棚卸しを怠ると旧 run がレビュー待ちのまま残る。
 13. **`"last"` 以外の相対ページ指定**（「2 ページ目以降」等）は要求が出てから。
 
