@@ -1,0 +1,521 @@
+{
+ "_about": "samples/ の帳票 29 枚（重複 1 枚を除く）の正解値。Phase 4 の A/B 実測に使う。作り方: 各画像を 2 つのラベラーが独立に読み、食い違った 6 項目だけ第三者が画像を見て裁定した（2026-09-06）。値は紙面の印字どおり（敬称は含めない、金額は税込の数字のみ）。",
+ "_layout_families": {
+  "_about": "「片方で引いた矩形がもう片方でも同じ項目に当たる」ことを目視で確認した組。テンプレートを流用できるのはこの 2 組だけで、寸法や発行元が同じでも項目の置き場所が違う組（例: sample12/sample17、sample2/sample13）は流用できない。",
+  "abc_motors": [
+   "sample5.jpeg",
+   "sample18.jpeg"
+  ],
+  "bizreform_a4": [
+   "sample8.png",
+   "sample15.png",
+   "sample21.png"
+  ]
+ },
+ "documents": {
+  "sample.png": {
+   "title": "御見積書",
+   "doc_kind": "quotation",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "SystemBase",
+    "issuer_address": null,
+    "customer_name": "ＡＡＡ食品株式会社 ＡＡＡ支社",
+    "customer_address": null,
+    "total_amount": "136998",
+    "document_date": "2014年04月01日",
+    "document_no": "00000101"
+   },
+   "adjudicated": []
+  },
+  "sample10.jpg": {
+   "title": "請　求　書",
+   "doc_kind": "invoice",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": null,
+    "issuer_address": "東京都品川区北品川５－１０－２０サンプルビル２Ｆ",
+    "customer_name": "品川太田株式会社",
+    "customer_address": "東京都品川区中延６－５－３さくらビル",
+    "total_amount": "21628231",
+    "document_date": "2019年11月20日",
+    "document_no": "1"
+   },
+   "adjudicated": [
+    "issuer_address",
+    "customer_address"
+   ]
+  },
+  "sample11.jpg": {
+   "title": "御見積書",
+   "doc_kind": "quotation",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "株式会社見積商事",
+    "issuer_address": "名古屋市中区○-○-○○○生命ビル12F",
+    "customer_name": "株式会社三の丸物産",
+    "customer_address": null,
+    "total_amount": "3330180",
+    "document_date": "平成27年7月17日",
+    "document_no": "140832503-04"
+   },
+   "adjudicated": []
+  },
+  "sample12.png": {
+   "title": "御見積書",
+   "doc_kind": "quotation",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "わくわくリフォーム株式会社",
+    "issuer_address": "東京都新宿区四谷0-0-0四ツ谷ビル12F",
+    "customer_name": "山田　太郎",
+    "customer_address": null,
+    "total_amount": "2200000",
+    "document_date": "令和02年03月03日",
+    "document_no": "MI0001"
+   },
+   "adjudicated": []
+  },
+  "sample13.png": {
+   "title": "御見積書（控）",
+   "doc_kind": "quotation",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": true,
+   "fields": {
+    "issuer_name": "自社名(ロゴや社判も登録できます)",
+    "issuer_address": "東京都千代田区住所1住所2ビル名等",
+    "customer_name": "得意先の会社名",
+    "customer_address": null,
+    "total_amount": null,
+    "document_date": "令和02年02月01日",
+    "document_no": "MI0001"
+   },
+   "adjudicated": [
+    "issuer_name"
+   ]
+  },
+  "sample14.png": {
+   "title": "案件一覧表",
+   "doc_kind": "other",
+   "issuer_block": "other",
+   "customer_block": "none",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": null,
+    "issuer_address": null,
+    "customer_name": null,
+    "customer_address": null,
+    "total_amount": "6771400",
+    "document_date": "2026/08/19",
+    "document_no": null
+   },
+   "adjudicated": []
+  },
+  "sample15.png": {
+   "title": "納品書",
+   "doc_kind": "delivery_note",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "【サンプル】ビズリフォーム株式会社",
+    "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+    "customer_name": "株式会社千曲川ホーム",
+    "customer_address": "神奈川県川崎市高津区坂戸X-XX-XXXX",
+    "total_amount": "2475000",
+    "document_date": "令和5年5月1日",
+    "document_no": "123"
+   },
+   "adjudicated": []
+  },
+  "sample16.png": {
+   "title": "御請求書",
+   "doc_kind": "invoice",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "ビズリフォーム株式会社",
+    "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+    "customer_name": "グランドコート浦和美園",
+    "customer_address": null,
+    "total_amount": "49500",
+    "document_date": "2023年4月17日",
+    "document_no": "15082"
+   },
+   "adjudicated": []
+  },
+  "sample17.png": {
+   "title": "納品書",
+   "doc_kind": "delivery_note",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "わくわくファッション株式会社",
+    "issuer_address": "東京都新宿区四谷9-9-9 ファッションビル99F",
+    "customer_name": "鈴木 邦夫",
+    "customer_address": "兵庫県神戸市東灘区住吉浜町",
+    "total_amount": "11870",
+    "document_date": "令和02年01月15日",
+    "document_no": "NH0001"
+   },
+   "adjudicated": []
+  },
+  "sample18.jpeg": {
+   "title": "車両見積書",
+   "doc_kind": "quotation",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "ABCモータース",
+    "issuer_address": "東京都千代田区永田町1丁目7-1",
+    "customer_name": "伊達 政宗",
+    "customer_address": "宮城県仙台市青葉区川内1-1-1",
+    "total_amount": "3680000",
+    "document_date": "2026-06-25",
+    "document_no": "299"
+   },
+   "adjudicated": []
+  },
+  "sample19.png": {
+   "title": "概算見積書",
+   "doc_kind": "quotation",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "ビズリフォーム株式会社",
+    "issuer_address": null,
+    "customer_name": "グランドコート浦和美園 管理組合 理事長 駒林 次郎",
+    "customer_address": null,
+    "total_amount": "60500",
+    "document_date": "2023年4月17日",
+    "document_no": "15082"
+   },
+   "adjudicated": []
+  },
+  "sample2.png": {
+   "title": "請求書",
+   "doc_kind": "invoice",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "わくわく物産株式会社",
+    "issuer_address": "東京都新宿区四谷9－9－9サプライビル2F",
+    "customer_name": "株式会社エイビーエム",
+    "customer_address": "神奈川県横浜市港北区樽町エイビービル",
+    "total_amount": "7003",
+    "document_date": "令和02年01月31日",
+    "document_no": "GS0001"
+   },
+   "adjudicated": []
+  },
+  "sample20.png": {
+   "title": "売上伝票",
+   "doc_kind": "sales_slip",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": true,
+   "fields": {
+    "issuer_name": "【サンプル】ビズリフォーム株式会社",
+    "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+    "customer_name": "ワイスホルン・リノベート株式会社",
+    "customer_address": "東京都中央区八丁堀XXX-X新臨海タワー１５F",
+    "total_amount": "58300",
+    "document_date": "令和5年5月1日",
+    "document_no": "125"
+   },
+   "adjudicated": []
+  },
+  "sample21.png": {
+   "title": "請 求 書",
+   "doc_kind": "invoice",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "【サンプル】ビズリフォーム株式会社",
+    "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+    "customer_name": "株式会社千曲川ホーム",
+    "customer_address": "神奈川県川崎市高津区坂戸X-XX-XXXX",
+    "total_amount": "2475000",
+    "document_date": "令和5年5月1日",
+    "document_no": "123"
+   },
+   "adjudicated": []
+  },
+  "sample22.png": {
+   "title": "（表題の印字なし）",
+   "doc_kind": "invoice",
+   "issuer_block": "other",
+   "customer_block": "none",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": null,
+    "issuer_address": null,
+    "customer_name": null,
+    "customer_address": null,
+    "total_amount": "2341350",
+    "document_date": null,
+    "document_no": null
+   },
+   "adjudicated": []
+  },
+  "sample23.png": {
+   "title": "内訳明細書",
+   "doc_kind": "other",
+   "issuer_block": "other",
+   "customer_block": "none",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": null,
+    "issuer_address": null,
+    "customer_name": null,
+    "customer_address": null,
+    "total_amount": "359289",
+    "document_date": "令和5年5月1日",
+    "document_no": "15-1"
+   },
+   "adjudicated": []
+  },
+  "sample24.gif": {
+   "title": "経費帳",
+   "doc_kind": "other",
+   "issuer_block": "bottom",
+   "customer_block": "none",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "【サンプル】ビズ屋",
+    "issuer_address": null,
+    "customer_name": null,
+    "customer_address": null,
+    "total_amount": "141245",
+    "document_date": "平成31年 1月29日",
+    "document_no": null
+   },
+   "adjudicated": [
+    "total_amount"
+   ]
+  },
+  "sample25.png": {
+   "title": "前期比較決算書",
+   "doc_kind": "other",
+   "issuer_block": "bottom",
+   "customer_block": "none",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "【サンプル】ビズリフォーム株式会社",
+    "issuer_address": null,
+    "customer_name": null,
+    "customer_address": null,
+    "total_amount": null,
+    "document_date": "令和4年8月24日",
+    "document_no": null
+   },
+   "adjudicated": []
+  },
+  "sample26.jpg": {
+   "title": "補助一覧集計表(月次集計)",
+   "doc_kind": "other",
+   "issuer_block": "bottom",
+   "customer_block": "none",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "【サンプル】ビズリフォーム株式会社",
+    "issuer_address": null,
+    "customer_name": null,
+    "customer_address": null,
+    "total_amount": null,
+    "document_date": null,
+    "document_no": null
+   },
+   "adjudicated": []
+  },
+  "sample27.jpg": {
+   "title": "御見積書",
+   "doc_kind": "quotation",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "サンプル商事株式会社",
+    "issuer_address": "東京都品川区北品川５－１０－２０サンプルビル２Ｆ",
+    "customer_name": "矢部 隆司",
+    "customer_address": null,
+    "total_amount": "75916",
+    "document_date": "2019年3月27日",
+    "document_no": "24"
+   },
+   "adjudicated": [
+    "issuer_address"
+   ]
+  },
+  "sample29.png": {
+   "title": "見積書",
+   "doc_kind": "quotation",
+   "issuer_block": "bottom",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "サンプル商事株式会社",
+    "issuer_address": "東京都サンプル区サンプル1-2-3",
+    "customer_name": "株式会社山田製作所",
+    "customer_address": null,
+    "total_amount": "985600",
+    "document_date": "2026/06/15",
+    "document_no": "EST-2026-0042"
+   },
+   "adjudicated": []
+  },
+  "sample3.png": {
+   "title": "得意先別商品別売上推移表",
+   "doc_kind": "other",
+   "issuer_block": "other",
+   "customer_block": "none",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": null,
+    "issuer_address": null,
+    "customer_name": null,
+    "customer_address": null,
+    "total_amount": null,
+    "document_date": "2022年07月07日",
+    "document_no": null
+   },
+   "adjudicated": []
+  },
+  "sample30.png": {
+   "title": "INVOICE",
+   "doc_kind": "invoice",
+   "issuer_block": "top-center",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "DEMO.co.,ltd",
+    "issuer_address": null,
+    "customer_name": "sample.Inc",
+    "customer_address": "A-123 Sample.BLD,1-2-3,sample-city",
+    "total_amount": "15608.40",
+    "document_date": "31-MAY-24",
+    "document_no": "sample-001"
+   },
+   "adjudicated": []
+  },
+  "sample4.jpeg": {
+   "title": "概算見積書",
+   "doc_kind": "quotation",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "ABCモータース",
+    "issuer_address": "東京都千代田区永田町1丁目7-1",
+    "customer_name": "伊達 政宗",
+    "customer_address": "宮城県仙台市青葉区川内1-1-1",
+    "total_amount": "50228",
+    "document_date": "2024-07-24",
+    "document_no": "599"
+   },
+   "adjudicated": []
+  },
+  "sample5.jpeg": {
+   "title": "車両請求書",
+   "doc_kind": "invoice",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "ABCモータース",
+    "issuer_address": "東京都千代田区永田町1丁目7-1",
+    "customer_name": "伊達 政宗",
+    "customer_address": "宮城県仙台市青葉区川内1-1-1",
+    "total_amount": "3680000",
+    "document_date": "2026-06-25",
+    "document_no": "299"
+   },
+   "adjudicated": []
+  },
+  "sample6.png": {
+   "title": "御請求明細書",
+   "doc_kind": "invoice",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "東日本東京商社株式会社",
+    "issuer_address": "仙台市泉区紫山3-1-4",
+    "customer_name": "長崎カントリーフーズ",
+    "customer_address": null,
+    "total_amount": "895860",
+    "document_date": "2003年09月30日",
+    "document_no": null
+   },
+   "adjudicated": []
+  },
+  "sample7.png": {
+   "title": "請求書",
+   "doc_kind": "invoice",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "エッグ運送株式会社",
+    "issuer_address": "大阪府堺市港区土師町4-16-40エッグインターナショナルビル3F",
+    "customer_name": "大島梱包輸送株式会社",
+    "customer_address": "大阪府岸和田市春木若松町1026-56",
+    "total_amount": "838408",
+    "document_date": "'16年01月31日",
+    "document_no": null
+   },
+   "adjudicated": [
+    "document_date"
+   ]
+  },
+  "sample8.png": {
+   "title": "御見積書",
+   "doc_kind": "quotation",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "【サンプル】ビズリフォーム株式会社",
+    "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+    "customer_name": "大熊 和一",
+    "customer_address": "神奈川県横浜市青葉区美しが丘１８丁目５番地２号",
+    "total_amount": "395217",
+    "document_date": "令和5年5月1日",
+    "document_no": "15"
+   },
+   "adjudicated": []
+  },
+  "sample9.jpg": {
+   "title": "予約案内書兼請求書",
+   "doc_kind": "invoice",
+   "issuer_block": "top-right",
+   "customer_block": "top-left",
+   "multi_slip": false,
+   "fields": {
+    "issuer_name": "株式会社アイディディ・トラベル",
+    "issuer_address": "東京都千代田区大手町１－７－２東京サンケイビル",
+    "customer_name": "小川産業株式会社",
+    "customer_address": "大阪府大阪市中央区森ノ宮中央１－４－５２森ノ宮ビル１Ｆ",
+    "total_amount": "1261580",
+    "document_date": "2023年06月15日",
+    "document_no": "KY0001116-001-0"
+   },
+   "adjudicated": []
+  }
+ }
+}

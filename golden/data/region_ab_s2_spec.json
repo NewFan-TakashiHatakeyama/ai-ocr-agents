@@ -1,0 +1,62 @@
+{
+ "s2_sample5": {
+  "template_image": "samples/sample18.jpeg",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s2_sample18": {
+  "template_image": "samples/sample5.jpeg",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s2_sample8": {
+  "template_image": "samples/sample15.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s2_sample15": {
+  "template_image": "samples/sample21.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s2_sample21": {
+  "template_image": "samples/sample8.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ }
+}

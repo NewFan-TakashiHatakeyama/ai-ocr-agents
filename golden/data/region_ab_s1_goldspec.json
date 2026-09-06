@@ -1,0 +1,239 @@
+{
+ "s1_sample": {
+  "template_image": "samples/sample.png",
+  "gold": {
+   "issuer_name": "SystemBase",
+   "customer_name": "ＡＡＡ食品株式会社 ＡＡＡ支社",
+   "total_amount": "136998",
+   "document_date": "2014年04月01日",
+   "document_no": "00000101"
+  }
+ },
+ "s1_sample11": {
+  "template_image": "samples/sample11.jpg",
+  "gold": {
+   "issuer_name": "株式会社見積商事",
+   "issuer_address": "名古屋市中区○-○-○○○生命ビル12F",
+   "customer_name": "株式会社三の丸物産",
+   "total_amount": "3330180",
+   "document_date": "平成27年7月17日",
+   "document_no": "140832503-04"
+  }
+ },
+ "s1_sample12": {
+  "template_image": "samples/sample12.png",
+  "gold": {
+   "issuer_name": "わくわくリフォーム株式会社",
+   "issuer_address": "東京都新宿区四谷0-0-0四ツ谷ビル12F",
+   "customer_name": "山田　太郎",
+   "total_amount": "2200000",
+   "document_date": "令和02年03月03日",
+   "document_no": "MI0001"
+  }
+ },
+ "s1_sample13": {
+  "template_image": "samples/sample13.png",
+  "gold": {
+   "issuer_name": "自社名(ロゴや社判も登録できます)",
+   "issuer_address": "東京都千代田区住所1住所2ビル名等",
+   "customer_name": "得意先の会社名",
+   "document_date": "令和02年02月01日",
+   "document_no": "MI0001"
+  }
+ },
+ "s1_sample15": {
+  "template_image": "samples/sample15.png",
+  "gold": {
+   "issuer_name": "【サンプル】ビズリフォーム株式会社",
+   "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+   "customer_name": "株式会社千曲川ホーム",
+   "customer_address": "神奈川県川崎市高津区坂戸X-XX-XXXX",
+   "total_amount": "2475000",
+   "document_date": "令和5年5月1日",
+   "document_no": "123"
+  }
+ },
+ "s1_sample16": {
+  "template_image": "samples/sample16.png",
+  "gold": {
+   "issuer_name": "ビズリフォーム株式会社",
+   "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+   "customer_name": "グランドコート浦和美園",
+   "total_amount": "49500",
+   "document_date": "2023年4月17日",
+   "document_no": "15082"
+  }
+ },
+ "s1_sample17": {
+  "template_image": "samples/sample17.png",
+  "gold": {
+   "issuer_name": "わくわくファッション株式会社",
+   "issuer_address": "東京都新宿区四谷9-9-9 ファッションビル99F",
+   "customer_name": "鈴木 邦夫",
+   "customer_address": "兵庫県神戸市東灘区住吉浜町",
+   "total_amount": "11870",
+   "document_date": "令和02年01月15日",
+   "document_no": "NH0001"
+  }
+ },
+ "s1_sample18": {
+  "template_image": "samples/sample18.jpeg",
+  "gold": {
+   "issuer_name": "ABCモータース",
+   "issuer_address": "東京都千代田区永田町1丁目7-1",
+   "customer_name": "伊達 政宗",
+   "customer_address": "宮城県仙台市青葉区川内1-1-1",
+   "total_amount": "3680000",
+   "document_date": "2026-06-25",
+   "document_no": "299"
+  }
+ },
+ "s1_sample19": {
+  "template_image": "samples/sample19.png",
+  "gold": {
+   "issuer_name": "ビズリフォーム株式会社",
+   "customer_name": "グランドコート浦和美園 管理組合 理事長 駒林 次郎",
+   "total_amount": "60500",
+   "document_date": "2023年4月17日",
+   "document_no": "15082"
+  }
+ },
+ "s1_sample2": {
+  "template_image": "samples/sample2.png",
+  "gold": {
+   "issuer_name": "わくわく物産株式会社",
+   "issuer_address": "東京都新宿区四谷9－9－9サプライビル2F",
+   "customer_name": "株式会社エイビーエム",
+   "customer_address": "神奈川県横浜市港北区樽町エイビービル",
+   "total_amount": "7003",
+   "document_date": "令和02年01月31日",
+   "document_no": "GS0001"
+  }
+ },
+ "s1_sample20": {
+  "template_image": "samples/sample20.png",
+  "gold": {
+   "issuer_name": "【サンプル】ビズリフォーム株式会社",
+   "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+   "customer_name": "ワイスホルン・リノベート株式会社",
+   "customer_address": "東京都中央区八丁堀XXX-X新臨海タワー１５F",
+   "total_amount": "58300",
+   "document_date": "令和5年5月1日",
+   "document_no": "125"
+  }
+ },
+ "s1_sample21": {
+  "template_image": "samples/sample21.png",
+  "gold": {
+   "issuer_name": "【サンプル】ビズリフォーム株式会社",
+   "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+   "customer_name": "株式会社千曲川ホーム",
+   "customer_address": "神奈川県川崎市高津区坂戸X-XX-XXXX",
+   "total_amount": "2475000",
+   "document_date": "令和5年5月1日",
+   "document_no": "123"
+  }
+ },
+ "s1_sample27": {
+  "template_image": "samples/sample27.jpg",
+  "gold": {
+   "issuer_name": "サンプル商事株式会社",
+   "issuer_address": "東京都品川区北品川５－１０－２０サンプルビル２Ｆ",
+   "customer_name": "矢部 隆司",
+   "total_amount": "75916",
+   "document_date": "2019年3月27日",
+   "document_no": "24"
+  }
+ },
+ "s1_sample29": {
+  "template_image": "samples/sample29.png",
+  "gold": {
+   "issuer_name": "サンプル商事株式会社",
+   "issuer_address": "東京都サンプル区サンプル1-2-3",
+   "customer_name": "株式会社山田製作所",
+   "total_amount": "985600",
+   "document_date": "2026/06/15",
+   "document_no": "EST-2026-0042"
+  }
+ },
+ "s1_sample30": {
+  "template_image": "samples/sample30.png",
+  "gold": {
+   "issuer_name": "DEMO.co.,ltd",
+   "customer_name": "sample.Inc",
+   "customer_address": "A-123 Sample.BLD,1-2-3,sample-city",
+   "total_amount": "15608.40",
+   "document_date": "31-MAY-24",
+   "document_no": "sample-001"
+  }
+ },
+ "s1_sample4": {
+  "template_image": "samples/sample4.jpeg",
+  "gold": {
+   "issuer_name": "ABCモータース",
+   "issuer_address": "東京都千代田区永田町1丁目7-1",
+   "customer_name": "伊達 政宗",
+   "customer_address": "宮城県仙台市青葉区川内1-1-1",
+   "total_amount": "50228",
+   "document_date": "2024-07-24",
+   "document_no": "599"
+  }
+ },
+ "s1_sample5": {
+  "template_image": "samples/sample5.jpeg",
+  "gold": {
+   "issuer_name": "ABCモータース",
+   "issuer_address": "東京都千代田区永田町1丁目7-1",
+   "customer_name": "伊達 政宗",
+   "customer_address": "宮城県仙台市青葉区川内1-1-1",
+   "total_amount": "3680000",
+   "document_date": "2026-06-25",
+   "document_no": "299"
+  }
+ },
+ "s1_sample6": {
+  "template_image": "samples/sample6.png",
+  "gold": {
+   "issuer_name": "東日本東京商社株式会社",
+   "issuer_address": "仙台市泉区紫山3-1-4",
+   "customer_name": "長崎カントリーフーズ",
+   "total_amount": "895860",
+   "document_date": "2003年09月30日"
+  }
+ },
+ "s1_sample7": {
+  "template_image": "samples/sample7.png",
+  "gold": {
+   "issuer_name": "エッグ運送株式会社",
+   "issuer_address": "大阪府堺市港区土師町4-16-40エッグインターナショナルビル3F",
+   "customer_name": "大島梱包輸送株式会社",
+   "customer_address": "大阪府岸和田市春木若松町1026-56",
+   "total_amount": "838408",
+   "document_date": "'16年01月31日"
+  }
+ },
+ "s1_sample8": {
+  "template_image": "samples/sample8.png",
+  "gold": {
+   "issuer_name": "【サンプル】ビズリフォーム株式会社",
+   "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+   "customer_name": "大熊 和一",
+   "customer_address": "神奈川県横浜市青葉区美しが丘１８丁目５番地２号",
+   "total_amount": "395217",
+   "document_date": "令和5年5月1日",
+   "document_no": "15"
+  }
+ },
+ "s1_sample9": {
+  "template_image": "samples/sample9.jpg",
+  "gold": {
+   "issuer_name": "株式会社アイディディ・トラベル",
+   "issuer_address": "東京都千代田区大手町１－７－２東京サンケイビル",
+   "customer_name": "小川産業株式会社",
+   "customer_address": "大阪府大阪市中央区森ノ宮中央１－４－５２森ノ宮ビル１Ｆ",
+   "total_amount": "1261580",
+   "document_date": "2023年06月15日",
+   "document_no": "KY0001116-001-0"
+  }
+ }
+}

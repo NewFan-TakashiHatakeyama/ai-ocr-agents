@@ -1,0 +1,254 @@
+{
+ "s1_sample": {
+  "template_image": "samples/sample.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample11": {
+  "template_image": "samples/sample11.jpg",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample12": {
+  "template_image": "samples/sample12.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample13": {
+  "template_image": "samples/sample13.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample15": {
+  "template_image": "samples/sample15.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample16": {
+  "template_image": "samples/sample16.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample17": {
+  "template_image": "samples/sample17.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample18": {
+  "template_image": "samples/sample18.jpeg",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample19": {
+  "template_image": "samples/sample19.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample2": {
+  "template_image": "samples/sample2.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample20": {
+  "template_image": "samples/sample20.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample21": {
+  "template_image": "samples/sample21.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample27": {
+  "template_image": "samples/sample27.jpg",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample29": {
+  "template_image": "samples/sample29.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample30": {
+  "template_image": "samples/sample30.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample4": {
+  "template_image": "samples/sample4.jpeg",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample5": {
+  "template_image": "samples/sample5.jpeg",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample6": {
+  "template_image": "samples/sample6.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample7": {
+  "template_image": "samples/sample7.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample8": {
+  "template_image": "samples/sample8.png",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ },
+ "s1_sample9": {
+  "template_image": "samples/sample9.jpg",
+  "fields": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount",
+   "document_date",
+   "document_no"
+  ]
+ }
+}

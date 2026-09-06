@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -76,7 +78,14 @@ class Tally:
     control_runs: list[dict[str, Any]] = field(default_factory=list)
     treat_runs: list[dict[str, Any]] = field(default_factory=list)
 
-    def note(self, doc_id: str, name: str, positional: bool, arm: str, hit: bool) -> None:
+    # (doc_id, field, trial) をキーにした対応表。同じ帳票・同じ試行番号の
+    # control と treat を**対にして**数えるために持つ。全体率の引き算だけでは
+    # 「差がノイズの範囲か」を判断できない（前回の実測の弱点）。
+    paired: dict[tuple[str, str, int], dict[str, bool]] = field(default_factory=dict)
+
+    def note(
+        self, doc_id: str, name: str, positional: bool, arm: str, hit: bool, trial: int = -1
+    ) -> None:
         key = f"{doc_id}::{name}"
         t = self.per_field.setdefault(key, FieldTally(name=key, position_dependent=positional))
         t.position_dependent = t.position_dependent or positional
@@ -86,13 +95,77 @@ class Tally:
         else:
             t.treat_trials += 1
             t.treat_hits += int(hit)
+        if trial >= 0:
+            self.paired.setdefault((doc_id, name, trial), {})[arm] = hit
+
+
+def mcnemar(
+    paired: dict[tuple[str, str, int], dict[str, bool]],
+    only: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    """対応のある二値結果の McNemar 検定（正確二項）。
+
+    同じ帳票・同じ試行番号で control と treat を対にし、**片方だけ当たった対**
+    （不一致対）だけを数える。両方当たり／両方外れの対は差の情報を持たない。
+
+    前回の実測は全体率 0.864 対 0.780 を目視で比べただけで、「この差がノイズか」
+    を判断する根拠が無かった。不一致対が少なければ、率の差が大きく見えても
+    何も言えない ── それを数字で出す。"""
+    b = c = 0  # b: control だけ正解 / c: treat だけ正解
+    for key, arms in paired.items():
+        if only is not None and key[1] not in only:
+            continue
+        if "control" not in arms or "treat" not in arms:
+            continue  # 片方の抽出が失敗した対は使えない
+        if arms["control"] and not arms["treat"]:
+            b += 1
+        elif arms["treat"] and not arms["control"]:
+            c += 1
+    n = b + c
+    if n == 0:
+        return {"control_only": 0, "treat_only": 0, "discordant": 0, "p_value": None,
+                "verdict": "不一致対が 0。差を論じる材料が無い"}
+    k = min(b, c)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / (2.0**n)
+    p = min(1.0, 2.0 * tail)
+    if p < 0.05:
+        verdict = "介入が有意に良い" if c > b else "介入が有意に悪い"
+    else:
+        verdict = "有意差なし（この試行数では差を示せない）"
+    return {
+        "control_only": b,
+        "treat_only": c,
+        "discordant": n,
+        "p_value": p,
+        "verdict": verdict,
+    }
 
 
 def _norm(v: Optional[str]) -> str:
-    """比較用の正規化。ゴールデンの value は正規化済み表現なので軽く揃えるだけ。"""
+    """比較用の正規化。**表記の揺れは同一視する。**
+
+    測りたいのは「正しい実体を選べたか」（発行元と宛先を取り違えていないか）で
+    あって字面ではない。実測すると、抽出値と正解の差の大半が次の 3 つだった:
+
+      - 敬称: 「大熊和一様」 vs 「大熊 和一」
+      - 全角半角: 「１８丁目」 vs 「18丁目」
+      - 区切り・通貨記号: 「395,217」 vs 「395217」
+
+    これを別物として数えると、**両アームとも同じだけ外れて差が見えなくなる**
+    （実際に 1/7 まで落ちた）。正規化は対照・介入に同じく効くので、比較の
+    公平さは崩れない。逆に、値そのものの取り違えや欠落は正規化しても残る。
+    """
     if v is None:
         return ""
-    return "".join(str(v).split()).replace(",", "").replace("￥", "").replace("¥", "")
+    t = unicodedata.normalize("NFKC", str(v))
+    t = "".join(t.split())
+    for ch in (",", "￥", "¥", "円", "-", "−", "－", "ー", "‐", "･", "・"):
+        t = t.replace(ch, "")
+    # 宛名の敬称。紙面には付くが「誰宛か」の判定には関係しない
+    for suffix in ("様", "御中", "殿", "行", "宛"):
+        if t.endswith(suffix):
+            t = t[: -len(suffix)]
+    return t.casefold()
 
 
 def _wait_job(client: httpx.Client, job_id: str, timeout_sec: float) -> str:
@@ -153,6 +226,8 @@ def run(
     {"_positional": {doc_type: [field_name, ...]}} を持つ。
     """
     positional_map = regions.get("_positional", {})
+    # 位置でしか区別できない項目名の集合（doc_type をまたいで合算する）
+    positional_names = {n for names in positional_map.values() for n in names}
     tally = Tally()
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -201,37 +276,46 @@ def run(
                 },
             )
 
-            document_id = _upload(client, image)
-            print(f"[region_ab] {doc.document_id}: doc={document_id}", flush=True)
+            print(f"[region_ab] {doc.document_id}: {image.name}", flush=True)
 
             for i in range(trials):
                 # 交互に回す（時間帯によるモデル側の揺れを両条件へ均等に散らす）
                 for arm, schema in (("control", control), ("treat", treat)):
-                    status = _extract(client, document_id, str(schema["id"]), timeout_sec)
-                    if status != "succeeded":
-                        print(f"  trial {i} {arm}: 抽出 {status}（この試行は捨てる）", flush=True)
-                        continue
-                    res = _result(client, document_id)
-                    got = {
-                        f["name"]: _norm(f.get("value_normalized") or f.get("value_raw"))
-                        for f in res.get("fields", [])
-                    }
-                    hits = 0
-                    for name, want in gold.items():
-                        hit = bool(want) and got.get(name, "") == want
-                        hits += int(hit)
-                        tally.note(doc.document_id, name, name in positional, arm, hit)
-                    row = {
-                        "document_id": doc.document_id,
-                        "trial": i,
-                        "hits": hits,
-                        "total": sum(1 for v in gold.values() if v),
-                        "run_id": res.get("run_id"),
-                    }
-                    (tally.control_runs if arm == "control" else tally.treat_runs).append(row)
-                    print(f"  trial {i} {arm}: {hits}/{row['total']}", flush=True)
-
-            client.delete(f"/documents/{document_id}")
+                    # **1 抽出ごとに帳票を上げ直す。** 同じ帳票を使い回すと、
+                    # 抽出が自動確定した時点で次の抽出が 409 で弾かれる
+                    # （確定値を無警告で置き換えないためのサーバ側の正しい振る舞い。
+                    #  supersede_review は needs_review にしか効かない）。
+                    # 前回の計測は全 run が needs_review に落ちていたので踏まなかった。
+                    document_id = _upload(client, image)
+                    try:
+                        status = _extract(client, document_id, str(schema["id"]), timeout_sec)
+                        if status != "succeeded":
+                            print(f"  trial {i} {arm}: 抽出 {status}（この試行は捨てる）",
+                                  flush=True)
+                            continue
+                        res = _result(client, document_id)
+                        got = {
+                            f["name"]: _norm(f.get("value_normalized") or f.get("value_raw"))
+                            for f in res.get("fields", [])
+                        }
+                        hits = 0
+                        for name, want in gold.items():
+                            hit = bool(want) and got.get(name, "") == want
+                            hits += int(hit)
+                            tally.note(doc.document_id, name, name in positional, arm, hit, i)
+                        row = {
+                            "document_id": doc.document_id,
+                            "trial": i,
+                            "hits": hits,
+                            "total": sum(1 for v in gold.values() if v),
+                            "run_id": res.get("run_id"),
+                        }
+                        (tally.control_runs if arm == "control" else tally.treat_runs).append(
+                            row
+                        )
+                        print(f"  trial {i} {arm}: {hits}/{row['total']}", flush=True)
+                    finally:
+                        client.delete(f"/documents/{document_id}")
 
     fields = [t.as_dict() for t in tally.per_field.values()]
     pos = [f for f in fields if f["position_dependent"]]
@@ -251,6 +335,9 @@ def run(
         "positional_delta_rate": sum((f["delta_rate"] or 0) for f in pos),
         "regressed_fields": [f for f in fields if (f["delta_rate"] or 0) < 0],
         "improved_fields": [f for f in fields if (f["delta_rate"] or 0) > 0],
+        # **差がノイズの範囲かどうか**を数字で出す（率の引き算だけでは判断できない）
+        "mcnemar_all": mcnemar(tally.paired),
+        "mcnemar_positional": mcnemar(tally.paired, only=positional_names),
     }
 
 
