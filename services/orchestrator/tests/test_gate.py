@@ -365,3 +365,45 @@ def test_region_observations_noop_without_regions() -> None:
     """領域機能を使っていない run では metrics に region キーを作らない。"""
     out = _gate({"schema": {"doc_type": "invoice", "fields": []}, "fields": [_good_field()]})
     assert "region" not in out["metrics"]
+
+
+def test_読み取れなかったページがある_run_は自動確定しない() -> None:
+    """ページ処理の失敗は errors に積んで継続する設計だが、errors は永続化も表示も
+    されない。そのままだと**ページが欠けた結果が自動確定され会計連携まで素通りする**。
+    実際に 3 ページ PDF で 2 ページが落ち、合計金額に別ページの数字が入った。
+    """
+    from newfan_orchestrator import nodes
+    from newfan_schemas import Span
+
+    out = _gate(
+        {
+            "schema": {"doc_type": "invoice", "fields": []},
+            "fields": [_good_field()],
+            "spans": [Span(span_id=1, page=2, text="x", conf=0.9, bbox=[0, 0, 5, 5])],
+            "errors": [
+                {"page": 1, "stage": "structure_ocr", "error": "boom"},
+                {"page": 3, "stage": "structure_ocr", "error": "boom"},
+                {"stage": "load_context", "code": "E2000"},  # ページ不明は数えない
+            ],
+        }
+    )
+    reasons = [i.reason for i in out["review_items"]]
+    assert any("p.1・p.3" in r for r in reasons), reasons
+    assert nodes.route_confidence_gate(out) == "hitl_review"
+
+
+def test_VLで拾えたページは欠落として扱わない() -> None:
+    """structure_ocr が落ちても VL フォールバックで span が取れていれば結果は欠けない。"""
+    from newfan_orchestrator import nodes
+    from newfan_schemas import Span
+
+    out = _gate(
+        {
+            "schema": {"doc_type": "invoice", "fields": []},
+            "fields": [_good_field()],
+            "spans": [Span(span_id=1, page=1, text="x", conf=0.9, bbox=[0, 0, 5, 5])],
+            "errors": [{"page": 1, "stage": "structure_ocr", "error": "boom"}],
+        }
+    )
+    assert out["review_items"] == []
+    assert nodes.route_confidence_gate(out) == "finalize"

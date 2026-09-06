@@ -264,7 +264,7 @@ def confidence_gate_node(state: ExtractionState) -> dict[str, Any]:
             f.review_status = ReviewStatus.PENDING
 
     region_items, metrics = _region_observations(state, fields, schema)
-    items = list(items) + region_items
+    items = list(items) + _lost_page_items(state) + region_items
     # 位置ガードが per-field 所見を出した場合も「要確認」に出す
     for f in fields:
         if f.name in {i.field_name for i in region_items} and f.review_status not in (
@@ -288,6 +288,43 @@ def confidence_gate_node(state: ExtractionState) -> dict[str, Any]:
 
 # 集約 ReviewItem の擬似 field 名。実 field と衝突しないよう区切り文字を使う。
 REGION_AGGREGATE_FIELD = "__region__"
+LOST_PAGE_FIELD = "__pages__"
+
+
+def _lost_page_items(state: ExtractionState) -> list[ReviewItem]:
+    """何も読み取れなかったページがある run を自動確定させない。
+
+    ページ処理の失敗（OCR サービスのエラー・応答の形式不一致・タイムアウト）は
+    ``errors`` に積んで継続する設計だが、``errors`` はどこにも永続化されず画面にも
+    出ない。そのため**ページが丸ごと欠けた結果がそのまま自動確定され、会計連携まで
+    素通りする**経路が空いていた。実際に 3 ページの PDF で 2 ページが落ち、合計金額
+    として別ページの数字が採用された（座標型の不一致が原因。paddle_client 側で修正
+    済みだが、タイムアウト等の別要因では今後も起こり得る）。
+
+    VL フォールバックで拾えたページは対象外にする（結果が欠けていないため）。
+    """
+    failed: set[int] = set()
+    for e in state.get("errors", []) or []:
+        page = e.get("page")
+        if isinstance(page, int):
+            failed.add(page)
+    if not failed:
+        return []
+    covered = {s.page for s in state.get("spans", []) or []}
+    lost = sorted(failed - covered)
+    if not lost:
+        return []
+    return [
+        ReviewItem(
+            field_name=LOST_PAGE_FIELD,
+            critical=True,
+            reason=(
+                "読み取れなかったページがあります（"
+                + "・".join(f"p.{p}" for p in lost)
+                + "）。結果がそのページ分だけ欠けています"
+            ),
+        )
+    ]
 
 
 def _region_observations(
