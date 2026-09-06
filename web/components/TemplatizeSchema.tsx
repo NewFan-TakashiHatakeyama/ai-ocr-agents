@@ -9,39 +9,33 @@
 //
 // このファイルはボタンと開閉だけを持つ。項目の選択・領域の指定・保存は
 // TemplatizePreview、保存後のフォロー（再抽出・旧版ワークフロー警告）は
-// useSchemaSaved が担う。作成は PUT /schemas（create=true, admin）で、
+// **画面側**（useSchemaSaved）が担う。作成は PUT /schemas（create=true, admin）で、
 // 同名 doc_type は E1005 で拒否される。
 
 import { useState } from "react";
 
 import { TemplatizePreview } from "@/components/TemplatizePreview";
 import type { ExtractedField, PageDim } from "@/lib/types";
-import { useSchemaSaved } from "@/lib/useSchemaSaved";
+import type { SchemaSaved } from "@/lib/useSchemaSaved";
 
 export function TemplatizeSchema({
   documentId,
   fields,
   pages,
-  runStatus,
-  readOnly,
   suggestedDocType,
-  onCreated,
-  onRefetch,
+  onSaved,
 }: {
   documentId: string;
   fields: ExtractedField[];
   pages: PageDim[];
-  runStatus: string;
-  readOnly: boolean;
   suggestedDocType?: string | null;
-  // 作成後の再抽出と「領域・項目を編集」の入口条件に id が要るため、doc_type だけで
-  // なく schema id も返す（run.schema_id は作成後も null のままなので、これが
-  // 無いと同じ帳票から二度と編集に入れない write-once になる）。
-  onCreated: (r: { docType: string; schemaId: string }) => void;
-  onRefetch: () => void;
+  // **保存後の処理はこのコンポーネントでは行わない**。作成に成功するとバナーごと
+  // このボタンが消えるため、ここに再抽出のポーリングを置くと即座にアンマウントされ、
+  // 「再抽出は走ったのに画面が更新されず完了も通知されない」状態になる
+  // （AWS 実機の QA で再現）。親（画面そのもの）に渡して継続させる。
+  onSaved: (r: SchemaSaved) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const afterSave = useSchemaSaved({ documentId, runStatus, readOnly, onRefetch });
 
   return (
     <>
@@ -58,8 +52,7 @@ export function TemplatizeSchema({
           onClose={() => setOpen(false)}
           onSaved={(r) => {
             setOpen(false);
-            onCreated({ docType: r.docType, schemaId: r.schemaId });
-            afterSave(r, true);
+            onSaved(r);
           }}
         />
       )}

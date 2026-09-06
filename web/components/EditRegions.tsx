@@ -15,27 +15,24 @@ import { useState } from "react";
 
 import { TemplatizePreview } from "@/components/TemplatizePreview";
 import type { ExtractedField, PageDim } from "@/lib/types";
-import { useSchemaSaved } from "@/lib/useSchemaSaved";
+import type { SchemaSaved } from "@/lib/useSchemaSaved";
 
 export function EditRegions({
   documentId,
   fields,
   pages,
-  runStatus,
-  readOnly,
   docType,
-  onRefetch,
+  onSaved,
 }: {
   documentId: string;
   fields: ExtractedField[];
   pages: PageDim[];
-  runStatus: string;
-  readOnly: boolean;
   docType: string;
-  onRefetch: () => void;
+  // 保存後の処理（再抽出の待ち受け・警告）は画面側で行う。ここに置くと、
+  // 保存で条件が変わってこのボタンが消えた瞬間にポーリングが止まる。
+  onSaved: (r: SchemaSaved) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const afterSave = useSchemaSaved({ documentId, runStatus, readOnly, onRefetch });
 
   return (
     <>
@@ -52,7 +49,7 @@ export function EditRegions({
           onClose={() => setOpen(false)}
           onSaved={(r) => {
             setOpen(false);
-            afterSave(r, false);
+            onSaved(r);
           }}
         />
       )}

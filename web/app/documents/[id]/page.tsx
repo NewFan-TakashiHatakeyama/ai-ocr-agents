@@ -19,6 +19,7 @@ import { useReviewStore } from "@/lib/store";
 import { hasRole, usePrincipal } from "@/lib/principal";
 import { useToasts } from "@/lib/toast";
 import { fmtRemaining, useDocumentLock } from "@/lib/useDocumentLock";
+import { useSchemaSaved, type SchemaSaved } from "@/lib/useSchemaSaved";
 
 // SCR-03 検証画面（HITL, §8.2/§8.3）。本プロダクトの中核。全操作キーボード完結（§8.4）。
 export default function ReviewPage({ params }: { params: Promise<{ id: string }> }) {
@@ -100,6 +101,29 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
       }
     },
     [id],
+  );
+
+  // 保存後の処理（適用範囲の案内・再抽出の待ち受け・旧版ワークフローの警告）は
+  // **この画面**が持つ。テンプレート化ボタンは保存に成功するとバナーごと消えるので、
+  // そちら側に置くと再抽出のポーリングが即座に止まる（実機で踏んだ）。
+  const afterSchemaSaved = useSchemaSaved({
+    documentId: id,
+    runStatus: data?.status ?? "",
+    readOnly,
+    onRefetch: () => {
+      void refetch();
+    },
+  });
+  const onTemplatized = useCallback(
+    (r: SchemaSaved) => {
+      rememberCreated({ docType: r.docType, schemaId: r.schemaId });
+      afterSchemaSaved(r, true);
+    },
+    [rememberCreated, afterSchemaSaved],
+  );
+  const onRegionsEdited = useCallback(
+    (r: SchemaSaved) => afterSchemaSaved(r, false),
+    [afterSchemaSaved],
   );
 
   const pending = useMemo(
@@ -350,10 +374,8 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             documentId={id}
             fields={data.fields}
             pages={pageDims}
-            runStatus={data.status}
-            readOnly={readOnly}
             docType={editDocType!}
-            onRefetch={() => refetch()}
+            onSaved={onRegionsEdited}
           />
         )}
         <RunWorkflow documentId={data.document_id} />
@@ -381,10 +403,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
               documentId={id}
               fields={data.fields}
               pages={pageDims}
-              runStatus={data.status}
-              readOnly={readOnly}
-              onCreated={rememberCreated}
-              onRefetch={() => refetch()}
+              onSaved={onTemplatized}
             />
           ) : (
             <span className="sub">（テンプレート化は管理者が実行できます）</span>
