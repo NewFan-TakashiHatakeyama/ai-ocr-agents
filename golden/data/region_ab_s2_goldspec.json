@@ -1,0 +1,62 @@
+{
+ "s2_sample5": {
+  "template_image": "samples/sample18.jpeg",
+  "gold": {
+   "issuer_name": "ABCモータース",
+   "issuer_address": "東京都千代田区永田町1丁目7-1",
+   "customer_name": "伊達 政宗",
+   "customer_address": "宮城県仙台市青葉区川内1-1-1",
+   "total_amount": "3680000",
+   "document_date": "2026-06-25",
+   "document_no": "299"
+  }
+ },
+ "s2_sample18": {
+  "template_image": "samples/sample5.jpeg",
+  "gold": {
+   "issuer_name": "ABCモータース",
+   "issuer_address": "東京都千代田区永田町1丁目7-1",
+   "customer_name": "伊達 政宗",
+   "customer_address": "宮城県仙台市青葉区川内1-1-1",
+   "total_amount": "3680000",
+   "document_date": "2026-06-25",
+   "document_no": "299"
+  }
+ },
+ "s2_sample8": {
+  "template_image": "samples/sample15.png",
+  "gold": {
+   "issuer_name": "【サンプル】ビズリフォーム株式会社",
+   "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+   "customer_name": "株式会社千曲川ホーム",
+   "customer_address": "神奈川県川崎市高津区坂戸X-XX-XXXX",
+   "total_amount": "2475000",
+   "document_date": "令和5年5月1日",
+   "document_no": "123"
+  }
+ },
+ "s2_sample15": {
+  "template_image": "samples/sample21.png",
+  "gold": {
+   "issuer_name": "【サンプル】ビズリフォーム株式会社",
+   "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+   "customer_name": "株式会社千曲川ホーム",
+   "customer_address": "神奈川県川崎市高津区坂戸X-XX-XXXX",
+   "total_amount": "2475000",
+   "document_date": "令和5年5月1日",
+   "document_no": "123"
+  }
+ },
+ "s2_sample21": {
+  "template_image": "samples/sample8.png",
+  "gold": {
+   "issuer_name": "【サンプル】ビズリフォーム株式会社",
+   "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+   "customer_name": "大熊 和一",
+   "customer_address": "神奈川県横浜市青葉区美しが丘１８丁目５番地２号",
+   "total_amount": "395217",
+   "document_date": "令和5年5月1日",
+   "document_no": "15"
+  }
+ }
+}

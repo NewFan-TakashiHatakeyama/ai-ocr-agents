@@ -72,6 +72,15 @@ def build() -> dict[str, Any]:
     s1_spec = {
         f"s1_{_stem(f)}": {"template_image": f"samples/{f}", "fields": FIELDS} for f in usable
     }
+    # 正解値の位置から領域を起こすための spec（人が矩形を引く操作の再現）。
+    # 抽出結果の bbox から起こすと、AI が取り違えた項目では領域まで間違う。
+    s1_goldspec = {
+        f"s1_{_stem(f)}": {
+            "template_image": f"samples/{f}",
+            "gold": {n: docs[f]["fields"][n] for n in FIELDS if docs[f]["fields"].get(n)},
+        }
+        for f in usable
+    }
 
     # ---- S2: 同じ雛形の別の帳票から起こした領域を当てる（leave-one-out）----
     # 組の全員を採点対象にできるよう、各帳票の領域は**別の 1 枚**から起こす。
@@ -86,14 +95,26 @@ def build() -> dict[str, Any]:
             s2_gold.append(gold_line(doc_type, target))
             s2_source[doc_type] = source
     s2_spec = {
-        dt: {"template_image": f"samples/{src}", "fields": FIELDS} for dt, src in s2_source.items()
+        dt: {"template_image": f"samples/{src}", "fields": FIELDS}
+        for dt, src in s2_source.items()
+    }
+    # S2 は**テンプレート元の帳票の**正解値をその帳票の紙面上で探す
+    # （採点対象の値ではない。テンプレートは元の帳票を見て引くものだから）。
+    s2_goldspec = {
+        dt: {
+            "template_image": f"samples/{src}",
+            "gold": {n: docs[src]["fields"][n] for n in FIELDS if docs[src]["fields"].get(n)},
+        }
+        for dt, src in s2_source.items()
     }
 
     return {
         "s1_gold": s1_gold,
         "s1_spec": s1_spec,
+        "s1_goldspec": s1_goldspec,
         "s2_gold": s2_gold,
         "s2_spec": s2_spec,
+        "s2_goldspec": s2_goldspec,
         "s2_source": s2_source,
         "usable": usable,
         "excluded": sorted(set(docs) - set(usable)),
@@ -136,6 +157,12 @@ def main() -> int:
     )
     (OUT / "region_ab_s2_spec.json").write_text(
         json.dumps(b["s2_spec"], ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+    (OUT / "region_ab_s1_goldspec.json").write_text(
+        json.dumps(b["s1_goldspec"], ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+    (OUT / "region_ab_s2_goldspec.json").write_text(
+        json.dumps(b["s2_goldspec"], ensure_ascii=False, indent=1), encoding="utf-8"
     )
     (OUT / "region_ab_s1_positional.json").write_text(
         json.dumps({"_positional": positional_s1}, ensure_ascii=False, indent=1), encoding="utf-8"
