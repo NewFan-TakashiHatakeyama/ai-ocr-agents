@@ -5,9 +5,10 @@
 // スキーマを選んで抽出 → ジョブ完了までポーリング → 完了で結果画面へ切り替え。
 
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 
-import { ApiError, api } from "@/lib/api";
+import { api } from "@/lib/api";
+import { useExtractJob } from "@/lib/useExtractJob";
 import { newUuid } from "@/lib/uuid";
 import { useToasts } from "@/lib/toast";
 
@@ -18,14 +19,7 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
   const [schemaId, setSchemaId] = useState<string>("");
   const [touched, setTouched] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
-  const alive = useRef(true);
-
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-    };
-  }, []);
+  const { poll } = useExtractJob();
 
   const schemas = useQuery({ queryKey: ["schemas"], queryFn: () => api.listSchemas() });
   const items = schemas.data?.items ?? [];
@@ -45,47 +39,6 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
   // テンプレート化する。ADR-0006）。推定が付かなければスキーマなしで抽出する。
   const effectiveSchema = touched ? schemaId : (schemaId || suggested || "");
 
-  // ジョブ完了まで命令的にポーリング（react-query の refetchInterval より確実）。
-  // 締切・dead 終端・恒久エラーで必ず止める（停滞ジョブでの無限ループを防ぐ）。
-  function pollJob(jobId: string) {
-    const startedAt = Date.now();
-    const DEADLINE_MS = 3 * 60_000; // 3分で打ち切り（キュー滞留/ワーカー停止対策）
-    const fail = (message: string) => {
-      if (!alive.current) return;
-      setPhase("error");
-      push({ kind: "warn", message });
-    };
-    const tick = async () => {
-      if (!alive.current) return;
-      if (Date.now() - startedAt > DEADLINE_MS) {
-        fail("抽出がタイムアウトしました。時間をおいて再試行してください。");
-        return;
-      }
-      try {
-        const j = await api.getJob(jobId);
-        if (!alive.current) return;
-        if (j.status === "succeeded") {
-          push({ kind: "ok", message: "抽出が完了しました。" });
-          onDone();
-          return;
-        }
-        // dead も終端（再配信枯渇）。failed と同じく失敗として止める
-        if (j.status === "failed" || j.status === "dead") {
-          fail("抽出に失敗しました。時間をおいて再試行してください。");
-          return;
-        }
-      } catch (e) {
-        // 一時的な 5xx/ネットワークは継続。ジョブ未検出(E1001)や 4xx 恒久エラーは打ち切る
-        if (e instanceof ApiError && (e.code === "E1001" || (e.status >= 400 && e.status < 500))) {
-          fail("抽出状況を取得できませんでした。時間をおいて再試行してください。");
-          return;
-        }
-      }
-      if (alive.current) setTimeout(tick, 1500);
-    };
-    tick();
-  }
-
   const start = useMutation({
     mutationFn: () =>
       api.extract(documentId, {
@@ -94,7 +47,16 @@ export function ExtractStart({ documentId, onDone }: { documentId: string; onDon
       }),
     onSuccess: (r) => {
       setPhase("running");
-      pollJob(r.job_id);
+      poll(r.job_id, {
+        onDone: () => {
+          push({ kind: "ok", message: "抽出が完了しました。" });
+          onDone();
+        },
+        onFail: (message) => {
+          setPhase("error");
+          push({ kind: "warn", message });
+        },
+      });
     },
     onError: (e) =>
       push({ kind: "warn", message: `抽出を開始できません（${(e as Error).message}）。` }),

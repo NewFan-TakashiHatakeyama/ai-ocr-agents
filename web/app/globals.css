@@ -950,7 +950,9 @@ a {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  z-index: 50;
+  /* .tpl-overlay（z-index:100）より上。下だとダイアログ表示中のトーストが幕の
+     下に沈み、× も action も押せなくなる（warn は自動消去もされない） */
+  z-index: 200;
 }
 
 .toast {
@@ -1983,4 +1985,272 @@ a {
   border-bottom: 1px solid #d7e3fb;
   font-size: 12px;
   color: #23459c;
+}
+
+/* ============ 領域指定テンプレート化（docs/design/region-template-editor.md §3） ============ */
+
+/* プレビューは全画面。左に画像、右に項目と除外領域の一覧 */
+.rgn-shell {
+  background: #fff;
+  border-radius: 14px;
+  width: calc(100vw - 32px);
+  height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.25);
+}
+
+.rgn-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.rgn-modes {
+  display: flex;
+  gap: 4px;
+}
+
+.rgn-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 420px;
+  min-height: 0;
+}
+
+.rgn-left {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+
+.rgn-right {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  background: var(--bg-soft, #f8fafc);
+}
+
+/* キャンバスはページ全体 fit。スクロールできる大画像にすると、ドラッグ中の
+   自動スクロールで「見えている位置と保存される位置」がずれる経路ができる */
+.rgn-canvas {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  overflow: hidden;
+}
+
+.rgn-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  max-height: 100%;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  cursor: crosshair;
+  box-shadow: var(--sh-l);
+  background: #fff;
+}
+
+.rgn-stage.loading {
+  pointer-events: none;
+  cursor: default;
+}
+
+.rgn-stage img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 200px);
+  width: auto;
+  height: auto;
+  -webkit-user-drag: none;
+}
+
+.rgn-loading {
+  padding: 60px 40px;
+  color: var(--ink2);
+  font-size: 12px;
+}
+
+/* 矩形の種別。実線＝読取 / 斜線＋別色＝除外 / 破線＝ゴースト（参考・保存対象外） */
+.bx-include {
+  border-color: var(--brand, #2d6fe0);
+  background: rgba(45, 111, 224, 0.08);
+}
+.bx-include .tag {
+  background: var(--brand, #2d6fe0);
+}
+.bx-exclude {
+  border-color: #b4405c;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(180, 64, 92, 0.16),
+    rgba(180, 64, 92, 0.16) 5px,
+    transparent 5px,
+    transparent 10px
+  );
+}
+.bx-exclude .tag {
+  background: #b4405c;
+}
+.bx-ghost {
+  border-style: dashed;
+  border-color: #94a3b8;
+  background: rgba(148, 163, 184, 0.1);
+}
+.bx-ghost .tag {
+  background: #94a3b8;
+}
+.bbox.drawing {
+  pointer-events: none;
+}
+
+/* 検証画面での除外領域の重畳（表示専用・薄い斜線） */
+.bx-exclude-view {
+  border-color: rgba(180, 64, 92, 0.55);
+  border-style: dashed;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(180, 64, 92, 0.1),
+    rgba(180, 64, 92, 0.1) 5px,
+    transparent 5px,
+    transparent 10px
+  );
+  cursor: help;
+}
+.bx-exclude-view .tag {
+  background: rgba(180, 64, 92, 0.85);
+}
+
+.rgn-x {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* 右ペイン */
+.rgn-rows {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.rgn-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 108px 96px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  cursor: pointer;
+}
+.rgn-row:last-child {
+  border-bottom: none;
+}
+.rgn-row.on {
+  background: var(--brand-soft, #eef4ff);
+}
+.rgn-row.off > *:not(input[type="checkbox"]) {
+  opacity: 0.45;
+}
+.rgn-head-row {
+  font-weight: 600;
+  color: var(--ink2);
+  background: var(--bg-soft, #f8fafc);
+  cursor: default;
+}
+
+.rgn-names {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.rgn-names input,
+.rgn-row select,
+.rgn-exrow input,
+.rgn-exrow select {
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 3px 6px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.rgn-ex {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.rgn-exrow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px auto;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+.rgn-exrow.on {
+  border-color: #b4405c;
+}
+
+.rgn-warn {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--amber-soft, #fdf6e7);
+  border: 1px solid #f3ddb0;
+  color: var(--amber-ink, #8a6116);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+/* プレビュー内のエラーはトーストにしない（幕の下に沈んで操作できない） */
+.rgn-err {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fdecec;
+  border: 1px solid #f3c4c4;
+  color: #9b2c2c;
+  font-size: 12px;
+}
+
+/* 検証画面ヘッダの除外バッジ */
+.rv-exbadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  background: rgba(180, 64, 92, 0.1);
+  border: 1px solid rgba(180, 64, 92, 0.3);
+  color: #9b2c48;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
 }

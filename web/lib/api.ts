@@ -102,7 +102,14 @@ export const api = {
   // Idempotency-Key で連打・再送の二重 run を防ぐ（gateway が同キーをキャッシュ応答する）。
   extract: (
     documentId: string,
-    opts?: { schema_id?: string; force_vl?: boolean; idempotencyKey?: string },
+    opts?: {
+      schema_id?: string;
+      force_vl?: boolean;
+      idempotencyKey?: string;
+      // レビュー待ちの帳票を取り直す。既定（false）は processing と needs_review の
+      // 両方を競合とみなすため、テンプレート化直後の再抽出は必ず 409 になる。
+      supersede_review?: boolean;
+    },
   ) =>
     request<ExtractAccepted>(`/documents/${documentId}/extract`, {
       method: "POST",
@@ -110,6 +117,7 @@ export const api = {
       body: JSON.stringify({
         schema_id: opts?.schema_id ?? null,
         options: { force_vl: opts?.force_vl ?? false },
+        supersede_review: opts?.supersede_review ?? false,
       }),
     }),
 
@@ -151,6 +159,11 @@ export const api = {
 
   // 管理画面（SCR-04/05/06, admin）
   listSchemas: () => request<{ items: SchemaDto[] }>(`/schemas`),
+  // doc_type の**最新版**を取る（領域編集のプリロード起点）。listSchemas でも
+  // 最新版は取れるが、run.schema_id は抽出時点の旧版であり得るので id 突合は
+  // できない。編集は必ず doc_type 起点で行う。
+  getSchema: (docType: string) =>
+    request<SchemaDto>(`/schemas/${encodeURIComponent(docType)}`),
   // create=true は新規作成モード: 既存 doc_type ならサーバが E1005(409) で拒否する
   //（クライアントの重複チェックは一覧が陳腐化していると素通りするため）
   // exclude_regions / source_page_count は **キー自体を送らなければ直前版から引き継ぎ**

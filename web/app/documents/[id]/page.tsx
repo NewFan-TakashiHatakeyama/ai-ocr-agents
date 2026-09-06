@@ -7,6 +7,7 @@ import { use, useCallback, useEffect, useMemo, useState } from "react";
 
 import { DeleteDocument } from "@/components/DeleteDocument";
 import { DocViewer } from "@/components/DocViewer";
+import { EditRegions } from "@/components/EditRegions";
 import { ExtractStart } from "@/components/ExtractStart";
 import { FieldPanel } from "@/components/FieldPanel";
 import { RunWorkflow } from "@/components/RunWorkflow";
@@ -65,20 +66,36 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   // §8.2 ソフトロック: 他者が確認中なら readOnly（編集・確定を抑止）
   const { readOnly, remaining, holder } = useDocumentLock(id);
   const { me } = usePrincipal();
-  // テンプレート化に成功した doc_type。run の schema_id は作成後も null のままなので、
+  // テンプレート化に成功したスキーマ。run の schema_id は作成後も null のままなので、
   // これが無いとバナーが「テンプレート化してください」を出し続け、成功したのか
   // 何も起きなかったのか画面から分からない（敵対的レビュー確定）。
-  const [createdDocType, setCreatedDocType] = useState<string | null>(null);
+  // **id も持つ**のは、作成直後の同じ帳票から領域編集に入れるようにするため
+  // （doc_type だけだと write-once になる）。
+  const [created, setCreated] = useState<{ docType: string; schemaId: string } | null>(null);
+  const createdDocType = created?.docType ?? null;
 
   const pending = useMemo(
     () => (data ? sortFields(data.fields).filter((f) => f.review_status === "pending") : []),
     [data],
   );
+  // 領域の正規化・逆正規化にページ寸法が要る（単体取得だけが pages を埋める）。
+  // 抽出結果が届いてから引く（未抽出の画面では不要）。
+  const meta = useQuery({
+    queryKey: ["doc-meta", id],
+    queryFn: () => api.getDocument(id),
+    enabled: Boolean(data),
+    staleTime: 5 * 60_000,
+  });
+  const pageDims = useMemo(() => meta.data?.pages ?? [], [meta.data]);
+
   const fallbackPages = useMemo(() => new Set(data?.fallback_pages ?? []), [data]);
   const pages = useMemo(() => {
     const s = new Set<number>();
     data?.fields.forEach((f) => f.bbox && s.add(f.page ?? 1));
     fallbackPages.forEach((p) => s.add(p)); // VL 補完ページ（抽出フィールドが無くてもタブを出す）
+    // 除外領域だけがあるページ（印影ページ等）もタブに出す。出さないと
+    // 「画像にあるのに結果に無い」理由を見に行けない
+    data?.applied_exclude_regions?.forEach((r) => s.add(r.page_no));
     return s.size ? [...s].sort((a, b) => a - b) : [1];
   }, [data, fallbackPages]);
 
@@ -246,6 +263,23 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   }
   if (error || !data) return <div className="page">結果の取得に失敗しました。</div>;
 
+  const regionStats = data.region_stats ?? {};
+  const excludedTotal =
+    (regionStats.excluded_spans ?? 0) +
+    (regionStats.excluded_cells ?? 0) +
+    (regionStats.excluded_rows ?? 0);
+  // 編集対象の doc_type は「サーバが解決した doc_type → このセッションで作成した
+  // doc_type」の順。どちらも取れないときは編集させない（空のプリロードで保存すると
+  // 既存の定義を空の新版で上書きしてしまう）。
+  const editDocType = data.schema_doc_type ?? createdDocType;
+  // 入口条件は page.tsx:290 の「=== null の厳密比較」と同じ方針。旧 gateway 混在窓で
+  // schema_id キー自体が来ない（undefined）ときは出さない側に倒す。
+  const canEditRegions =
+    hasRole(me.role, "admin") &&
+    !readOnly &&
+    Boolean(editDocType) &&
+    (typeof data.schema_id === "string" || created !== null);
+
   const auto = Number(data.review_summary?.auto ?? data.fields.filter((f) => f.review_status !== "pending").length);
   const pend = Number(data.review_summary?.pending ?? pending.length);
   const total = auto + pend || 1;
@@ -275,6 +309,25 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           確定 {auto} ·{" "}
           <b style={{ color: pend ? "var(--amber-ink)" : "var(--green)" }}>要確認 {pend}</b>
         </div>
+        {excludedTotal > 0 && (
+          <span className="rv-exbadge" title="除外領域の設定により取り込まれなかった件数">
+            🚫 除外領域: span {regionStats.excluded_spans ?? 0} 件
+            {(regionStats.excluded_cells ?? 0) > 0 && ` / セル ${regionStats.excluded_cells} 件`}
+            {(regionStats.excluded_rows ?? 0) > 0 && ` / 行 ${regionStats.excluded_rows} 件`}
+            を未取込
+          </span>
+        )}
+        {canEditRegions && (
+          <EditRegions
+            documentId={id}
+            fields={data.fields}
+            pages={pageDims}
+            runStatus={data.status}
+            readOnly={readOnly}
+            docType={editDocType!}
+            onRefetch={() => refetch()}
+          />
+        )}
         <RunWorkflow documentId={data.document_id} />
         {/* 他者が確認中は消させない（サーバ側も 409 で弾くが、押せない方が親切） */}
         <DeleteDocument documentId={id} disabled={readOnly} onDeleted={afterDelete} />
@@ -296,7 +349,15 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           テンプレート化すると、次回から同じ定義で自動抽出できます。
           <span className="spacer" />
           {hasRole(me.role, "admin") ? (
-            <TemplatizeSchema fields={data.fields} onCreated={setCreatedDocType} />
+            <TemplatizeSchema
+              documentId={id}
+              fields={data.fields}
+              pages={pageDims}
+              runStatus={data.status}
+              readOnly={readOnly}
+              onCreated={setCreated}
+              onRefetch={() => refetch()}
+            />
           ) : (
             <span className="sub">（テンプレート化は管理者が実行できます）</span>
           )}
@@ -339,7 +400,12 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
               由来 <span className="src vl">VL</span> の値は grounding 上限 0.7・特に確認が必要です（DD-09）。
             </div>
           )}
-          <DocViewer documentId={id} fields={data.fields} pageNo={page} />
+          <DocViewer
+            documentId={id}
+            fields={data.fields}
+            pageNo={page}
+            excludeRegions={data.applied_exclude_regions ?? []}
+          />
         </div>
         <FieldPanel fields={data.fields} tables={data.tables} readOnly={readOnly} />
       </div>
