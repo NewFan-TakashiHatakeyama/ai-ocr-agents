@@ -623,6 +623,12 @@ a {
   background: var(--surface); color: inherit; font-size: 13px; min-width: 200px;
 }
 .extract-hint { color: var(--ink3); font-size: 12px; }
+/* 一覧トップバーの取込種別ピッカー（任意指定。未選択が既定） */
+.upload-doctype { display: inline-flex; align-items: center; gap: 6px; }
+.upload-doctype select {
+  padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface); color: inherit; font-size: 12px; max-width: 190px;
+}
 .extract-suggest {
   background: #f6fbfa;
   border: 1px solid var(--line);

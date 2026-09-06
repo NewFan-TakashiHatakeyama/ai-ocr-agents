@@ -18,6 +18,7 @@ import type {
   DocumentDeleted,
   DocumentList,
   DocumentMeta,
+  DocTypeDto,
   LockStatus,
   MetricsResponse,
   ResultResponse,
@@ -157,6 +158,15 @@ export const api = {
   releaseLock: (documentId: string) =>
     request<LockStatus>(`/documents/${documentId}/lock`, { method: "DELETE" }),
 
+  // 取込時の種別指定・分類の候補。**listSchemas は admin 限定**なので、
+  // uploader/reviewer でも引けるこちらを使う（fields は返らない）。
+  listDocTypes: () => request<{ items: DocTypeDto[] }>(`/doc-types`),
+  // 帳票メタの部分更新（v1 は doc_type のみ、admin）。テンプレート化の書き戻し用。
+  patchDocument: (documentId: string, body: { doc_type: string }) =>
+    request<DocumentMeta>(`/documents/${documentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   // 管理画面（SCR-04/05/06, admin）
   listSchemas: () => request<{ items: SchemaDto[] }>(`/schemas`),
   // doc_type の**最新版**を取る（領域編集のプリロード起点）。listSchemas でも
