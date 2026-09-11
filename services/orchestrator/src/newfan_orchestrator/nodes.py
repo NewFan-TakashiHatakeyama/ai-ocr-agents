@@ -16,6 +16,8 @@ from newfan_memory import TenantRule, apply_rule
 from newfan_metrics import current_tenant, rule_auto_apply_total
 from newfan_normalizers import NormContext, normalize
 from newfan_schemas import (
+    LOST_PAGE_FIELD,
+    REGION_AGGREGATE_FIELD,
     ExtractedField,
     ExtractionState,
     FieldSchema,
@@ -286,9 +288,10 @@ def confidence_gate_node(state: ExtractionState) -> dict[str, Any]:
     return {"review_items": merged, "fields": fields, "metrics": metrics}
 
 
-# 集約 ReviewItem の擬似 field 名。実 field と衝突しないよう区切り文字を使う。
-REGION_AGGREGATE_FIELD = "__region__"
-LOST_PAGE_FIELD = "__pages__"
+# 集約 ReviewItem の擬似 field 名（REGION_AGGREGATE_FIELD / LOST_PAGE_FIELD）は
+# newfan_schemas に定義し、gateway の put_schema がスキーマ項目名として拒む
+# （設計 region-field-add-and-hint-v2 D9）。ここで再定義すると片方だけ増えて
+# 検査から漏れるので、必ず import で使う。
 
 
 def _lost_page_items(state: ExtractionState) -> list[ReviewItem]:

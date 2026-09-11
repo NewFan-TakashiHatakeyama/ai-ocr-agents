@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from newfan_schemas import ExtractedField, RegionRect, TableResult
+from newfan_schemas import ExtractedField, RegionRect, TableResult, check_field_name
 
 
 def _now() -> datetime:
@@ -97,6 +97,15 @@ class SchemaFieldDef(BaseModel):
     # 読取領域（設計 §4.2）。newfan_schemas に一元定義したものを import する
     # （gateway で再定義すると検証規則が二重管理になり、片方だけ緩む）。
     region: Optional[RegionRect] = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_reserved(cls, v: str) -> str:
+        # 予約名（__pages__ / __region__ / 先頭 __）は経路によらず拒む（D9）。
+        # PUT /schemas は API のエラー封筒で返すため routers 側で先に明示検査するが、
+        # chat 経路は dict から直接この型を組むので、ここが最後の防衛線になる。
+        check_field_name(v)
+        return v
 
 
 class SchemaRecord(BaseModel):

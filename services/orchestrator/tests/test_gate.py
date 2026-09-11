@@ -1,3 +1,4 @@
+import pytest
 from newfan_schemas import ExtractedField, FieldSchema
 
 from newfan_orchestrator.gate import Thresholds, confidence_gate, threshold_for
@@ -193,6 +194,32 @@ def test_mask_stats_emit_aggregated_review_item() -> None:
     reasons = [i.reason for i in out["review_items"]]
     assert any("3セル/1行を未取込" in r for r in reasons)
     assert nodes.route_confidence_gate(out) == "hitl_review"
+
+
+def test_aggregate_field_names_are_reserved_schema_names() -> None:
+    """gate が積む擬似 field 名は newfan_schemas の予約名そのもの（D9）。
+
+    nodes.py で再定義すると「gate は新しい名前で積むのに put_schema は拒まない」
+    片肺になる。積む側と拒む側が同じ定数を見ていることを固定する。
+    """
+    import newfan_schemas
+    from newfan_schemas import check_field_name
+
+    from newfan_orchestrator import nodes
+
+    assert nodes.REGION_AGGREGATE_FIELD is newfan_schemas.REGION_AGGREGATE_FIELD
+    assert nodes.LOST_PAGE_FIELD is newfan_schemas.LOST_PAGE_FIELD
+    out = _gate(
+        {
+            "schema": {"doc_type": "invoice", "fields": []},
+            "fields": [_good_field()],
+            "metrics": {"region": {"excluded_cells": 3, "excluded_rows": 1}},
+        }
+    )
+    for item in out["review_items"]:
+        assert item.field_name in newfan_schemas.REVIEW_AGGREGATE_FIELD_NAMES
+        with pytest.raises(ValueError):
+            check_field_name(item.field_name)
 
 
 def test_no_review_item_for_ordinary_span_exclusion() -> None:
