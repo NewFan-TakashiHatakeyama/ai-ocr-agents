@@ -28,6 +28,10 @@ export interface CanvasGhost {
   key: string;
   bbox: Px;
   label: string;
+  // AI が読んだ原文（source_quote、40 字に切ってある）。title とホバー時のラベルに
+  // 「読み取り: …」として添える（設計 v2 D6）。AI が取り違えた項目はゴーストの位置も
+  // 取り違えているので、確定する前に「何を読んだか」を見せる。
+  quote?: string;
 }
 
 // クリックとドラッグの境目（表示 px）。これ未満は矩形にしない。
@@ -228,10 +232,19 @@ export function RegionCanvas({
               role="button"
               tabIndex={0}
               onKeyDown={(e) => e.key === "Enter" && onGhostClick(g.key)}
-              aria-label={`${g.label} をこの位置の読取領域として確定`}
-              title="クリックでこの位置を読取領域として確定"
+              aria-label={
+                `${g.label} をこの位置の読取領域として確定` +
+                (g.quote ? `（読み取り: ${g.quote}）` : "")
+              }
+              title={
+                "クリックでこの位置を読取領域として確定" +
+                (g.quote ? `\n読み取り: ${g.quote}` : "")
+              }
             >
-              <span className="tag">{g.label}</span>
+              <span className="tag">
+                {g.label}
+                {g.quote && <span className="tag-quote">読み取り: {g.quote}</span>}
+              </span>
             </div>
           ))}
 

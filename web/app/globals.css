@@ -2132,6 +2132,22 @@ a {
 .bx-ghost .tag {
   background: #94a3b8;
 }
+/* ゴーストに AI が読んだ原文を添える（設計 v2 D6）。常時出すとタグ同士が重なって
+   読めないので、ホバー／フォーカス時だけ広げる（title には常に入っている） */
+.bx-ghost .tag-quote {
+  display: none;
+  margin-left: 6px;
+  font-weight: 500;
+  opacity: 0.95;
+}
+.bx-ghost:hover .tag-quote,
+.bx-ghost:focus .tag-quote {
+  display: inline;
+}
+.bx-ghost:hover .tag,
+.bx-ghost:focus .tag {
+  z-index: 1;
+}
 .bbox.drawing {
   pointer-events: none;
 }
@@ -2258,6 +2274,58 @@ a {
   border: 1px solid #f3c4c4;
   color: #9b2c2c;
   font-size: 12px;
+}
+
+/* 「＋ 領域から項目を追加」の一回限りモード（設計 v2 D1）。画像の上に出す帯 */
+.rgn-band {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 14px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  background: var(--brand-soft, #eef4ff);
+  border: 1px solid #c9d9f7;
+  color: #23459c;
+  font-size: 12px;
+}
+
+/* 項目の追加ボタン（一覧の下） */
+.rgn-add {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* 新規行の ×（「残す」チェックの代わり。行ごと消す） */
+.rgn-rowx {
+  width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  color: var(--ink2);
+}
+.rgn-rowx:hover {
+  border-color: #b4405c;
+  color: #b4405c;
+}
+
+/* 行の下に出す注記（枠に含まれる文字・新規行の断り）。グリッドの全列にまたがる */
+.rgn-rownote {
+  grid-column: 1 / -1;
+  min-width: 0;
+  line-height: 1.5;
+}
+/* 枠に含まれる文字は最大 200 字。1 行に収めて全文は title で */
+.rgn-rownote.clip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 検証画面ヘッダの除外バッジ */

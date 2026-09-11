@@ -22,6 +22,11 @@ export interface SchemaSaved {
   schemaId: string;
   version: number;
   prevSchemaId: string | null;
+  /**
+   * この画面で足した項目のうち、読取領域を引かずに保存した件数（設計 v2 D2・D5）。
+   * 保存は止めない代わりに、保存後のトーストで「AI が語彙から探す」ことを伝える。
+   */
+  newWithoutRegion?: number;
 }
 
 export function useSchemaSaved({
@@ -139,7 +144,10 @@ export function useSchemaSaved({
           (created
             ? `スキーマ「${r.docType}」を作成しました（v${r.version}）。`
             : `スキーマ「${r.docType}」を v${r.version} として保存しました。`) +
-          "手動抽出・分類推定には最新版が使われます。",
+          "手動抽出・分類推定には最新版が使われます。" +
+          (r.newWithoutRegion
+            ? `領域が無い項目（${r.newWithoutRegion} 件）は AI が語彙から探します。`
+            : ""),
         action: canRerun
           ? { label: "この帳票を再抽出", onClick: () => rerun(r.schemaId) }
           : undefined,
