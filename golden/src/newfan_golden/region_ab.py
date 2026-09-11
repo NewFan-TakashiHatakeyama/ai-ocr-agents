@@ -285,6 +285,16 @@ def _put_schema(client: httpx.Client, body: dict[str, Any]) -> dict[str, Any]:
     return dict(r.json())
 
 
+def _done_rows(resume: Optional[dict[str, Any]]) -> dict[tuple[str, int, str], dict[str, Any]]:
+    """前回の出力から (document_id, trial, arm) → 行 を引く（--resume 用）。"""
+    out: dict[tuple[str, int, str], dict[str, Any]] = {}
+    for arm in ("control", "treat"):
+        for r in (resume or {}).get(f"{arm}_runs", []) or []:
+            if isinstance(r.get("field_hits"), dict):
+                out[(str(r["document_id"]), int(r["trial"]), arm)] = dict(r)
+    return out
+
+
 def run(
     docs: list[GoldenDoc],
     regions: dict[str, Any],
@@ -292,13 +302,20 @@ def run(
     token: str,
     trials: int,
     timeout_sec: float,
+    resume: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """対照（領域なし）と介入（領域あり）を交互に trials 回ずつ回す。
 
     regions は {doc_type: {field_name: {"page":..,"rect":[..]}}} と
     {"_positional": {doc_type: [field_name, ...]}} を持つ。
+
+    ``resume`` に前回の出力を渡すと、そこに結果がある (帳票, 試行, アーム) は抽出せず
+    前回の行（field_hits / hints）から集計し直し、**無いものだけ**回す。LLM 側の一時的な
+    失敗で対が欠けたとき、全部を回し直さずに対を埋めるため（第 3 回計測で、対照アームの
+    3 試行が LLM 出力の欠陥で failed になった）。
     """
     positional_map = regions.get("_positional", {})
+    done = _done_rows(resume)
     # 位置でしか区別できない項目名の集合（doc_type をまたいで合算する）
     positional_names = {n for names in positional_map.values() for n in names}
     tally = Tally()
@@ -354,6 +371,16 @@ def run(
             for i in range(trials):
                 # 交互に回す（時間帯によるモデル側の揺れを両条件へ均等に散らす）
                 for arm, schema in (("control", control), ("treat", treat)):
+                    prev = done.get((doc.document_id, i, arm))
+                    if prev is not None:
+                        for name, hit in prev["field_hits"].items():
+                            tally.note(doc.document_id, name, name in positional, arm, bool(hit), i)
+                        (tally.control_runs if arm == "control" else tally.treat_runs).append(
+                            prev
+                        )
+                        print(f"  trial {i} {arm}: {prev['hits']}/{prev['total']}（前回の結果）",
+                              flush=True)
+                        continue
                     # **1 抽出ごとに帳票を上げ直す。** 同じ帳票を使い回すと、
                     # 抽出が自動確定した時点で次の抽出が 409 で弾かれる
                     # （確定値を無警告で置き換えないためのサーバ側の正しい振る舞い。
@@ -374,10 +401,11 @@ def run(
                         hits = 0
                         field_hits: dict[str, bool] = {}
                         for name, want in gold.items():
-                            hit = bool(want) and got.get(name, "") == want
+                            if not want:
+                                continue  # 正解値の無い項目は採点しない（分母にも入れない）
+                            hit = got.get(name, "") == want
                             hits += int(hit)
-                            if want:
-                                field_hits[name] = hit
+                            field_hits[name] = hit
                             tally.note(doc.document_id, name, name in positional, arm, hit, i)
                         # 帳票は試行ごとに消すので、run の metrics はここで写しておかないと
                         # 失われる（G3・G4 は「落とした／捨てた項目」の内訳が要る）
@@ -434,11 +462,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--trials", type=int, default=5)
     ap.add_argument("--timeout-sec", type=float, default=600.0)
+    ap.add_argument(
+        "--resume", type=Path, default=None,
+        help="前回の出力 JSON。結果がある (帳票, 試行, アーム) は回さず、欠けた対だけ回す",
+    )
     args = ap.parse_args(argv)
 
     docs = load_jsonl(args.gold)
     regions = json.loads(args.regions.read_text(encoding="utf-8"))
-    report = run(docs, regions, args.api, args.token, args.trials, args.timeout_sec)
+    resume = (
+        json.loads(args.resume.read_text(encoding="utf-8"))
+        if args.resume is not None and args.resume.exists()
+        else None
+    )
+    report = run(docs, regions, args.api, args.token, args.trials, args.timeout_sec, resume=resume)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({k: report[k] for k in

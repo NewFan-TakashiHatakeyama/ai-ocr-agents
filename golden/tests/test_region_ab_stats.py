@@ -180,3 +180,56 @@ class Testヒントの内訳:
         assert got == {"per_field": {}, "affected": {"pairs": 0, "control_hits": 0,
                                                      "treat_hits": 0, "delta": 0},
                        "affected_rows": []}
+
+
+class Test再開:
+    """--resume: 前回の出力にある (帳票, 試行, アーム) は回さず、欠けた対だけ回す。"""
+
+    def test_前回の行を再利用し欠けた試行だけ抽出する(self, monkeypatch, tmp_path) -> None:
+        import newfan_golden.region_ab as ab
+        from newfan_golden.dataset import GoldField, GoldenDoc
+
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x")
+        doc = GoldenDoc(document_id="d1", doc_type="t1", image_uri=str(img),
+                        fields=[GoldField(name="a", value="X"), GoldField(name="b", value="")])
+        calls: list[tuple[int, str]] = []
+        monkeypatch.setattr(ab, "_put_schema", lambda c, body: {"id": body["doc_type"]})
+        monkeypatch.setattr(ab, "_upload", lambda c, p: "docid")
+        monkeypatch.setattr(ab, "_extract", lambda c, d, s, t: "succeeded")
+        monkeypatch.setattr(ab, "_result", lambda c, d: {"run_id": "r", "fields": [{"name": "a", "value_raw": "X"}],
+                                                          "region_stats": {"hints": {"given": ["a"]}}})
+
+        class _Client:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def delete(self, *a, **k): calls.append((-1, "delete"))
+
+        monkeypatch.setattr(ab.httpx, "Client", _Client)
+        prev = {
+            "control_runs": [{"document_id": "d1", "trial": 0, "hits": 0, "total": 1, "run_id": None,
+                              "field_hits": {"a": False}, "hints": None}],
+            "treat_runs": [{"document_id": "d1", "trial": 0, "hits": 1, "total": 1, "run_id": None,
+                            "field_hits": {"a": True}, "hints": {"given": ["a"], "outcomes": {"a": "followed"}}},
+                           {"document_id": "d1", "trial": 1, "hits": 1, "total": 1, "run_id": None,
+                            "field_hits": {"a": True}, "hints": {"given": ["a"]}}],
+        }
+        rep = ab.run([doc], {"t1": {}, "_positional": {}}, "http://x", "tok", 2, 1.0, resume=prev)
+        # 欠けていたのは control の trial 1 だけ → 抽出（delete）は 1 回
+        assert calls.count((-1, "delete")) == 1
+        assert [r["trial"] for r in rep["control_runs"]] == [0, 1]
+        assert [r["trial"] for r in rep["treat_runs"]] == [0, 1]
+        # 再利用した行の hints はそのまま残る
+        assert rep["treat_runs"][0]["hints"]["outcomes"] == {"a": "followed"}
+        # 集計は 4 行から作り直される: control 1/2、treat 2/2。正解値の無い b は表に出ない
+        names = {f["name"] for f in rep["fields"]}
+        assert names == {"d1::a"}
+        f = rep["fields"][0]
+        assert f["control"] == "1/2" and f["treat"] == "2/2"
+        assert rep["per_doc_net"]["d1"] == {"pairs": 2, "control_hits": 1, "treat_hits": 2, "net": 1}
+
+    def test_field_hits_の無い古い出力は再利用しない(self) -> None:
+        from newfan_golden.region_ab import _done_rows
+        assert _done_rows({"control_runs": [{"document_id": "d", "trial": 0, "hits": 1}]}) == {}
+        assert _done_rows(None) == {}
