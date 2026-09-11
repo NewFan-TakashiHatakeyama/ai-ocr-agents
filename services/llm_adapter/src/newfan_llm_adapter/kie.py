@@ -8,6 +8,7 @@ LLM に span_ids 必須の JSON 契約で抽出させ、**span_ids の実在を�
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,7 +16,10 @@ from newfan_schemas import ExtractedField, Span, TableCell, TableResult
 
 from newfan_llm_adapter.adapter import LLMAdapter
 from newfan_llm_adapter.bundle import PromptBundle, render
+from newfan_llm_adapter.errors import LLMError
 from newfan_llm_adapter.provider import LLMResponse
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -189,6 +193,16 @@ def kie_extract(
         # 書くと、領域を使っていないテナントのプロンプトまで変わってしまう。
         user = user + bundle.kie_region_hint_template
     data, resp = adapter.complete_json(system=system, user=user, purpose="kie")
+    if isinstance(data, list):
+        # 出力スキーマは {"fields": [...], ...} だが、モデルが fields の配列だけを返すことが
+        # ある（実測: 'list' object has no attribute 'get' で run が failed）。中身が項目の
+        # 配列ならそのまま fields として読む。何を返したかは調査のため先頭だけ残す。
+        _log.warning("kie: JSON 配列が返った（fields 配列として読む）: %s", str(data)[:200])
+        data = {"fields": data}
+    if not isinstance(data, dict):
+        raise LLMError(
+            "E3002", "LLM 出力の JSON 契約違反（オブジェクトではない）", detail=str(data)[:200]
+        )
 
     result = KieResult(response=resp)
     seen_names: set[str] = set()

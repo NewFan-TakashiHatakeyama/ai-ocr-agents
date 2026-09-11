@@ -68,6 +68,29 @@ def test_kie_tables(bundle: PromptBundle) -> None:
     assert result.tables[0].rows[0]["item"].span_ids == [10]
 
 
+def test_kie_fields_の配列だけが返っても読む(bundle: PromptBundle) -> None:
+    """出力スキーマはオブジェクトだが、モデルが fields の配列だけを返すことがある
+    （第 3 回計測で同じ帳票の介入アームが 2 回続けて failed）。"""
+    resp = json.dumps([{"name": "total_amount", "value": "128000", "span_ids": [11], "page": 1}])
+    adapter = LLMAdapter(FakeProvider([resp]))
+    result = kie_extract(
+        adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA
+    )
+    assert [f.name for f in result.fields] == ["total_amount"]
+    assert result.fields[0].span_ids == [11]
+
+
+def test_kie_オブジェクトでも配列でもなければ_E3002(bundle: PromptBundle) -> None:
+    import pytest
+
+    from newfan_llm_adapter.errors import LLMError
+
+    adapter = LLMAdapter(FakeProvider(['"just a string"', '"still a string"']))
+    with pytest.raises(LLMError) as exc:
+        kie_extract(adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA)
+    assert exc.value.code == "E3002"
+
+
 def test_kie_要素の_null_で_run_を落とさない(bundle: PromptBundle) -> None:
     """LLM は契約どおりの形でも要素に null を混ぜる（第 3 回計測の対照アームで
     cells の値が null → AttributeError → run が failed になった）。欠陥のある要素だけ
