@@ -97,6 +97,9 @@ class SchemaFieldDef(BaseModel):
     # 読取領域（設計 §4.2）。newfan_schemas に一元定義したものを import する
     # （gateway で再定義すると検証規則が二重管理になり、片方だけ緩む）。
     region: Optional[RegionRect] = None
+    # 予約名（D9）の検査はここに置かない。この型は DB から読んだ行の組み立てにも使われ
+    # （db.py の get_schema / list_schemas）、検査導入前の旧データが 1 行あるだけで
+    # 同テナントの一覧が丸ごと 500 になる。拒否は put_schema（書き込み側）で行う。
 
 
 class SchemaRecord(BaseModel):

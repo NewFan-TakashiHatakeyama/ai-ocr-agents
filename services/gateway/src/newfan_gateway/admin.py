@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Protocol
 
-from newfan_schemas import RegionRect
+from newfan_schemas import RegionRect, check_field_name
 
 from newfan_gateway.ids import new_id
 from newfan_gateway.records import (
@@ -19,6 +19,18 @@ from newfan_gateway.records import (
     SchemaFieldDef,
     SchemaRecord,
 )
+
+def reject_reserved_field_names(fields: list[SchemaFieldDef]) -> None:
+    """予約名（__pages__ / __region__ / 先頭 __）を含む項目列を拒む（設計 D9）。
+
+    **書き込み側の共通入口。** InMemory / Pg 両方の put_schema がここを通るので、
+    ルータ経由でもチャット経由（admin.put_schema 直呼び）でも予約名は保存されない。
+    読み出しモデル（records.SchemaFieldDef / newfan_schemas.FieldDef）には置かない ──
+    検査導入前に保存された旧データを読めなくすると、同テナントの健全なスキーマまで
+    巻き込んで一覧が落ちる。
+    """
+    for f in fields:
+        check_field_name(f.name)
 
 # ルール有効化の閾値（§2.5 rules.validation_pass: 再現率≥90% かつ 回帰0件）
 MIN_REPRODUCTION = 0.9
@@ -151,6 +163,7 @@ class InMemoryAdminRepository:
         exclude_regions: Optional[list[RegionRect]] = None,
         source_page_count: Optional[int] = None,
     ) -> SchemaRecord:
+        reject_reserved_field_names(fields)  # D9: 書き込み側で拒む（読み出しでは拒まない）
         prev = self.get_schema(tenant_id, doc_type)
         # None = 引き継ぎ（§4.4）。Pg 実装と意味論を揃える。
         regions = (

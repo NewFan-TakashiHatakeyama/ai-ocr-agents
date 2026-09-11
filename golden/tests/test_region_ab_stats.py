@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from newfan_golden.region_ab import _norm, mcnemar
+from newfan_golden.region_ab import _norm, hint_summary, mcnemar, per_doc_net
 
 
 def _pairs(rows: list[tuple[bool, bool]]) -> dict[tuple[str, str, int], dict[str, bool]]:
@@ -99,3 +99,137 @@ class Test比較の正規化:
 
     def test_未検出は空文字(self) -> None:
         assert _norm(None) == ""
+
+
+def _run(doc: str, trial: int, field_hits: dict[str, bool], hints: dict | None = None) -> dict:
+    return {
+        "document_id": doc,
+        "trial": trial,
+        "hits": sum(field_hits.values()),
+        "total": len(field_hits),
+        "run_id": None,
+        "field_hits": field_hits,
+        "hints": hints,
+    }
+
+
+class Test帳票ごとの純増減:
+    def test_両アームが成功した試行だけを足す(self) -> None:
+        control = [_run("d1", 0, {"a": True, "b": True}), _run("d1", 1, {"a": True, "b": False})]
+        treat = [
+            _run("d1", 0, {"a": True, "b": False}),
+            _run("d1", 1, {"a": True, "b": True}),
+            _run("d1", 2, {"a": True, "b": True}),  # 対照が失敗した試行 → 数えない
+        ]
+        got = per_doc_net(control, treat)
+        assert got == {"d1": {"pairs": 2, "control_hits": 3, "treat_hits": 3, "net": 0}}
+
+    def test_純減が出る(self) -> None:
+        control = [_run("d1", i, {"a": True, "b": True}) for i in range(5)]
+        treat = [_run("d1", i, {"a": True, "b": i == 0}) for i in range(5)]
+        assert per_doc_net(control, treat)["d1"]["net"] == -4
+
+
+class Testヒントの内訳:
+    def test_outcomes_と_dropped_を項目ごとに数える(self) -> None:
+        treat = [
+            _run("d1", 0, {"a": True, "b": True},
+                 {"given": ["a"], "dropped": {"b": "kind_conflict"},
+                  "outcomes": {"a": "followed"}}),
+            _run("d1", 1, {"a": True, "b": True},
+                 {"given": ["a"], "dropped": {"b": "type_mismatch"},
+                  "outcomes": {"a": "rejected"}}),
+        ]
+        got = hint_summary([], treat)
+        assert got["per_field"]["d1::a"]["given"] == 2
+        assert got["per_field"]["d1::a"]["followed"] == 1
+        assert got["per_field"]["d1::a"]["rejected"] == 1
+        assert got["per_field"]["d1::b"]["dropped"] == {"kind_conflict": 1, "type_mismatch": 1}
+
+    def test_落とした_捨てた項目を対照と対にする(self) -> None:
+        """G4: 落としたことで悪くなっていないかは、同じ試行の対照との差で見る。"""
+        control = [_run("d1", 0, {"a": True, "b": False, "c": True})]
+        treat = [
+            _run("d1", 0, {"a": True, "b": True, "c": False},
+                 {"given": ["a", "c"], "dropped": {"b": "no_spans_in_region"},
+                  "outcomes": {"a": "followed", "c": "rejected"}}),
+        ]
+        got = hint_summary(control, treat)
+        # b（dropped）: 対照 ×→介入 ○、c（rejected）: 対照 ○→介入 ×。a は followed なので入らない
+        assert got["affected"] == {"pairs": 2, "control_hits": 1, "treat_hits": 1, "delta": 0}
+        assert {r["field"] for r in got["affected_rows"]} == {"b", "c"}
+        assert next(r for r in got["affected_rows"] if r["field"] == "b")["why"] == "no_spans_in_region"
+
+    def test_no_evidence_は_affected_に入れない(self) -> None:
+        control = [_run("d1", 0, {"a": True})]
+        treat = [_run("d1", 0, {"a": False},
+                      {"given": ["a"], "dropped": {}, "outcomes": {"a": "no_evidence"}})]
+        got = hint_summary(control, treat)
+        assert got["affected"]["pairs"] == 0
+        assert got["per_field"]["d1::a"]["no_evidence"] == 1
+
+    def test_対照が失敗した試行は対にしない(self) -> None:
+        treat = [_run("d1", 3, {"a": False},
+                      {"given": ["a"], "dropped": {}, "outcomes": {"a": "rejected"}})]
+        got = hint_summary([], treat)
+        assert got["affected"]["pairs"] == 0
+        assert got["per_field"]["d1::a"]["rejected"] == 1
+
+    def test_hints_の無い行は素通り(self) -> None:
+        got = hint_summary([_run("d1", 0, {"a": True})], [_run("d1", 0, {"a": True})])
+        assert got == {"per_field": {}, "affected": {"pairs": 0, "control_hits": 0,
+                                                     "treat_hits": 0, "delta": 0},
+                       "affected_rows": []}
+
+
+class Test再開:
+    """--resume: 前回の出力にある (帳票, 試行, アーム) は回さず、欠けた対だけ回す。"""
+
+    def test_前回の行を再利用し欠けた試行だけ抽出する(self, monkeypatch, tmp_path) -> None:
+        import newfan_golden.region_ab as ab
+        from newfan_golden.dataset import GoldField, GoldenDoc
+
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x")
+        doc = GoldenDoc(document_id="d1", doc_type="t1", image_uri=str(img),
+                        fields=[GoldField(name="a", value="X"), GoldField(name="b", value="")])
+        calls: list[tuple[int, str]] = []
+        monkeypatch.setattr(ab, "_put_schema", lambda c, body: {"id": body["doc_type"]})
+        monkeypatch.setattr(ab, "_upload", lambda c, p: "docid")
+        monkeypatch.setattr(ab, "_extract", lambda c, d, s, t: "succeeded")
+        monkeypatch.setattr(ab, "_result", lambda c, d: {"run_id": "r", "fields": [{"name": "a", "value_raw": "X"}],
+                                                          "region_stats": {"hints": {"given": ["a"]}}})
+
+        class _Client:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def delete(self, *a, **k): calls.append((-1, "delete"))
+
+        monkeypatch.setattr(ab.httpx, "Client", _Client)
+        prev = {
+            "control_runs": [{"document_id": "d1", "trial": 0, "hits": 0, "total": 1, "run_id": None,
+                              "field_hits": {"a": False}, "hints": None}],
+            "treat_runs": [{"document_id": "d1", "trial": 0, "hits": 1, "total": 1, "run_id": None,
+                            "field_hits": {"a": True}, "hints": {"given": ["a"], "outcomes": {"a": "followed"}}},
+                           {"document_id": "d1", "trial": 1, "hits": 1, "total": 1, "run_id": None,
+                            "field_hits": {"a": True}, "hints": {"given": ["a"]}}],
+        }
+        rep = ab.run([doc], {"t1": {}, "_positional": {}}, "http://x", "tok", 2, 1.0, resume=prev)
+        # 欠けていたのは control の trial 1 だけ → 抽出（delete）は 1 回
+        assert calls.count((-1, "delete")) == 1
+        assert [r["trial"] for r in rep["control_runs"]] == [0, 1]
+        assert [r["trial"] for r in rep["treat_runs"]] == [0, 1]
+        # 再利用した行の hints はそのまま残る
+        assert rep["treat_runs"][0]["hints"]["outcomes"] == {"a": "followed"}
+        # 集計は 4 行から作り直される: control 1/2、treat 2/2。正解値の無い b は表に出ない
+        names = {f["name"] for f in rep["fields"]}
+        assert names == {"d1::a"}
+        f = rep["fields"][0]
+        assert f["control"] == "1/2" and f["treat"] == "2/2"
+        assert rep["per_doc_net"]["d1"] == {"pairs": 2, "control_hits": 1, "treat_hits": 2, "net": 1}
+
+    def test_field_hits_の無い古い出力は再利用しない(self) -> None:
+        from newfan_golden.region_ab import _done_rows
+        assert _done_rows({"control_runs": [{"document_id": "d", "trial": 0, "hits": 1}]}) == {}
+        assert _done_rows(None) == {}

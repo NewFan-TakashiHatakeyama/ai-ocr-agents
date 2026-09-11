@@ -55,6 +55,23 @@ export interface ResultResponse {
   schema_doc_type?: string | null;
 }
 
+/** 最新 run の OCR span 1 件（除外領域の適用後）。bbox は前処理後画像の画素。 */
+export interface RunSpanDto {
+  span_id: number;
+  text: string;
+  bbox?: BBox | null;
+}
+
+/**
+ * GET /documents/{id}/spans?page=n の応答（設計 D12）。テンプレート化画面が
+ * 「枠に含まれる文字」を出し、例示値の出どころにする。行が無ければ spans は空。
+ */
+export interface RunSpans {
+  run_id: string;
+  page_no: number;
+  spans: RunSpanDto[];
+}
+
 /** ページの正規寸法（前処理後 PNG 画素）。領域の正規化・逆正規化に使う。 */
 export interface PageDim {
   page_no: number;
@@ -71,6 +88,13 @@ export interface RegionRect {
   page?: number | "last" | null;
   rect: [number, number, number, number];
   label?: string | null;
+  // --- 以下、読取領域のみ（除外領域では未使用）。設計 region-field-add-and-hint-v2 §2.3 ---
+  /** テンプレート元の帳票でこの領域にあった span の原文（正規化しない）。帳票の値であり個人名を含み得る */
+  example_value?: string | null;
+  /** 領域の出どころ。ghost = AI が見つけた位置をクリックで採った / manual = 手描き */
+  origin?: "ghost" | "manual" | null;
+  /** ISO 8601。ヒント有効化前に引かれた領域を識別する */
+  created_at?: string | null;
 }
 
 /** サーバ側でページ番号まで解決済みの領域（検証画面のオーバーレイ用）。 */
@@ -89,6 +113,22 @@ export interface RegionStats {
   markdown_dropped_pages?: number[];
   mismatch_fields?: string[];
   layout_mismatch?: boolean;
+  /** 読取領域ヒント（設計 region-field-add-and-hint-v2 §2.5・§2.6）。ヒント有効時のみ */
+  hints?: RegionHintStats;
+}
+
+/** ヒントの内訳。given は渡した項目、dropped は渡す前に落とした項目と理由、
+ *  outcomes は LLM が従ったか（span_ids と候補の集合演算。モデルの申告ではない）。
+ *  pre_activation は評価した項目のうち、領域がヒント有効化（2026-09-12）より前に
+ *  引かれたもの（created_at が無い・古い。§1.5）。参考表示にしか使わない。 */
+export interface RegionHintStats {
+  given?: string[];
+  dropped?: Record<string, string>;
+  truncated?: Record<string, number>;
+  outcomes?: Record<string, "followed" | "partial" | "rejected" | "no_evidence" | string>;
+  /** 項目名 → 例示値と候補の原文（先頭数件、各 40 字まで）。参考表示の title 用 */
+  detail?: Record<string, { example_value?: string | null; candidates?: string[] }>;
+  pre_activation?: string[];
 }
 
 export interface DocumentMeta {

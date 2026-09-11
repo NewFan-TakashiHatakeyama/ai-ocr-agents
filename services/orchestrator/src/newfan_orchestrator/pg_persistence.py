@@ -12,7 +12,7 @@ import uuid
 
 from sqlalchemy import create_engine, text
 
-from newfan_orchestrator.persistence import LoadedContext
+from newfan_orchestrator.persistence import LoadedContext, spans_by_page
 
 # schema 未割当（テンプレートレス既定）の run に渡す placeholder。
 # FieldSchema.doc_type は str 必須のため None を入れると deterministic_normalize が
@@ -97,6 +97,7 @@ class PgContextStore:
         status,
         fallback_pages=None,
         region_stats=None,
+        spans=None,
     ) -> None:
         with self._engine.begin() as c:
             c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant_id})
@@ -194,6 +195,25 @@ class PgContextStore:
                         "html": t.structure_html,
                         "rows": json.dumps(rows_json, ensure_ascii=False),
                         "cf": t.confidence,
+                    },
+                )
+            # OCR span（除外領域の適用後）を run × ページで永続化する（設計 D12 / §2.4）。
+            # None／空なら **触らない**: needs_review → confirmed の再保存（finalize）は
+            # state に spans を持たない経路があり、そこで消すと「レビュー中は枠の下の
+            # 文字が見えるのに確定したら消える」になる（metrics.region で踏んだ穴と同型）。
+            # ON CONFLICT DO UPDATE は再配信の再実行で二重に増えないため（PK = run × page）。
+            for page_no, page_spans in spans_by_page(spans).items():
+                c.execute(
+                    text(
+                        "INSERT INTO run_spans (run_id, tenant_id, page_no, spans) "
+                        "VALUES (:r, :t, :pg, CAST(:sp AS jsonb)) "
+                        "ON CONFLICT (run_id, page_no) DO UPDATE SET spans = EXCLUDED.spans"
+                    ),
+                    {
+                        "r": run_id,
+                        "t": tenant_id,
+                        "pg": page_no,
+                        "sp": json.dumps(page_spans, ensure_ascii=False),
                     },
                 )
             # fallback_pages（VL 露出用, §5.4）は metrics JSONB へマージ（既存キーは保持）。

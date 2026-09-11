@@ -8,9 +8,33 @@ load_context は DB から document/pages/schema/テナント設定をロード�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol
+from typing import Any, Iterable, Optional, Protocol
 
-from newfan_schemas import ExtractedField, ReviewItem, TableResult
+from newfan_schemas import ExtractedField, ReviewItem, Span, TableResult
+
+
+def spans_by_page(spans: Optional[Iterable[Any]]) -> dict[int, list[dict[str, Any]]]:
+    """run_spans へ書く形に整える: page_no → [{span_id, text, bbox, conf}]（設計 §2.4）。
+
+    page は行のキーなので span 側には書かない。char_boxes / char_confs / source /
+    block_id も書かない（取得 API が返すのは span_id / text / bbox だけ。1 ページ
+    数百 span × 100 バイト程度に収める）。bbox は int の 4 要素、無ければ None。
+    Span モデルでも dict でも受ける（checkpoint 復元経路で素の dict になる場合に備える）。
+    None／空なら空 dict（呼び出し側は「触らない」に倒す）。
+    """
+    out: dict[int, list[dict[str, Any]]] = {}
+    for s in spans or ():
+        d = s.model_dump() if isinstance(s, Span) else dict(s)
+        bbox = d.get("bbox")
+        out.setdefault(int(d["page"]), []).append(
+            {
+                "span_id": int(d["span_id"]),
+                "text": str(d.get("text") or ""),
+                "bbox": [int(v) for v in bbox[:4]] if bbox and len(bbox) >= 4 else None,
+                "conf": float(d.get("conf") or 0.0),
+            }
+        )
+    return out
 
 
 @dataclass
@@ -41,6 +65,7 @@ class ContextStore(Protocol):
         status: str,
         fallback_pages: Optional[list[int]] = None,
         region_stats: Optional[dict[str, Any]] = None,
+        spans: Optional[list[Span]] = None,
     ) -> None:
         """extraction_fields/tables を保存し、run/document の status を遷移する（§4.3 finalize）。
 
@@ -51,6 +76,10 @@ class ContextStore(Protocol):
         **needs_review 保存の時点で載っている必要がある**: セル/行マスクが起きた run は
         必ず hitl_review で interrupt 停止するため、ここを漏らすとレビュー中だけ
         バッジが出ず、「N セルを未取込」という所見だけが根拠なく浮く。
+
+        spans（除外領域の適用後の OCR span, 設計 D12 / §2.4）は run × ページで
+        run_spans に永続化する。**None／空なら触らない**（needs_review → confirmed の
+        再保存で消さない）。同じ run への再保存は上書き（再配信で二重に増えない）。
         """
         ...
 
@@ -112,6 +141,8 @@ class InMemoryContextStore:
         self._saved_tables: dict[str, list[TableResult]] = {}
         self._saved_fallback: dict[str, list[int]] = {}
         self._saved_region_stats: dict[str, Optional[dict[str, Any]]] = {}
+        # run_id → page_no → spans（Pg の run_spans と同じ形）。None/空の保存では触らない
+        self._saved_spans: dict[str, dict[int, list[dict[str, Any]]]] = {}
         self._result_version: dict[str, int] = {}
         self.run_metrics: dict[str, dict[str, float]] = {}
         self._job_status: dict[str, tuple[str, Optional[str]]] = {}
@@ -165,6 +196,7 @@ class InMemoryContextStore:
         status: str,
         fallback_pages: Optional[list[int]] = None,
         region_stats: Optional[dict[str, Any]] = None,
+        spans: Optional[list[Span]] = None,
     ) -> None:
         seed = self._runs.get(run_id)
         if seed is None or seed.tenant_id != tenant_id:
@@ -175,6 +207,9 @@ class InMemoryContextStore:
         # 渡し漏れがローカルテストで検出できるよう観測可能にしておく
         # （キーワード引数は省略しても通ってしまうため）
         self._saved_region_stats[run_id] = dict(region_stats) if region_stats else None
+        # Pg と同じ意味論: 空なら触らない・ページ単位で上書き
+        for page_no, page_spans in spans_by_page(spans).items():
+            self._saved_spans.setdefault(run_id, {})[page_no] = page_spans
         self._run_status[run_id] = status
         self._document_status[seed.document_id] = status
         self._result_version[run_id] = self._result_version.get(run_id, 1)
@@ -211,6 +246,10 @@ class InMemoryContextStore:
     def saved_region_stats(self, run_id: str) -> Optional[dict[str, Any]]:
         """save_result に渡された region_stats（未保存なら None）。"""
         return self._saved_region_stats.get(run_id)
+
+    def saved_spans(self, run_id: str, page_no: int) -> list[dict[str, Any]]:
+        """run_spans 相当（未保存なら空）。"""
+        return list(self._saved_spans.get(run_id, {}).get(page_no, []))
 
     def run_status(self, run_id: str) -> Optional[str]:
         return self._run_status.get(run_id)

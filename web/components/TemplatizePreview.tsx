@@ -12,13 +12,29 @@
 // 表示中に出したトーストは幕の下に沈んで × も押せない（warn は自動消去もされない）。
 // 検証・API エラーは保存ボタン近傍のインライン領域に出す。
 
-import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { RegionCanvas, type CanvasGhost, type CanvasRegion, type Px } from "@/components/RegionCanvas";
 import { ApiError, api } from "@/lib/api";
 import { guessFieldType } from "@/lib/fieldTypes";
+// 保存 body の生成・検査・ゴースト解決・例示値の計算は純粋関数（lib/templatize）に
+// 置き、ここでは state とイベントだけを持つ。単体テストはそちらにだけ付ける。
+import {
+  buildSaveBody,
+  denormalize,
+  exampleValueFromQuote,
+  exampleValueFromSpans,
+  padOf,
+  resolveGhosts,
+  resolvePage,
+  validateDrafts,
+  type DraftRow,
+  type Preserved,
+  type PreviewRegion,
+} from "@/lib/templatize";
 import { newUuid } from "@/lib/uuid";
-import type { ExtractedField, PageDim, RegionRect, SchemaFieldDto } from "@/lib/types";
+import type { ExtractedField, PageDim, RegionRect, RunSpans } from "@/lib/types";
 
 export const TYPE_OPTIONS = [
   ["string", "文字列"],
@@ -33,47 +49,20 @@ export const TYPE_OPTIONS = [
   ["table", "明細（表）"],
 ] as const;
 
-type DraftRow = {
-  rowId: string; // 領域との紐付けは name でなくこの id（rename しても外れない）
-  name: string;
-  label: string;
-  type: string;
-  include: boolean;
-  sample: string;
-  base?: SchemaFieldDto; // 編集モードでプリロードした元フィールド（丸ごと保全する）
-};
+// この画面で足した新規行の型の選択肢（設計 v2 D7）。table を除く —— 列定義の無い
+// 表項目ができてしまう。既存行は従来どおり（読み取り専用の table 行を表示できる）。
+const NEW_ROW_TYPE_OPTIONS = TYPE_OPTIONS.filter(([v]) => v !== "table");
 
-type PreviewRegion = {
-  id: string;
-  kind: "include" | "exclude";
-  bbox: Px; // 画像 px（前処理後 PNG 座標）。保存時にのみ正規化する
-  drawnPage: number; // この px がどのページの寸法に対するものか
-  page: number | "last" | null; // 保存する適用範囲（include は必ず drawnPage）
-  rowId?: string; // include のみ
-  label?: string; // exclude のみ（「印影」等・任意）
-  // 読み込み時の原本と、その時点の画素矩形。触っていない矩形を保存し直すときは
-  // **原本をそのまま**返すために持つ。正規化 → 画素（round）→ 正規化 の往復は
-  // 0.5px ぶんの丸めが乗るので、開いて保存するだけで座標が動き、開くたびに
-  // ずれが積み上がる（設計の受け入れ条件「矩形を触らなければ完全一致」に反する）。
-  origin?: RegionRect;
-  originBbox?: Px;
-};
-
-/** 画素矩形が読み込み時から変わっていないか（原本をそのまま返してよいか）。 */
-function isUntouched(r: PreviewRegion): boolean {
-  return (
-    !!r.origin &&
-    !!r.originBbox &&
-    r.originBbox.every((v, i) => v === r.bbox[i])
-  );
+/** この領域に保存される例示値（画面で取った値か、読み込んだ原本のもの）。無ければ null。 */
+function exampleForRegion(r: PreviewRegion): string | null {
+  if (r.exampleValue !== undefined) return r.exampleValue;
+  return r.origin?.example_value ?? null;
 }
 
 type Selection = { kind: "row"; rowId: string } | { kind: "region"; regionId: string } | null;
 
-// ゴースト確定時の自動パディング。タイトな外接矩形をそのまま保存すると、
-// スキャンの分散だけで位置ガードが誤検知する。
-function padOf(w: number, h: number) {
-  return Math.max(Math.round(Math.min(w, h) * 0.02), 12);
+function emptyRow(): DraftRow {
+  return { rowId: newUuid(), name: "", label: "", type: "string", include: true, sample: "", isNew: true };
 }
 
 export function TemplatizePreview({
@@ -96,6 +85,9 @@ export function TemplatizePreview({
     schemaId: string;
     version: number;
     prevSchemaId: string | null;
+    /** この画面で足した項目のうち領域なしで保存した件数（保存後の案内に使う） */
+    newWithoutRegion?: number;
+    withExampleValue?: number;
   }) => void;
 }) {
   const pageCount = Math.max(pages.length, 1);
@@ -120,11 +112,48 @@ export function TemplatizePreview({
   // 落とすと保存が全置換なので、開いて保存しただけで既存の設定が消える
   // （実機で再現した事故: ページ寸法 API が失敗した窓で領域が全消去された）。
   // 読み込んだ値をそのまま持ち回し、保存時に無変換で戻す。
-  const [preserved, setPreserved] = useState<{
-    fieldRegions: Record<string, RegionRect>; // rowId -> 元の region
-    excludes: RegionRect[];
-    sourcePageCount: number | null;
-  }>({ fieldRegions: {}, excludes: [], sourcePageCount: null });
+  const [preserved, setPreserved] = useState<Preserved>({
+    fieldRegions: {},
+    excludes: [],
+    sourcePageCount: null,
+  });
+  // 「＋ 領域から項目を追加」の一回限りモード（設計 v2 D1）。on のあいだ次のドラッグが
+  // 新しい項目になる。暗黙に新規項目を作る経路は作らない —— 「行を選ばずに引くと新規」
+  // は選択の有無が画面から見えず、誤操作で行が増える（敵対的レビュー R4）。
+  const [addingFromRegion, setAddingFromRegion] = useState(false);
+  // 足した直後の行の表示名にフォーカスを移す（autoFocus はマウント時にだけ効くので、
+  // 新しい行にだけ付ける）
+  const [focusRowId, setFocusRowId] = useState<string | null>(null);
+  // GET /documents/{id}/spans の応答をページごとにキャッシュ（設計 v2 D11・D12）。
+  // 手描きの枠の下の文字を例示値にし、「枠に含まれる文字」の表示にも使う。
+  // null = 取得に失敗（表示は「見つかりません」、例示値は null）。失敗はキャッシュ
+  // しない（次に枠を引いたときに取り直す）。取得は非同期・失敗許容で、画面を止めない。
+  const [spansByPage, setSpansByPage] = useState<Map<number, RunSpans | null>>(() => new Map());
+  const spansInflight = useRef<Map<number, Promise<RunSpans | null>>>(new Map());
+  const loadSpans = useCallback(
+    (p: number): Promise<RunSpans | null> => {
+      const inflight = spansInflight.current.get(p);
+      if (inflight) return inflight;
+      const pr = api
+        .getRunSpans(documentId, p)
+        .then(
+          (run) => run,
+          () => null,
+        )
+        .then((run) => {
+          if (run) {
+            setSpansByPage((m) => new Map(m).set(p, run));
+          } else {
+            spansInflight.current.delete(p); // 失敗は残さない（次回に取り直す）
+            setSpansByPage((m) => new Map(m).set(p, null));
+          }
+          return run;
+        });
+      spansInflight.current.set(p, pr);
+      return pr;
+    },
+    [documentId],
+  );
 
   // ページ寸法がまったく無い＝領域の編集自体が成立しない。保存は既存値の保全に
   // 徹し、利用者には理由を出す（黙って「何も無い」画面を見せない）。
@@ -263,21 +292,39 @@ export function TemplatizePreview({
         ? (regionByRow.get(selection.rowId)?.id ?? null)
         : null;
 
-  const ghosts: CanvasGhost[] = useMemo(() => {
-    if (mode !== "create" && drafts.length === 0) return [];
-    const byName = new Map(drafts.map((d) => [d.name, d]));
-    return fields
-      .filter((f) => f.bbox && (f.page ?? 1) === page)
-      .filter((f) => {
-        const d = byName.get(f.name);
-        return d && !regionByRow.has(d.rowId); // 確定済みの行にはゴーストを出さない
-      })
-      .map((f) => ({
-        key: f.name,
-        bbox: f.bbox as Px,
-        label: f.label ?? f.name,
-      }));
-  }, [fields, drafts, page, regionByRow, mode]);
+  const ghosts: CanvasGhost[] = useMemo(
+    () => resolveGhosts({ fields, drafts, regionByRow, page, mode }),
+    [fields, drafts, page, regionByRow, mode],
+  );
+
+  // Esc で「領域から項目を追加」モードを抜ける。RegionCanvas の Escape ハンドラは
+  // onSelect(null) を呼ぶだけ（同じ window で stopPropagation しても他のリスナは
+  // 止まらない）なので、ここで別に拾う。
+  useEffect(() => {
+    if (!addingFromRegion) return;
+    function onKey(ev: KeyboardEvent) {
+      if (ev.key === "Escape") setAddingFromRegion(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [addingFromRegion]);
+
+  // 選択中の読取領域について「枠に含まれる文字」を出すために、そのページの span を
+  // 引く（未取得のときだけ。失敗済み＝null も取り直さない —— 選択のたびに失敗する
+  // 要求を繰り返さない。枠を引き直せば取り直す）。
+  const selectedInclude =
+    selectedRegionId !== null
+      ? (regions.find((r) => r.id === selectedRegionId && r.kind === "include") ?? null)
+      : null;
+  const selectedIncludePage = selectedInclude?.drawnPage ?? null;
+  useEffect(() => {
+    if (selectedIncludePage === null) return;
+    // 取得済み（RunSpans）なら何もしない。失敗（null）は行を選び直したときに取り直す
+    if (spansByPage.get(selectedIncludePage)) return;
+    void loadSpans(selectedIncludePage);
+    // spansByPage は読むだけ（取得の完了で変わっても取り直す必要は無い）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIncludePage, loadSpans]);
 
   const canvasRegions: CanvasRegion[] = regions
     .filter((r) => r.drawnPage === page)
@@ -287,7 +334,7 @@ export function TemplatizePreview({
       kind: r.kind,
       label:
         r.kind === "include"
-          ? (drafts.find((d) => d.rowId === r.rowId)?.label ?? "読取")
+          ? (drafts.find((d) => d.rowId === r.rowId)?.label || "新しい項目")
           : (r.label || "除外"),
     }));
 
@@ -308,16 +355,84 @@ export function TemplatizePreview({
     }
   }
 
-  function addInclude(rowId: string, bbox: Px) {
+  /**
+   * 行に読取領域を付ける（既にあれば置き換える）。出どころ（設計 v2 D8・D11）:
+   *   - ghost: AI が見つけた位置をクリックで採った。例示値はその項目の source_quote
+   *   - manual: 手描き。例示値は枠の下の span の原文で、取得は非同期（取れるまで
+   *     undefined、取れなければ null）。**引き直したら必ず取り直す** —— 領域は id ごと
+   *     置き換わるので、古い取得が後から解決しても（id が無いので）何も上書きしない。
+   */
+  function addInclude(
+    rowId: string,
+    bbox: Px,
+    from: { originKind: "ghost"; exampleValue: string | null } | { originKind: "manual" },
+  ) {
+    const id = newUuid();
+    const drawnPage = page;
+    const created: PreviewRegion = {
+      id,
+      kind: "include",
+      bbox,
+      drawnPage,
+      page: drawnPage,
+      rowId,
+      originKind: from.originKind,
+      createdAt: new Date().toISOString(),
+      exampleValue: from.originKind === "ghost" ? from.exampleValue : undefined,
+    };
     setRegions((rs) => [
       ...rs.filter((r) => !(r.kind === "include" && r.rowId === rowId)), // 置換
-      { id: newUuid(), kind: "include", bbox, drawnPage: page, page, rowId },
+      created,
     ]);
     patchRow(rowId, { include: true }); // 領域指定＝抽出したいの意思表示
+    setErr(null);
+    if (from.originKind === "manual") {
+      void loadSpans(drawnPage).then((run) => {
+        const value = exampleValueFromSpans(run, drawnPage, bbox);
+        setRegions((rs) => rs.map((r) => (r.id === id ? { ...r, exampleValue: value } : r)));
+      });
+    }
+  }
+
+  // 「＋ 項目を追加」（D2）: 領域の無い空行を末尾に足す（あとで行を選んで引ける）
+  function addBlankRow() {
+    const d = emptyRow();
+    setDrafts((ds) => [...ds, d]);
+    setSelection({ kind: "row", rowId: d.rowId });
+    setFocusRowId(d.rowId);
+    setAddingFromRegion(false);
+    setErr(null);
+  }
+
+  // 「＋ 領域から項目を追加」のドラッグ（D1）: 空行と、いま引いた矩形を同時に足して
+  // モードを抜け、表示名の入力へ
+  function addRowFromRegion(bbox: Px) {
+    const d = emptyRow();
+    setDrafts((ds) => [...ds, d]);
+    addInclude(d.rowId, bbox, { originKind: "manual" });
+    setAddingFromRegion(false);
+    setSelection({ kind: "row", rowId: d.rowId });
+    setFocusRowId(d.rowId);
+  }
+
+  // 新規行の「×」: 行と、その行に紐づく読取領域を一緒に消す（孤立領域を残さない）
+  function removeNewRow(rowId: string) {
+    setDrafts((ds) => ds.filter((d) => d.rowId !== rowId));
+    setRegions((rs) => rs.filter((r) => !(r.kind === "include" && r.rowId === rowId)));
+    setSelection((s) => {
+      if (!s) return s;
+      if (s.kind === "row" && s.rowId === rowId) return null;
+      if (s.kind === "region" && regionByRow.get(rowId)?.id === s.regionId) return null;
+      return s;
+    });
     setErr(null);
   }
 
   function onDraw(bbox: Px) {
+    if (addingFromRegion) {
+      addRowFromRegion(bbox);
+      return;
+    }
     if (drawMode === "exclude") {
       const id = newUuid();
       setRegions((rs) => [
@@ -332,7 +447,7 @@ export function TemplatizePreview({
       setErr("読取領域を紐づける項目を、右の一覧から選んでください。");
       return;
     }
-    addInclude(activeRowId, bbox);
+    addInclude(activeRowId, bbox, { originKind: "manual" });
   }
 
   function onGhostClick(name: string) {
@@ -344,12 +459,17 @@ export function TemplatizePreview({
     const H = dim?.height ?? 0;
     const p = padOf(W || 1000, H || 1000);
     const [x1, y1, x2, y2] = f.bbox as Px;
-    addInclude(d.rowId, [
-      Math.max(0, x1 - p),
-      Math.max(0, y1 - p),
-      Math.min(W || x2 + p, x2 + p),
-      Math.min(H || y2 + p, y2 + p),
-    ]);
+    addInclude(
+      d.rowId,
+      [
+        Math.max(0, x1 - p),
+        Math.max(0, y1 - p),
+        Math.min(W || x2 + p, x2 + p),
+        Math.min(H || y2 + p, y2 + p),
+      ],
+      // 例示値は AI が根拠にした span の原文（無ければ null）。正規化後の値は使わない
+      { originKind: "ghost", exampleValue: exampleValueFromQuote(f.source_quote) },
+    );
     setSelection({ kind: "row", rowId: d.rowId });
   }
 
@@ -367,93 +487,64 @@ export function TemplatizePreview({
   }
 
   // --- 保存 ---
-  function issue(): string | null {
-    const dt = docType.trim();
-    if (!dt) return "帳票種別（doc_type）を入力してください。";
-    const chosen = drafts.filter((d) => d.include);
-    if (chosen.length === 0) return "抽出する項目を 1 つ以上選んでください。";
-    const names = chosen.map((d) => d.name.trim());
-    // 命名規則は**新しく付けた／変えた名前**にだけ課す。chat の項目追加は任意の
-    // 名前を通すので、既存スキーマには日本語名の項目があり得る。既存名まで弾くと
-    // 「開いて保存するだけ」ができないスキーマができてしまう。
-    const renamed = chosen.filter((d) => d.name.trim() !== d.base?.name);
-    if (renamed.some((d) => !/^[A-Za-z][A-Za-z0-9_]*$/.test(d.name.trim())))
-      return "項目名（name）は英字始まりの英数字・アンダースコアにしてください。";
-    if (new Set(names).size !== names.length) return "項目名（name）が重複しています。";
-    const orphan = includes.find((r) => !drafts.some((d) => d.rowId === r.rowId && d.include));
-    if (orphan) return "項目に紐づいていない読取領域があります。項目を選び直してください。";
-    return null;
-  }
-
-  function regionOf(rowId: string): RegionRect | null {
-    const r = regionByRow.get(rowId);
-    if (!r) {
-      // 画面で編集できなかった領域は、読み込んだ値をそのまま返す（消さない）
-      return preserved.fieldRegions[rowId] ?? null;
-    }
-    if (isUntouched(r)) return r.origin!; // 丸め往復で座標を動かさない
-    const d = dimsByPage.get(r.drawnPage);
-    if (!d?.width || !d?.height) return preserved.fieldRegions[rowId] ?? null;
-    return { page: r.drawnPage, rect: normalize(r.bbox, d.width, d.height) };
-  }
-
   async function save() {
-    const problem = issue();
+    const problem = validateDrafts({ docType, drafts, includes });
     if (problem) {
       setErr(problem);
       return;
     }
-    const body: SchemaFieldDto[] = drafts
-      // base 持ちは include=false でも版から落とさない（明細定義などを消さない）
-      .filter((d) => d.include || d.base)
-      .map((d) => {
-        const name = d.name.trim();
-        const label = d.label.trim() || name;
-        const region = d.include ? regionOf(d.rowId) : null;
-        return d.base
-          ? { ...d.base, name, label, type: d.type, region }
-          : { name, label, type: d.type, required: false, critical: false, region };
-      });
-
-    // 編集できなかったぶんを先に戻してから、画面で編集したぶんを足す
-    const excludeRegions: RegionRect[] = [...preserved.excludes];
-    for (const r of excludes) {
-      const label = r.label?.trim() || null;
-      // 矩形も名前も適用範囲も変えていないなら原本をそのまま返す
-      if (isUntouched(r) && r.origin!.page === r.page && (r.origin!.label ?? null) === label) {
-        excludeRegions.push(r.origin!);
-        continue;
-      }
-      const d = dimsByPage.get(r.drawnPage);
-      if (!d?.width || !d?.height) continue;
-      excludeRegions.push({
-        page: r.page,
-        rect: normalize(r.bbox, d.width, d.height),
-        label,
-      });
+    // 手描き領域の例示値は非同期に取っている。取得が終わる前に保存すると example_value
+    // が載らず、ヒント on 後にその項目だけ kind_conflict ガードが効かない（レビュー指摘）。
+    // 未取得のものはここで待って埋める（失敗は null のまま送る＝サーバ既定と同じ）。
+    setBusy(true);
+    const pending = regions.filter(
+      (r) => r.kind === "include" && r.originKind === "manual" && r.exampleValue === undefined,
+    );
+    let regionsForSave = regions;
+    if (pending.length > 0) {
+      const filled = await Promise.all(
+        pending.map(async (r) => {
+          const run = await loadSpans(r.drawnPage);
+          return [r.id, exampleValueFromSpans(run, r.drawnPage, r.bbox)] as const;
+        }),
+      );
+      const byId = new Map(filled);
+      regionsForSave = regions.map((r) =>
+        byId.has(r.id) ? { ...r, exampleValue: byId.get(r.id) ?? null } : r,
+      );
+      setRegions(regionsForSave);
     }
+    const body = buildSaveBody({
+      drafts,
+      regions: regionsForSave,
+      preserved,
+      dimsUnavailable,
+      pageCount,
+      pageDims: pages,
+      mode,
+    });
+    // 領域の無い新規項目は保存を止めない（D2）。代わりに保存後の案内で
+    // 「AI が語彙から探す」ことを伝える
+    const newWithoutRegion = drafts.filter(
+      (d) => d.isNew && d.include && !regionByRow.has(d.rowId),
+    ).length;
+    const withExampleValue = body.fields.filter((f) => f.region?.example_value).length;
 
     setBusy(true);
     setErr(null);
     try {
-      const saved = await api.putSchema(docType.trim(), body, {
+      const saved = await api.putSchema(docType.trim(), body.fields, {
         create: mode === "create",
-        excludeRegions,
-        // 編集では既存の値を保つ（未記録の旧スキーマだけ今回の値で埋める）。
-        // ページ寸法が取れていないときは **記録しない**: pages が空だと pageCount が
-        // 1 に潰れるため、多ページ帳票のテンプレートに 1 が焼き付いてしまう。
-        // 未記録（NULL）なら位置ガードはページ判定を行わないので、誤った値より安全。
-        sourcePageCount: dimsUnavailable
-          ? (mode === "create" ? undefined : preserved.sourcePageCount)
-          : mode === "create"
-            ? pageCount
-            : (preserved.sourcePageCount ?? pageCount),
+        excludeRegions: body.excludeRegions,
+        sourcePageCount: body.sourcePageCount,
       });
       onSaved({
         docType: saved.doc_type,
         schemaId: saved.id,
         version: saved.version,
         prevSchemaId: prev?.id ?? null,
+        newWithoutRegion,
+        withExampleValue,
       });
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
@@ -487,16 +578,19 @@ export function TemplatizePreview({
             )}
           </b>
           <span className="spacer" />
+          {/* 「領域から項目を追加」中は読取領域に固定する（次のドラッグは新しい項目） */}
           <div className="rgn-modes" role="group" aria-label="描画モード">
             <button
               className={`btn sm${drawMode === "include" ? " primary" : ""}`}
               onClick={() => setDrawMode("include")}
+              disabled={addingFromRegion}
             >
               読取領域
             </button>
             <button
               className={`btn sm${drawMode === "exclude" ? " primary" : ""}`}
               onClick={() => setDrawMode("exclude")}
+              disabled={addingFromRegion}
             >
               除外領域
             </button>
@@ -523,17 +617,30 @@ export function TemplatizePreview({
               ))}
               <span className="spacer" />
               <span className="sub">
-                {drawMode === "include"
-                  ? "破線＝AI が見つけた位置。クリックで確定、または空きをドラッグ"
-                  : "読ませたくない範囲（印影・ロゴ等）をドラッグ"}
+                {addingFromRegion
+                  ? "次のドラッグが新しい項目の読取領域になります"
+                  : drawMode === "include"
+                    ? "破線＝AI が見つけた位置。クリックで確定、または空きをドラッグ"
+                    : "読ませたくない範囲（印影・ロゴ等）をドラッグ"}
               </span>
             </div>
+            {addingFromRegion && (
+              <div className="rgn-band" role="status">
+                <b>新しい項目の位置をドラッグしてください</b>（Esc で中止）
+                <span className="spacer" />
+                <button className="btn sm" onClick={() => setAddingFromRegion(false)}>
+                  中止
+                </button>
+              </div>
+            )}
             <RegionCanvas
               documentId={documentId}
               pageNo={page}
               pageDim={dimsByPage.get(page)}
               regions={canvasRegions}
-              ghosts={drawMode === "include" ? ghosts : []}
+              // 追加モード中はゴーストを出さない: ゴーストの上ではドラッグが始まらず、
+              // 「次のドラッグが新しい項目」という約束が崩れる
+              ghosts={drawMode === "include" && !addingFromRegion ? ghosts : []}
               mode={drawMode}
               selectedId={selectedRegionId}
               onDraw={onDraw}
@@ -560,8 +667,15 @@ export function TemplatizePreview({
                 </label>
                 {mode === "edit" && (
                   <p className="sub" style={{ margin: 0 }}>
-                    項目の追加・削除と必須／重要の設定はスキーマ管理画面で行います。ここでは
-                    領域の指定と表示名・型の修正だけができます。
+                    {/* 項目の追加はこの画面でできる（D3）。削除は map_fields・学習メモリの
+                        キーに波及するので引き続きスキーマ管理画面で（D4）。行き止まりに
+                        しないよう、その画面へのリンクを添える */}
+                    項目の<b>削除</b>と必須／重要の設定は
+                    <Link href="/schemas" target="_blank" rel="noopener">
+                      スキーマ管理画面
+                    </Link>
+                    （別タブで開きます）で行います。ここでは
+                    項目の追加と、領域の指定・表示名・型の修正ができます。
                   </p>
                 )}
 
@@ -575,29 +689,58 @@ export function TemplatizePreview({
                   {drafts.map((d) => {
                     const r = regionByRow.get(d.rowId);
                     const on = activeRowId === d.rowId;
+                    // 選択中の読取領域なら、**保存される例示値と同じもの**を出す。
+                    // ゴースト由来は AI が読んだ原文（source_quote）、手描きは枠の下の span
+                    // （取得中／失敗／0 件を分けて出す。失敗を「文字が無い」と伝えない）
+                    const showSpans = !!r && r.id === selectedRegionId;
+                    const isGhost = r?.originKind === "ghost";
+                    const pageSpans = r ? spansByPage.get(r.drawnPage) : undefined;
+                    const inRect =
+                      showSpans && r && !isGhost && pageSpans !== undefined && pageSpans !== null
+                        ? exampleValueFromSpans(pageSpans, r.drawnPage, r.bbox)
+                        : undefined;
                     return (
                       <div
                         key={d.rowId}
                         className={`rgn-row${d.include ? "" : " off"}${on ? " on" : ""}`}
                         onClick={() => setSelection({ kind: "row", rowId: d.rowId })}
                       >
-                        <input
-                          type="checkbox"
-                          checked={d.include}
-                          onChange={(e) => setRowInclude(d.rowId, e.target.checked)}
-                          aria-label={`${d.label} を含める`}
-                        />
+                        {d.isNew ? (
+                          // 新規行は「残す」を出さず × だけ（外す＝版に載らない＝消すと同じ。
+                          // 編集モードの既存行のチェック「領域を付けるか」と意味が混ざる）
+                          <button
+                            className="rgn-rowx"
+                            aria-label={`${d.label || "この項目"} を取り消す`}
+                            title="この項目を取り消す（領域も消えます）"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeNewRow(d.rowId);
+                            }}
+                          >
+                            ×
+                          </button>
+                        ) : (
+                          <input
+                            type="checkbox"
+                            checked={d.include}
+                            onChange={(e) => setRowInclude(d.rowId, e.target.checked)}
+                            aria-label={`${d.label} を含める`}
+                          />
+                        )}
                         <span className="rgn-names">
                           <input
                             value={d.label}
                             onChange={(e) => patchRow(d.rowId, { label: e.target.value })}
                             aria-label="表示名"
+                            placeholder={d.isNew ? "表示名（例: 支払期日）" : undefined}
+                            autoFocus={d.isNew && d.rowId === focusRowId}
                           />
                           <input
                             className="mono"
                             value={d.name}
                             onChange={(e) => patchRow(d.rowId, { name: e.target.value })}
                             aria-label="項目名"
+                            placeholder={d.isNew ? "項目名（例: due_date）" : undefined}
                           />
                           {d.sample && (
                             <span className="sub" title={d.sample}>
@@ -612,7 +755,7 @@ export function TemplatizePreview({
                           disabled={d.type === "table"}
                           aria-label="型"
                         >
-                          {TYPE_OPTIONS.map(([v, l]) => (
+                          {(d.isNew ? NEW_ROW_TYPE_OPTIONS : TYPE_OPTIONS).map(([v, l]) => (
                             <option key={v} value={v}>
                               {l}
                             </option>
@@ -636,9 +779,76 @@ export function TemplatizePreview({
                             "—"
                           )}
                         </span>
+                        {showSpans && isGhost && (
+                          <span className="sub rgn-rownote clip" title={r?.exampleValue ?? undefined}>
+                            AI が読んだ原文: {r?.exampleValue ?? "（原文なし）"}
+                          </span>
+                        )}
+                        {showSpans && r && exampleForRegion(r) && !r.exampleCleared && (
+                          // 例示値は帳票の値（個人名を含み得る）で、スキーマの版が残る限り残る。
+                          // 気になる場合に作者が外せるようにする（§2.3）
+                          <button
+                            className="btn sm ghost"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRegions((rs) =>
+                                rs.map((x) =>
+                                  x.id === r.id ? { ...x, exampleValue: null, exampleCleared: true } : x,
+                                ),
+                              );
+                            }}
+                            title="この領域の例示値（前回ここにあった値）を保存しない"
+                          >
+                            例示値を消す
+                          </button>
+                        )}
+                        {showSpans && !isGhost && (
+                          <span className="sub rgn-rownote clip" title={inRect ?? undefined}>
+                            枠に含まれる文字:{" "}
+                            {pageSpans === undefined
+                              ? "読み取り中…"
+                              : pageSpans === null
+                                ? "（文字を読み取れませんでした。行を選び直すと再取得します）"
+                                : (inRect ?? "（この枠に文字は見つかりません）")}
+                          </span>
+                        )}
+                        {d.isNew && (
+                          // Part 2（位置のヒント）が既定 on になったので §1.5 の文言に差し替えた。
+                          // 「位置のヒントが使われるのは今後の版から」の断りは、on の状態で
+                          // 出すと嘘になるので復活させない
+                          <span className="sub rgn-rownote" role="note">
+                            読取領域は、この位置に何があるかのヒントとして抽出 AI に渡されます。
+                            枠の下の文字が例示値として保存されます。
+                          </span>
+                        )}
                       </div>
                     );
                   })}
+                </div>
+
+                {/* 項目の追加（設計 v2 D1・D2・D3: 新規作成・編集の両モードで使える） */}
+                <div className="rgn-add" role="group" aria-label="項目の追加">
+                  <button
+                    className={`btn sm${addingFromRegion ? " primary" : ""}`}
+                    disabled={dimsUnavailable}
+                    title={
+                      dimsUnavailable ? "ページの寸法が取得できないため領域を引けません" : undefined
+                    }
+                    onClick={() => {
+                      if (addingFromRegion) {
+                        setAddingFromRegion(false);
+                        return;
+                      }
+                      setDrawMode("include"); // 次のドラッグは読取領域（除外にはしない）
+                      setAddingFromRegion(true);
+                      setErr(null);
+                    }}
+                  >
+                    {addingFromRegion ? "ドラッグを待っています…（中止）" : "＋ 領域から項目を追加"}
+                  </button>
+                  <button className="btn sm" onClick={addBlankRow}>
+                    ＋ 項目を追加
+                  </button>
                 </div>
 
                 <div className="rgn-ex">
@@ -705,22 +915,25 @@ export function TemplatizePreview({
                   </div>
                 )}
 
-                {/* 読取領域が現在どこまで効くのかを正直に書く。「レイアウト違いを
-                    検知できないので読取領域を確定することをおすすめします」という
-                    以前の勧めは復活させない —— 検証画面に参考として出るようになった
-                    だけで、抽出結果そのものは変わらないため */}
+                {/* 読取領域が現在どこまで効くのかを正直に書く（設計 v2 §1.5・既定 on）。
+                    ヒントは抽出 AI に渡るが、この帳票でその位置に合う文字が無ければ
+                    決定論のガードで自動的に捨てられ、従った／捨てたは検証画面に参考として
+                    出るだけ。「レイアウト違いを検知できないので読取領域を確定することを
+                    おすすめします」という以前の勧めは復活させない —— 領域が 1 行ずれると
+                    正解が壊れ得る（2026-09-07 の実測）ので、引くことを勧める側に倒さない */}
                 {(drawMode === "include" || includes.length > 0) && (
                   <p className="sub" style={{ margin: 0 }} role="note">
-                    読取領域は<b>抽出結果を変えません</b>。指定しておくと、項目が想定と
-                    違う位置で見つかったことの検知に使われ、その結果は検証画面に
-                    <b>参考として</b>表示されます（値や「要確認」の判定には影響しません）。
+                    読取領域は、この位置に何があるかの<b>ヒント</b>として抽出 AI に渡されます。
+                    この帳票でその位置に合う文字が無いときは自動的に使われず、その結果は
+                    検証画面に<b>参考として</b>表示されます（「要確認」の判定には影響しません）。
                   </p>
                 )}
 
-                {activeRow && drawMode === "include" && (
+                {activeRow && drawMode === "include" && !addingFromRegion && (
                   <p className="sub" style={{ margin: 0 }}>
-                    選択中: <b>{activeRow.label}</b> — 画像上をドラッグするとこの項目の
-                    読取領域になります（既にある場合は置き換わります）。
+                    選択中: <b>{activeRow.label || activeRow.name || "（名前なし）"}</b> —
+                    画像上をドラッグするとこの項目の読取領域になります（既にある場合は
+                    置き換わります）。
                   </p>
                 )}
 
@@ -762,26 +975,4 @@ export function TemplatizePreview({
       </div>
     </div>
   );
-}
-
-// ---- 座標変換 ----
-
-function normalize(b: Px, w: number, h: number): [number, number, number, number] {
-  const clamp = (v: number) => Math.min(1, Math.max(0, v));
-  return [clamp(b[0] / w), clamp(b[1] / h), clamp(b[2] / w), clamp(b[3] / h)];
-}
-
-function denormalize(rect: number[], w: number, h: number): Px {
-  return [
-    Math.round(rect[0] * w),
-    Math.round(rect[1] * h),
-    Math.round(rect[2] * w),
-    Math.round(rect[3] * h),
-  ];
-}
-
-function resolvePage(page: number | "last" | null | undefined, pageCount: number): number {
-  if (page === "last") return pageCount;
-  if (typeof page === "number") return page;
-  return 1; // 全ページ指定は 1 ページ目の座標系で編集する（適用範囲は一覧で示す）
 }

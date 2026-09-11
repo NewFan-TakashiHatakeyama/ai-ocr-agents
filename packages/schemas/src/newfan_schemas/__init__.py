@@ -14,15 +14,23 @@ from newfan_schemas.extraction import (
     TableResult,
 )
 from newfan_schemas.field_schema import (
+    EXAMPLE_VALUE_MAX_LEN,
+    LOST_PAGE_FIELD,
     MIN_REGION_AREA,
+    REGION_AGGREGATE_FIELD,
+    RESERVED_FIELD_NAME_PREFIX,
+    REVIEW_AGGREGATE_FIELD_NAMES,
     ColumnDef,
     FieldDef,
     FieldSchema,
     RegionRect,
+    check_field_name,
     resolve_page,
     resolve_regions,
+    sanitize_example_value,
 )
 from newfan_schemas.enums import DocStatus, FieldType, ReviewStatus, RunStatus, SpanSource
+from newfan_schemas.textnorm import norm_key
 
 __all__ = [
     "Span",
@@ -37,8 +45,16 @@ __all__ = [
     "ColumnDef",
     "RegionRect",
     "MIN_REGION_AREA",
+    "EXAMPLE_VALUE_MAX_LEN",
+    "LOST_PAGE_FIELD",
+    "REGION_AGGREGATE_FIELD",
+    "REVIEW_AGGREGATE_FIELD_NAMES",
+    "RESERVED_FIELD_NAME_PREFIX",
+    "check_field_name",
     "resolve_page",
     "resolve_regions",
+    "norm_key",
+    "sanitize_example_value",
     "FieldType",
     "SpanSource",
     "ReviewStatus",

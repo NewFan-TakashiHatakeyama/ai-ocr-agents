@@ -49,6 +49,9 @@ def make_finalize(store: ContextStore, enqueue: EnqueueFn | None = None) -> Node
             status="confirmed",
             fallback_pages=state.get("fallback_pages", []),
             region_stats=state.get("metrics", {}).get("region"),
+            # 自動確定（interrupt を経ない）経路では finalize が唯一の保存点なので
+            # ここでも渡す。resume 経路で state に無ければ None → 触らない（消さない）
+            spans=state.get("spans"),
         )
         if enqueue is not None:
             enqueue(

@@ -25,6 +25,13 @@ X_STAMP = {"page": None, "rect": [0.82, 0.02, 0.98, 0.14], "label": "社印"}
 X_APPROVAL = {"page": "last", "rect": [0.05, 0.90, 0.30, 0.98], "label": "承認印"}
 
 
+def _stored(region: dict) -> dict:
+    """API 応答での領域の形。読取領域ヒントの 3 項目（設計 region-field-add-and-hint-v2
+    §2.3）は送らなくても None で必ず返る。完全一致で比べる（DTO 落ち検知）ために、
+    期待値側にその既定値を足す。"""
+    return {"example_value": None, "origin": None, "created_at": None, **region}
+
+
 def _put(ctx: SimpleNamespace, body: dict) -> SimpleNamespace:
     r = ctx.client.put("/v1/schemas", headers=auth("admin"), json=body)
     return SimpleNamespace(status=r.status_code, json=r.json())
@@ -73,6 +80,122 @@ def test_old_schema_returns_null_region_empty_excludes(ctx: SimpleNamespace) -> 
     assert got["source_page_count"] is None
 
 
+R_HINTED = {
+    "page": 1,
+    "rect": [0.30, 0.02, 0.72, 0.09],
+    "example_value": "株式会社千曲川ホーム",
+    "origin": "ghost",
+    "created_at": "2026-09-11T00:00:00Z",
+}
+
+
+def test_put_get_roundtrip_region_hint_fields(ctx: SimpleNamespace) -> None:
+    """example_value / origin / created_at が PUT 応答と GET の両方で返る。
+
+    設計 region-field-add-and-hint-v2 §2.3。RegionRect は newfan_schemas に一元定義
+    で gateway の DTO からも参照されているので「モデルに足せば往復するはず」だが、
+    その「はず」を pydantic の extra="ignore" が黙って裏切った前例がある（§4.2）。
+    3 項目とも値の完全一致で固定する。
+    """
+    res = _put(
+        ctx,
+        {
+            "doc_type": "invoice",
+            "fields": [
+                {"name": "issuer", "label": "取引先名", "type": "string", "region": R_HINTED},
+                {"name": "total", "type": "money_jpy", "region": R_TOTAL},  # 3 項目なし
+            ],
+        },
+    )
+    assert res.status == 200
+    for payload in (res.json, _get(ctx)):
+        by_name = {f["name"]: f for f in payload["fields"]}
+        hinted = by_name["issuer"]["region"]
+        assert hinted["example_value"] == "株式会社千曲川ホーム"
+        assert hinted["origin"] == "ghost"
+        assert hinted["created_at"] == "2026-09-11T00:00:00Z"
+        assert hinted["rect"] == [0.30, 0.02, 0.72, 0.09]
+        # 3 項目を送らなかった領域は None で返る（キーが消えるのではない）
+        plain = by_name["total"]["region"]
+        assert plain["page"] == "last"
+        assert plain["example_value"] is None
+        assert plain["origin"] is None
+        assert plain["created_at"] is None
+
+
+def test_edit_mode_roundtrip_preserves_hint_fields(ctx: SimpleNamespace) -> None:
+    """取得した fields をそのまま送り返す編集モードで 3 項目が新版に引き継がれる。"""
+    _put(
+        ctx,
+        {"doc_type": "invoice", "fields": [{"name": "issuer", "type": "string", "region": R_HINTED}]},
+    )
+    v1 = _get(ctx)
+    v2 = _put(ctx, {"doc_type": "invoice", "fields": v1["fields"]})
+    assert v2.status == 200
+    got = _get(ctx)
+    assert got["version"] == v1["version"] + 1
+    region = got["fields"][0]["region"]
+    assert (region["example_value"], region["origin"], region["created_at"]) == (
+        "株式会社千曲川ホーム",
+        "ghost",
+        "2026-09-11T00:00:00Z",
+    )
+
+
+def test_put_sanitizes_example_value_and_rejects_bad_origin(ctx: SimpleNamespace) -> None:
+    """消毒（制御文字・上限）はモデル側で掛かり、API 応答にはその結果が載る。"""
+    res = _put(
+        ctx,
+        {
+            "doc_type": "invoice",
+            "fields": [
+                {
+                    "name": "issuer",
+                    "type": "string",
+                    "region": {**R_HINTED, "example_value": "  株式会社\x00千曲川\n" + "x" * 300},
+                }
+            ],
+        },
+    )
+    assert res.status == 200
+    ev = res.json["fields"][0]["region"]["example_value"]
+    assert ev.startswith("株式会社千曲川x") and len(ev) == 200
+    # origin の値域外・created_at の非 ISO は形式検証（pydantic）で 422
+    bad_origin = _put(
+        ctx,
+        {
+            "doc_type": "invoice",
+            "fields": [{"name": "issuer", "type": "string", "region": {**R_HINTED, "origin": "auto"}}],
+        },
+    )
+    assert bad_origin.status == 422
+    bad_ts = _put(
+        ctx,
+        {
+            "doc_type": "invoice",
+            "fields": [
+                {"name": "issuer", "type": "string", "region": {**R_HINTED, "created_at": "先週"}}
+            ],
+        },
+    )
+    assert bad_ts.status == 422
+
+
+def test_exclude_region_with_hint_fields_is_accepted(ctx: SimpleNamespace) -> None:
+    """除外領域に 3 項目が付いていても保存は通る（読取領域でしか使わないが無害）。"""
+    res = _put(
+        ctx,
+        {
+            "doc_type": "invoice",
+            "fields": [{"name": "a", "type": "string"}],
+            "exclude_regions": [{**X_STAMP, "example_value": "印", "origin": "manual"}],
+        },
+    )
+    assert res.status == 200
+    assert res.json["exclude_regions"][0]["label"] == "社印"
+    assert res.json["exclude_regions"][0]["page"] is None
+
+
 # ---------- 引き継ぎ（旧経路の保存で消えないこと） ----------
 
 
@@ -100,10 +223,10 @@ def test_legacy_put_without_exclude_key_inherits(ctx: SimpleNamespace) -> None:
     assert legacy.status == 200
     # PUT 応答と GET の両方で引き継がれていること。PUT 応答が [] だと旧画面は
     # 「消えた」state を持ち、次の保存で明示 []（本当のクリア）を送ってしまう。
-    assert legacy.json["exclude_regions"] == [X_STAMP]
+    assert legacy.json["exclude_regions"] == [_stored(X_STAMP)]
     assert legacy.json["source_page_count"] == 3
     got = _get(ctx)
-    assert got["exclude_regions"] == [X_STAMP]
+    assert got["exclude_regions"] == [_stored(X_STAMP)]
     assert got["source_page_count"] == 3
 
 
@@ -151,7 +274,7 @@ def test_chat_update_schema_preserves_regions(ctx: SimpleNamespace) -> None:
     by_name = {f["name"]: f for f in got["fields"]}
     assert by_name["title"]["region"]["rect"] == [0.30, 0.02, 0.72, 0.09]
     assert by_name["memo"]["region"] is None
-    assert got["exclude_regions"] == [X_STAMP]
+    assert got["exclude_regions"] == [_stored(X_STAMP)]
     assert got["source_page_count"] == 2
 
 
@@ -242,6 +365,40 @@ def test_include_region_requires_page(ctx: SimpleNamespace) -> None:
     )
     assert ok.status == 200
     assert ok.json["exclude_regions"][0]["page"] is None
+
+
+# ---------- 予約名（設計 region-field-add-and-hint-v2 D9） ----------
+
+
+def test_reserved_field_name_rejected_with_error_envelope(ctx: SimpleNamespace) -> None:
+    """``__pages__`` / ``__region__`` / 先頭 ``__`` は 422 かつ**プロジェクトの error 封筒**。
+
+    集約 ReviewItem の擬似 field 名と衝突するとレビュー画面で所見の帰属が壊れる。
+    pydantic の 422（``{"detail": [...]}``）ではなく ``{"error": {"code": "E1003"}}``
+    で返すのは、web 側のエラー表示がこの封筒しか読まないため。
+    """
+    before = _get(ctx)["version"]
+    for name in ("__pages__", "__region__", "__custom"):
+        r = _put(
+            ctx,
+            {"doc_type": "invoice", "fields": [{"name": name, "type": "string"}]},
+        )
+        assert r.status == 422, name
+        assert set(r.json) == {"error"}, r.json
+        assert r.json["error"]["code"] == "E1003"
+        assert "予約" in r.json["error"]["message"]
+        assert r.json["error"]["details"] == {"field": name}
+    # 拒否した PUT は新版を作らない
+    assert _get(ctx)["version"] == before
+    # 過剰拒否しない: 末尾・途中の __ と単独の _ は通る
+    ok = _put(
+        ctx,
+        {
+            "doc_type": "invoice",
+            "fields": [{"name": n, "type": "string"} for n in ("x__", "a__b", "_private")],
+        },
+    )
+    assert ok.status == 200
 
 
 # ---------- JSONB 直列化（プロンプト同一性の土台） ----------
@@ -440,3 +597,27 @@ def test_result_の所見なしはキー自体が無い(ctx: SimpleNamespace) ->
     body = ctx.client.get(f"/v1/documents/{doc_id}/result", headers=auth("viewer")).json()
     assert "mismatch_fields" not in body["region_stats"]
     assert "layout_mismatch" not in body["region_stats"]
+
+
+def test_legacy_reserved_field_name_is_readable_but_not_writable(ctx: SimpleNamespace) -> None:
+    """予約名の拒否は書き込み側だけ。読み出しは旧データを通す（InMemory 版）。
+
+    実 Pg 版は test_pg_repository_integration.py。ここでは InMemory の
+    seed_schema で「検査導入前に入った行」を再現し、GET が落ちないことと、
+    PUT では拒むことを固定する。
+    """
+    from newfan_gateway.records import SchemaFieldDef, SchemaRecord
+
+    ctx.admin.seed_schema(
+        SchemaRecord(
+            id="sch_legacy", tenant_id="ten_1", doc_type="legacy_memo", version=1,
+            fields=[SchemaFieldDef(name="__memo", label="メモ", type="string")],
+        )
+    )
+    r = ctx.client.get("/v1/schemas", headers=auth("admin"))
+    assert r.status_code == 200, r.text
+    assert "legacy_memo" in {s["doc_type"] for s in r.json()["items"]}
+    assert ctx.client.get("/v1/schemas/legacy_memo", headers=auth("admin")).status_code == 200
+    # 書き込みは拒む
+    r = _put(ctx, {"doc_type": "legacy_memo", "fields": [{"name": "__memo", "type": "string"}]})
+    assert r.status == 422 and r.json["error"]["code"] == "E1003"

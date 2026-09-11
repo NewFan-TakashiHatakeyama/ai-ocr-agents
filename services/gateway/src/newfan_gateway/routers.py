@@ -8,11 +8,11 @@ import secrets
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
-from newfan_schemas import resolve_regions
+from newfan_schemas import check_field_name, resolve_regions
 from newfan_workflow import WorkflowGraph, build_candidate, catalog, classify_text, has_errors, lint
 from newfan_workflow.lint import Finding
 from pydantic import ValidationError
@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from newfan_gateway import dto
 from newfan_gateway.auth import Principal
 from newfan_gateway.chat import ChatAgent
+from newfan_gateway.chat_tools import field_validation_message
 from newfan_gateway.config import Settings
 from newfan_gateway.admin import AdminRepository, is_activatable
 from newfan_gateway.deps import (
@@ -513,6 +514,38 @@ def get_result(
     )
 
 
+@router.get("/documents/{document_id}/spans", response_model=dto.RunSpans)
+def get_run_spans(
+    document_id: str,
+    # 1 始まり。0 や負数を空配列で返すと、UI 側の 0 始まりの取り違えが黙って隠れる
+    page: int = Query(default=1, ge=1),
+    principal: Principal = Depends(require_role("viewer")),
+    repo: Repository = Depends(get_repo),
+) -> dto.RunSpans:
+    """最新 run の OCR span（除外領域の適用後）をページ単位で返す（設計 D12 / §2.4）。
+
+    テンプレート化画面が、枠を引いた／選んだときに「枠に含まれる文字」を出し、
+    例示値（`example_value`）の出どころにする。structure-svc への都度問い合わせは
+    採らない（ページあたり数秒〜数十秒）。
+
+    run_spans の行が無い（0008 より前の run、失敗 run、範囲外のページ）場合は
+    spans を空で返す。「未抽出」（run が無い）だけをエラーにする。
+    """
+    _require_document(repo, principal.tenant_id, document_id)
+    run = repo.get_latest_run(principal.tenant_id, document_id)
+    if run is None:
+        raise ApiError("E1001", "抽出結果がありません", details={"document_id": document_id})
+    rows = repo.get_run_spans(principal.tenant_id, run.id, page)
+    return dto.RunSpans(
+        run_id=run.id,
+        page_no=page,
+        spans=[
+            dto.RunSpanDto(span_id=s["span_id"], text=s.get("text") or "", bbox=s.get("bbox"))
+            for s in rows
+        ],
+    )
+
+
 @router.get("/documents/{document_id}/pages/{page_no}/image", response_model=dto.SignedUrl)
 def get_page_image(
     request: Request,
@@ -873,6 +906,15 @@ def put_schema(
     # 「どのページのどこを読むか」の指定にならず、全ページに同座標を当てる意図とも
     # 区別できないため。exclude は page:null（全ページ）が正当な指定。
     for f in body.fields:
+        # 予約名（__pages__ / __region__ / 先頭 __）は集約 ReviewItem の擬似 field 名と
+        # 衝突する（設計 region-field-add-and-hint-v2 D9）。SchemaFieldDef の validator
+        # でも落ちるが、そこで落とすと pydantic の ValidationError が未捕捉 500 になる。
+        # DTO（SchemaFieldDto）に validator を置くと FastAPI の 422 形式で返ってしまい
+        # プロジェクトのエラー封筒（E1003）にならないので、ここで明示的に検査する。
+        try:
+            check_field_name(f.name)
+        except ValueError as exc:
+            raise ApiError("E1003", str(exc), details={"field": f.name}) from exc
         if f.region is not None and f.region.page is None:
             raise ApiError(
                 "E1003",
@@ -1757,8 +1799,17 @@ def chat_confirm(
         fields = list(cur.fields) if cur else []
         if any(f.name == fld.get("name") for f in fields):
             return dto.ChatConfirmResult(ok=False, message="同名の項目が既に存在します。")
-        fields.append(SchemaFieldDef(**fld))
-        rec = admin.put_schema(principal.tenant_id, doc_type, fields)
+        # LLM 由来の dict なので予約名（D9）や型違いが来る。素通しすると ValidationError
+        # が未捕捉 500 になり、会話が「内部エラー」で途切れる。
+        try:
+            fields.append(SchemaFieldDef(**fld))
+        except ValidationError as exc:
+            return dto.ChatConfirmResult(ok=False, message=field_validation_message(exc))
+        try:
+            rec = admin.put_schema(principal.tenant_id, doc_type, fields)
+        except ValueError as exc:
+            # 予約名（D9）は put_schema（書き込み側の共通入口）が ValueError で拒む
+            return dto.ChatConfirmResult(ok=False, message=str(exc))
         return dto.ChatConfirmResult(
             ok=True,
             message=f"スキーマ「{doc_type}」に「{fld.get('label', fld.get('name'))}」を追加し、v{rec.version} として保存しました。",

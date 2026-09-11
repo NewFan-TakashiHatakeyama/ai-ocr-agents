@@ -12,6 +12,35 @@
    "sample21.png"
   ]
  },
+ "_different_layout_pairs": {
+  "_about": "目視で「別雛形」と判定した組（region-measurement-2026-09-07.md「同じ雛形の確定」）。片方で引いた矩形がもう片方では別の項目に当たる。S3（間違ったテンプレートの害）の計測に使う。両方向で当てるので 6 組 = 12 件。",
+  "pairs": [
+   [
+    "sample12.png",
+    "sample17.png"
+   ],
+   [
+    "sample16.png",
+    "sample19.png"
+   ],
+   [
+    "sample2.png",
+    "sample13.png"
+   ],
+   [
+    "sample27.jpg",
+    "sample29.png"
+   ],
+   [
+    "sample6.png",
+    "sample.png"
+   ],
+   [
+    "sample4.jpeg",
+    "sample19.png"
+   ]
+  ]
+ },
  "documents": {
   "sample.png": {
    "title": "御見積書",

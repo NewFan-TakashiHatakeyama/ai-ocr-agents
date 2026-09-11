@@ -1,0 +1,88 @@
+{
+ "_positional": {
+  "s3_sample12_from_sample17": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample17_from_sample12": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample16_from_sample19": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample19_from_sample16": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample2_from_sample13": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample13_from_sample2": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample27_from_sample29": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample29_from_sample27": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample6_from_sample": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample_from_sample6": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample4_from_sample19": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ],
+  "s3_sample19_from_sample4": [
+   "issuer_name",
+   "issuer_address",
+   "customer_name",
+   "customer_address",
+   "total_amount"
+  ]
+ }
+}

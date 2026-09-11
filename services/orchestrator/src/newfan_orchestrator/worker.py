@@ -158,6 +158,9 @@ class ExtractionWorker:
                 # finalize を通らない経路なので、ここでも渡さないと除外バッジが
                 # レビュー中だけ出なくなる（マスク発動 run は必ずここを通る）
                 region_stats=state.get("metrics", {}).get("region"),
+                # 除外領域の適用後の span（設計 D12）。テンプレート化画面はレビュー中に
+                # 開かれるので、needs_review 保存の時点で書いておく
+                spans=state.get("spans"),
             )
             if self._webhook is not None:
                 self._webhook(

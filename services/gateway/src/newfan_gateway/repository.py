@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 
 from newfan_gateway.records import (
     CorrectionRecord,
@@ -84,6 +84,14 @@ class Repository(Protocol):
         """document_id → hitl_gate の priority_boost（waiting_hitl の workflow_runs 由来, §16 P5）。"""
         ...
 
+    def get_run_spans(self, tenant_id: str, run_id: str, page_no: int) -> list[dict[str, Any]]:
+        """run × ページの OCR span（orchestrator が run_spans に書いたもの。設計 D12 / §2.4）。
+
+        `[{span_id, text, bbox, conf}]`。行が無ければ空（旧 run・未抽出・他テナント）。
+        テンプレート化画面が「枠に含まれる文字」を出すために引く。
+        """
+        ...
+
 
 class InMemoryRepository:
     def __init__(self) -> None:
@@ -93,6 +101,8 @@ class InMemoryRepository:
         self._jobs: dict[str, JobRecord] = {}
         self._corrections: list[CorrectionRecord] = []
         self._hitl_boosts: dict[tuple[str, str], int] = {}
+        # run_spans 相当: (run_id, page_no) → spans。run と同じ tenant 判定で返す
+        self._run_spans: dict[tuple[str, int], list[dict[str, Any]]] = {}
         # documents.updated_at 相当（DocumentRecord は列を持たない）。削除の
         # 「確定処理中の窓」判定を Pg と同じ観測結果にするために持つ。
         self._doc_touched: dict[str, datetime] = {}
@@ -252,6 +262,9 @@ class InMemoryRepository:
             del self._jobs[j.id]
         for rid in run_ids:
             del self._runs[rid]
+        # run_spans は extraction_runs の FK CASCADE で消える（Pg）のを写す
+        for key in [k for k in self._run_spans if k[0] in run_ids]:
+            del self._run_spans[key]
         self._pages.pop(document_id, None)
         self._doc_touched.pop(document_id, None)
         self._hitl_boosts.pop((tenant_id, document_id), None)
@@ -296,3 +309,14 @@ class InMemoryRepository:
 
     def list_hitl_boosts(self, tenant_id: str) -> dict[str, int]:
         return {d: b for (t, d), b in self._hitl_boosts.items() if t == tenant_id}
+
+    def seed_run_spans(self, run_id: str, page_no: int, spans: list[dict[str, Any]]) -> None:
+        """orchestrator が run_spans に書いた状態を再現する（テスト用）。"""
+        self._run_spans[(run_id, page_no)] = list(spans)
+
+    def get_run_spans(self, tenant_id: str, run_id: str, page_no: int) -> list[dict[str, Any]]:
+        # テナント判定は run の所有で行う（Pg は RLS + tenant_id 列の二重防御）
+        run = self._runs.get(run_id)
+        if run is None or not self._owned(run.tenant_id, tenant_id):
+            return []
+        return list(self._run_spans.get((run_id, page_no), []))

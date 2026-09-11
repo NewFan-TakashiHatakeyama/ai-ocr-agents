@@ -32,6 +32,7 @@
   — gateway-api（HTTP 8000 + `/healthz`、ALB 配下）。secrets: DATABASE_URL/REDIS_URL/JWT_SECRET。
 - [`task-definition.orchestrator-worker.json`](task-definition.orchestrator-worker.json)
   — 抽出ワーカー（キュー消費のため port/HTTP healthCheck なし）。secrets に ANTHROPIC_API_KEY。
+  `REGION_KIE_HINTS` は読取領域ヒントの**キルスイッチ**（未設定・空文字は on、`0` で止める）。
 - [`task-definition.export-worker.json`](task-definition.export-worker.json)
   — export ワーカー（q.export 消費 → canonical JSON/webhook 配信）。torch 非依存で軽量。
 - [`task-definition.migrate.json`](task-definition.migrate.json)

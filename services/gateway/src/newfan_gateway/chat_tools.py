@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from pydantic import ValidationError
+
 from newfan_gateway.admin import AdminRepository
 from newfan_gateway.ids import new_id
 from newfan_gateway.queue import Queue
@@ -20,6 +22,23 @@ from newfan_gateway.repository import Repository
 
 # 書込み系。実行前に必ずユーザー確認を挟む（§3.3「書込み系ツールは実行前にユーザー確認ステップを必須」）
 WRITE_TOOLS = frozenset({"rerun_extract", "update_schema", "manage_rules"})
+
+
+def field_validation_message(exc: ValidationError) -> str:
+    """LLM 由来の項目定義が SchemaFieldDef の検証に落ちたときの利用者向け文言。
+
+    pydantic の message は ``Value error, 項目名「__x」は予約されています…`` のように
+    英語の種別が頭に付く。チャットにそのまま流すと読みづらいので、validator が
+    投げた本文だけを取り出し、複数あれば「；」で繋ぐ。
+    """
+    parts: list[str] = []
+    for e in exc.errors(include_url=False):
+        msg = str(e.get("msg", ""))
+        if msg.startswith("Value error, "):
+            msg = msg[len("Value error, ") :]
+        loc = ".".join(str(p) for p in e.get("loc", ()))
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "項目の定義が不正です: " + ("；".join(parts) if parts else "形式を確認してください")
 
 
 class ChatTools:
@@ -163,8 +182,19 @@ class ChatTools:
         fields = list(cur.fields) if cur else []
         if any(f.name == field.get("name") for f in fields):
             return {"ok": False, "message": "同名の項目が既に存在します。"}
-        fields.append(SchemaFieldDef(**field))
-        rec = self._admin.put_schema(tenant_id, doc_type, fields)
+        # LLM は任意の名前を渡し得る。型違いは SchemaFieldDef の validator が、予約名
+        # （__pages__ / __region__ / 先頭 __。設計 region-field-add-and-hint-v2 D9）は
+        # put_schema が落とす。例外のまま返すとグラフごと落ちて会話が途切れるので、
+        # ok=False で返して LLM が言い直せるようにする。
+        try:
+            fields.append(SchemaFieldDef(**field))
+        except ValidationError as exc:
+            return {"ok": False, "message": field_validation_message(exc)}
+        try:
+            rec = self._admin.put_schema(tenant_id, doc_type, fields)
+        except ValueError as exc:
+            # 予約名（D9）は put_schema（書き込み側の共通入口）が ValueError で拒む
+            return {"ok": False, "message": str(exc)}
         return {"ok": True, "doc_type": rec.doc_type, "version": rec.version}
 
     def manage_rules(self, tenant_id: str, rule_id: str, status: str) -> dict[str, Any]:

@@ -59,6 +59,44 @@ def test_chat_confirm_requires_admin(ctx: SimpleNamespace) -> None:
     assert ctx.client.post("/v1/chat/confirm", headers=auth("reviewer"), json=body).status_code == 403
 
 
+def test_chat_tools_update_schema_rejects_reserved_name_without_raising(
+    ctx: SimpleNamespace,
+) -> None:
+    """予約名（__pages__ / __region__ / 先頭 __）は ok=False で返し、例外にしない。
+
+    設計 region-field-add-and-hint-v2 D9。UI の命名規則は英字始まりなので通らないが、
+    チャット経路は LLM の dict をそのまま SchemaFieldDef に組む。ValidationError を
+    素通しするとグラフごと落ちて会話が途切れるので、ツールの戻り値で断る。
+    """
+    from newfan_gateway.chat_tools import ChatTools
+
+    tools = ChatTools(repo=ctx.repo, admin=ctx.admin, queue=ctx.queue)
+    before = ctx.admin.get_schema("ten_1", "invoice").version
+    for name in ("__pages__", "__region__", "__memo"):
+        res = tools.update_schema("ten_1", "invoice", {"name": name, "label": "備考"})
+        assert res["ok"] is False, name
+        assert "予約" in res["message"]
+    # 型違い（LLM が bool 以外を渡す）も同じ経路で断る
+    res = tools.update_schema("ten_1", "invoice", {"name": "memo", "required": "maybe"})
+    assert res["ok"] is False and "required" in res["message"]
+    # 断った呼び出しは新版を作らない
+    assert ctx.admin.get_schema("ten_1", "invoice").version == before
+
+
+def test_chat_confirm_update_schema_reserved_name_returns_ok_false(ctx: SimpleNamespace) -> None:
+    """/chat/confirm も SchemaFieldDef を直接組む。500（E2000）ではなく ok=False。"""
+    body = {
+        "action": "update_schema",
+        "params": {"doc_type": "invoice", "field": {"name": "__region__", "label": "領域"}},
+    }
+    r = ctx.client.post("/v1/chat/confirm", headers=auth("admin"), json=body)
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+    assert "予約" in r.json()["message"]
+    s = ctx.client.get("/v1/schemas/invoice", headers=auth("admin")).json()
+    assert s["version"] == 4 and not any(f["name"] == "__region__" for f in s["fields"])
+
+
 def test_chat_requires_auth(ctx: SimpleNamespace) -> None:
     assert ctx.client.post("/v1/chat", json={"message": "hi"}).status_code == 403
 

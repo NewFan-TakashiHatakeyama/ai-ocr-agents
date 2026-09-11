@@ -31,12 +31,12 @@ import json
 import math
 import sys
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+from newfan_schemas import norm_key
 
 from newfan_golden.dataset import GoldenDoc, load_jsonl
 
@@ -141,6 +141,85 @@ def mcnemar(
     }
 
 
+def per_doc_net(
+    control_runs: list[dict[str, Any]], treat_runs: list[dict[str, Any]]
+) -> dict[str, dict[str, int]]:
+    """帳票ごとの「介入 − 対照」の正解数の純増減（設計 v2 §3 G2 の材料）。
+
+    同じ帳票・同じ試行番号で両アームが成功した対だけを足す。片方が失敗した試行を
+    数えると、成功側の勝ちに化ける（mcnemar と同じ理由）。"""
+    control_by = {(r["document_id"], r["trial"]): r for r in control_runs}
+    out: dict[str, dict[str, int]] = {}
+    for t in treat_runs:
+        c = control_by.get((t["document_id"], t["trial"]))
+        if c is None:
+            continue
+        e = out.setdefault(t["document_id"], {"pairs": 0, "control_hits": 0, "treat_hits": 0, "net": 0})
+        e["pairs"] += 1
+        e["control_hits"] += int(c["hits"])
+        e["treat_hits"] += int(t["hits"])
+        e["net"] = e["treat_hits"] - e["control_hits"]
+    return out
+
+
+def hint_summary(
+    control_runs: list[dict[str, Any]], treat_runs: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """ヒントの内訳（設計 v2 §3 G3・G4 の材料）。
+
+    介入アームの各行が ``hints``（run の ``metrics.region.hints`` の写し）と
+    ``field_hits`` を持つ前提。項目ごとに given / outcomes / dropped を試行数で集計し、
+    **落とした（dropped）か捨てた（rejected）項目**については、同じ試行の対照と
+    正解を対にして「落としたことで悪くなっていないか」を出す（非対称性の実測）。
+
+    ``no_evidence`` は「LLM が値を返さなかった」で、位置の当否を言えないので
+    affected に含めない。"""
+    control_by = {(r["document_id"], r["trial"]): r for r in control_runs}
+    per_field: dict[str, dict[str, Any]] = {}
+
+    def _entry(doc: str, name: str) -> dict[str, Any]:
+        return per_field.setdefault(
+            f"{doc}::{name}",
+            {"given": 0, "followed": 0, "partial": 0, "rejected": 0, "no_evidence": 0,
+             "dropped": {}},
+        )
+
+    affected = {"pairs": 0, "control_hits": 0, "treat_hits": 0, "delta": 0}
+    affected_rows: list[dict[str, Any]] = []
+    for t in treat_runs:
+        doc = str(t["document_id"])
+        h = t.get("hints") or {}
+        outcomes = dict(h.get("outcomes") or {})
+        dropped = dict(h.get("dropped") or {})
+        for name in h.get("given") or []:
+            _entry(doc, str(name))["given"] += 1
+        for name, o in outcomes.items():
+            e = _entry(doc, str(name))
+            e[str(o)] = int(e.get(str(o), 0)) + 1
+        for name, reason in dropped.items():
+            d = _entry(doc, str(name))["dropped"]
+            d[str(reason)] = int(d.get(str(reason), 0)) + 1
+        c = control_by.get((t["document_id"], t["trial"]))
+        if c is None:
+            continue
+        fh = t.get("field_hits") or {}
+        cfh = c.get("field_hits") or {}
+        names = set(dropped) | {n for n, o in outcomes.items() if o == "rejected"}
+        for name in sorted(names):
+            if name not in fh or name not in cfh:
+                continue  # 正解値の無い項目は数えない
+            affected["pairs"] += 1
+            affected["control_hits"] += int(cfh[name])
+            affected["treat_hits"] += int(fh[name])
+            affected_rows.append({
+                "document_id": doc, "trial": t["trial"], "field": name,
+                "why": dropped.get(name, outcomes.get(name)),
+                "control": bool(cfh[name]), "treat": bool(fh[name]),
+            })
+    affected["delta"] = affected["treat_hits"] - affected["control_hits"]
+    return {"per_field": per_field, "affected": affected, "affected_rows": affected_rows}
+
+
 def _norm(v: Optional[str]) -> str:
     """比較用の正規化。**表記の揺れは同一視する。**
 
@@ -154,18 +233,12 @@ def _norm(v: Optional[str]) -> str:
     これを別物として数えると、**両アームとも同じだけ外れて差が見えなくなる**
     （実際に 1/7 まで落ちた）。正規化は対照・介入に同じく効くので、比較の
     公平さは崩れない。逆に、値そのものの取り違えや欠落は正規化しても残る。
+
+    規則の実体は ``newfan_schemas.textnorm.norm_key``（設計 D18）。ランタイムの
+    例示値照合（``example_present``）と同じ関数で比べることで、「計測では一致
+    したのに実行時は一致しない」というずれを作らない。
     """
-    if v is None:
-        return ""
-    t = unicodedata.normalize("NFKC", str(v))
-    t = "".join(t.split())
-    for ch in (",", "￥", "¥", "円", "-", "−", "－", "ー", "‐", "･", "・"):
-        t = t.replace(ch, "")
-    # 宛名の敬称。紙面には付くが「誰宛か」の判定には関係しない
-    for suffix in ("様", "御中", "殿", "行", "宛"):
-        if t.endswith(suffix):
-            t = t[: -len(suffix)]
-    return t.casefold()
+    return norm_key(v)
 
 
 def _wait_job(client: httpx.Client, job_id: str, timeout_sec: float) -> str:
@@ -212,6 +285,16 @@ def _put_schema(client: httpx.Client, body: dict[str, Any]) -> dict[str, Any]:
     return dict(r.json())
 
 
+def _done_rows(resume: Optional[dict[str, Any]]) -> dict[tuple[str, int, str], dict[str, Any]]:
+    """前回の出力から (document_id, trial, arm) → 行 を引く（--resume 用）。"""
+    out: dict[tuple[str, int, str], dict[str, Any]] = {}
+    for arm in ("control", "treat"):
+        for r in (resume or {}).get(f"{arm}_runs", []) or []:
+            if isinstance(r.get("field_hits"), dict):
+                out[(str(r["document_id"]), int(r["trial"]), arm)] = dict(r)
+    return out
+
+
 def run(
     docs: list[GoldenDoc],
     regions: dict[str, Any],
@@ -219,13 +302,20 @@ def run(
     token: str,
     trials: int,
     timeout_sec: float,
+    resume: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """対照（領域なし）と介入（領域あり）を交互に trials 回ずつ回す。
 
     regions は {doc_type: {field_name: {"page":..,"rect":[..]}}} と
     {"_positional": {doc_type: [field_name, ...]}} を持つ。
+
+    ``resume`` に前回の出力を渡すと、そこに結果がある (帳票, 試行, アーム) は抽出せず
+    前回の行（field_hits / hints）から集計し直し、**無いものだけ**回す。LLM 側の一時的な
+    失敗で対が欠けたとき、全部を回し直さずに対を埋めるため（第 3 回計測で、対照アームの
+    3 試行が LLM 出力の欠陥で failed になった）。
     """
     positional_map = regions.get("_positional", {})
+    done = _done_rows(resume)
     # 位置でしか区別できない項目名の集合（doc_type をまたいで合算する）
     positional_names = {n for names in positional_map.values() for n in names}
     tally = Tally()
@@ -281,6 +371,16 @@ def run(
             for i in range(trials):
                 # 交互に回す（時間帯によるモデル側の揺れを両条件へ均等に散らす）
                 for arm, schema in (("control", control), ("treat", treat)):
+                    prev = done.get((doc.document_id, i, arm))
+                    if prev is not None:
+                        for name, hit in prev["field_hits"].items():
+                            tally.note(doc.document_id, name, name in positional, arm, bool(hit), i)
+                        (tally.control_runs if arm == "control" else tally.treat_runs).append(
+                            prev
+                        )
+                        print(f"  trial {i} {arm}: {prev['hits']}/{prev['total']}（前回の結果）",
+                              flush=True)
+                        continue
                     # **1 抽出ごとに帳票を上げ直す。** 同じ帳票を使い回すと、
                     # 抽出が自動確定した時点で次の抽出が 409 で弾かれる
                     # （確定値を無警告で置き換えないためのサーバ側の正しい振る舞い。
@@ -299,16 +399,25 @@ def run(
                             for f in res.get("fields", [])
                         }
                         hits = 0
+                        field_hits: dict[str, bool] = {}
                         for name, want in gold.items():
-                            hit = bool(want) and got.get(name, "") == want
+                            if not want:
+                                continue  # 正解値の無い項目は採点しない（分母にも入れない）
+                            hit = got.get(name, "") == want
                             hits += int(hit)
+                            field_hits[name] = hit
                             tally.note(doc.document_id, name, name in positional, arm, hit, i)
+                        # 帳票は試行ごとに消すので、run の metrics はここで写しておかないと
+                        # 失われる（G3・G4 は「落とした／捨てた項目」の内訳が要る）
+                        region_stats = res.get("region_stats") or {}
                         row = {
                             "document_id": doc.document_id,
                             "trial": i,
                             "hits": hits,
                             "total": sum(1 for v in gold.values() if v),
                             "run_id": res.get("run_id"),
+                            "field_hits": field_hits,
+                            "hints": region_stats.get("hints") if arm == "treat" else None,
                         }
                         (tally.control_runs if arm == "control" else tally.treat_runs).append(
                             row
@@ -338,6 +447,9 @@ def run(
         # **差がノイズの範囲かどうか**を数字で出す（率の引き算だけでは判断できない）
         "mcnemar_all": mcnemar(tally.paired),
         "mcnemar_positional": mcnemar(tally.paired, only=positional_names),
+        # 帳票ごとの純増減（G2）と、ヒントの内訳（G3・G4）
+        "per_doc_net": per_doc_net(tally.control_runs, tally.treat_runs),
+        "hint_summary": hint_summary(tally.control_runs, tally.treat_runs),
     }
 
 
@@ -350,11 +462,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--trials", type=int, default=5)
     ap.add_argument("--timeout-sec", type=float, default=600.0)
+    ap.add_argument(
+        "--resume", type=Path, default=None,
+        help="前回の出力 JSON。結果がある (帳票, 試行, アーム) は回さず、欠けた対だけ回す",
+    )
     args = ap.parse_args(argv)
 
     docs = load_jsonl(args.gold)
     regions = json.loads(args.regions.read_text(encoding="utf-8"))
-    report = run(docs, regions, args.api, args.token, args.trials, args.timeout_sec)
+    resume = (
+        json.loads(args.resume.read_text(encoding="utf-8"))
+        if args.resume is not None and args.resume.exists()
+        else None
+    )
+    report = run(docs, regions, args.api, args.token, args.trials, args.timeout_sec, resume=resume)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({k: report[k] for k in

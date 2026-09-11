@@ -1,3 +1,4 @@
+import pytest
 from newfan_schemas import ExtractedField, FieldSchema
 
 from newfan_orchestrator.gate import Thresholds, confidence_gate, threshold_for
@@ -193,6 +194,59 @@ def test_mask_stats_emit_aggregated_review_item() -> None:
     reasons = [i.reason for i in out["review_items"]]
     assert any("3セル/1行を未取込" in r for r in reasons)
     assert nodes.route_confidence_gate(out) == "hitl_review"
+
+
+def test_aggregate_field_names_are_reserved_schema_names() -> None:
+    """gate が積む擬似 field 名は newfan_schemas の予約名そのもの（D9）。
+
+    nodes.py で再定義すると「gate は新しい名前で積むのに put_schema は拒まない」
+    片肺になる。積む側と拒む側が同じ定数を見ていることを固定する。
+    """
+    import ast
+    import inspect
+
+    import newfan_schemas
+    from newfan_schemas import check_field_name
+
+    from newfan_orchestrator import nodes
+
+    # `is` 比較では固定できない: CPython は識別子形の文字列リテラルを intern するので、
+    # nodes.py が同じリテラルでローカル再定義しても True になる。トップレベルの代入が
+    # 無いこと（＝import 経由でしか持たないこと）を AST で見る。
+    tree = ast.parse(inspect.getsource(nodes))
+    assigned = {
+        t.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for t in node.targets
+        if isinstance(t, ast.Name)
+    }
+    assert not ({"REGION_AGGREGATE_FIELD", "LOST_PAGE_FIELD"} & assigned), assigned
+    assert nodes.REGION_AGGREGATE_FIELD == newfan_schemas.REGION_AGGREGATE_FIELD
+    assert nodes.LOST_PAGE_FIELD == newfan_schemas.LOST_PAGE_FIELD
+
+    # 除外領域の集約（__region__）と、読めなかったページ（__pages__）の両経路で、
+    # gate が積む field 名が put_schema の拒否対象と一致する。
+    region_out = _gate(
+        {
+            "schema": {"doc_type": "invoice", "fields": []},
+            "fields": [_good_field()],
+            "metrics": {"region": {"excluded_cells": 3, "excluded_rows": 1}},
+        }
+    )
+    pages_out = _gate(
+        {
+            "schema": {"doc_type": "invoice", "fields": []},
+            "fields": [],
+            "spans": [],
+            "errors": [{"page": 2, "stage": "structure_ocr", "error": "boom"}],
+        }
+    )
+    names = {i.field_name for i in region_out["review_items"] + pages_out["review_items"]}
+    assert names == newfan_schemas.REVIEW_AGGREGATE_FIELD_NAMES, names
+    for name in names:
+        with pytest.raises(ValueError):
+            check_field_name(name)
 
 
 def test_no_review_item_for_ordinary_span_exclusion() -> None:
@@ -438,3 +492,36 @@ def test_解消した_mismatch_が前回実行から残らない(monkeypatch) ->
     assert "mismatch_fields" not in region, region
     assert "layout_mismatch" not in region, region
     assert region["excluded_spans"] == 1  # 除外件数は消さない
+
+
+def test_hints_outcomes_があっても_review_items_は空で_finalize_のまま(monkeypatch) -> None:
+    """読取領域ヒントの観測（設計 v2 §2.5 / D17）は metrics に残すだけ。
+
+    「従った／捨てた」「落とした理由」を検証画面に参考表示するようになっても、
+    レビュー件数・確信度・run status には一切触らない。kie_extract ノードが書いた
+    ``metrics.region.hints`` は gate を素通りし、消されもしない。
+    """
+    monkeypatch.delenv("REGION_GUARD_ENFORCE", raising=False)
+    from newfan_orchestrator import nodes
+
+    hints = {
+        "given": ["title"],
+        "dropped": {"customer_name": "kind_conflict"},
+        "truncated": {"title": 2},
+        "outcomes": {"title": "rejected"},
+    }
+    before = _good_field()
+    out = _gate(
+        {
+            "schema": _REGION_SCHEMA,
+            "fields": [_good_field()],
+            "pages": _PAGES,
+            "source_page_count": 1,
+            "metrics": {"region": {"hints": hints}},
+        }
+    )
+    assert out["review_items"] == []
+    assert out["fields"][0].confidence == before.confidence
+    assert out["fields"][0].review_status.value != "pending"
+    assert nodes.route_confidence_gate(out) == "finalize"
+    assert out["metrics"]["region"]["hints"] == hints  # gate は hints を触らない

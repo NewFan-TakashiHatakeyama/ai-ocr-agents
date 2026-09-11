@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 from newfan_metrics import current_tenant, llm_cost_jpy_total, llm_tokens_total
@@ -47,7 +48,19 @@ def _extract_json(text: str) -> Any:
     )
     if start == -1:
         raise ValueError("JSON が見つかりません")
-    # 末尾の対応する括弧までを探索
+    # 括弧の位置ごとに「そこから始まる JSON 値を 1 つだけ」読む。モデルは正しい JSON の
+    # **後ろ**に説明文や 2 つ目のオブジェクトを付けることがあり（実測: "Extra data:
+    # line 1 column 885" で run が failed）、「最初の括弧から最後の括弧まで」を切ると
+    # 後続の括弧を巻き込んで壊れる。前置きに { が混じる場合も次の括弧から読み直せる。
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r"[\[{]", text):
+        try:
+            value, _ = decoder.raw_decode(text, m.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, (dict, list)):
+            return value
+    # どこからも読めないときは従来どおり末尾の括弧まで（エラー内容を揃えるため）
     end_obj = text.rfind("}")
     end_arr = text.rfind("]")
     end = max(end_obj, end_arr)

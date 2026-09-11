@@ -12,6 +12,7 @@ DATABASE_URL_TEST が設定されている時だけ動く（CI/ローカルは c
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -182,6 +183,80 @@ def test_get_schema_by_id_matches_real_ddl() -> None:
         with admin._engine.begin() as c:  # noqa: SLF001
             c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
             c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": rec.id})
+
+
+def test_pg_region_hint_fields_roundtrip_jsonb() -> None:
+    """example_value / origin / created_at が fields JSONB を経由して戻ること。
+
+    設計 region-field-add-and-hint-v2 §2.3。InMemory はモデルをそのまま持つので
+    JSONB の直列化（``schema_fields_payload``）→ ``SchemaFieldDef.model_validate``
+    の経路は実 Pg でしか通らない。3 項目のキーが無い旧 JSONB も読めることを併せて見る。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_gateway.records import SchemaFieldDef
+    from newfan_schemas import RegionRect
+
+    admin = PgAdminRepository(_DSN)  # type: ignore[arg-type]
+    tenant = "ten_test"
+    doc_type = f"hint_probe_{uuid.uuid4().hex[:8]}"
+    with admin._engine.begin() as c:  # noqa: SLF001 - テスト用の前提データ投入
+        c.execute(
+            text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+            {"i": tenant, "n": "test"},
+        )
+    hinted = RegionRect(
+        page=1,
+        rect=[0.30, 0.02, 0.72, 0.09],
+        example_value="株式会社千曲川ホーム",
+        origin="ghost",
+        created_at="2026-09-11T00:00:00Z",
+    )
+    made: list[str] = []
+    try:
+        rec = admin.put_schema(
+            tenant,
+            doc_type,
+            [
+                SchemaFieldDef(name="issuer", type="string", region=hinted),
+                SchemaFieldDef(
+                    name="total", type="money_jpy",
+                    region=RegionRect(page="last", rect=[0.65, 0.80, 0.95, 0.88]),
+                ),
+            ],
+        )
+        made.append(rec.id)
+        for got in (admin.get_schema(tenant, doc_type), admin.get_schema_by_id(tenant, rec.id)):
+            assert got is not None
+            by_name = {f.name: f for f in got.fields}
+            assert by_name["issuer"].region == hinted
+            plain = by_name["total"].region
+            assert plain is not None and plain.page == "last"
+            assert (plain.example_value, plain.origin, plain.created_at) == (None, None, None)
+
+        # 旧世代の JSONB（region に 3 項目のキー自体が無い）も読める
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(
+                text("UPDATE field_schemas SET fields = CAST(:f AS jsonb) WHERE id=:i"),
+                {
+                    "f": '[{"name": "issuer", "label": null, "type": "string", "required": false,'
+                    ' "critical": false, "columns": null,'
+                    ' "region": {"page": 1, "rect": [0.3, 0.02, 0.72, 0.09], "label": null}}]',
+                    "i": rec.id,
+                },
+            )
+        legacy = admin.get_schema_by_id(tenant, rec.id)
+        assert legacy is not None
+        region = legacy.fields[0].region
+        assert region is not None and region.rect == [0.3, 0.02, 0.72, 0.09]
+        assert (region.example_value, region.origin, region.created_at) == (None, None, None)
+    finally:
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            for sid in made:
+                c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": sid})
 
 
 def test_pg_put_schema_legacy_put_inherits_exclude_regions() -> None:
@@ -399,3 +474,97 @@ def test_pg_set_document_doc_type_は他テナントの行を書き換えない(
             text("SELECT doc_type FROM documents WHERE id = :d"), {"d": doc_id}
         ).scalar()
     assert got == "invoice"  # seeded のまま（他テナント指定では書き換わらない）
+
+
+def test_pg_get_run_spans_は自テナントの行だけ返す(repo, seeded) -> None:
+    """run_spans（0008）を実 DDL で読めること、他テナントからは空になること（設計 D12）。
+
+    ローカル compose の接続ロールは所有者（RLS を素通り）なので、テナント境界は
+    WHERE の tenant_id が唯一の防御。行が無いページは空配列（エラーにしない）。
+    """
+    from sqlalchemy import text
+
+    tenant, _doc_id, run_id = seeded
+    spans = [
+        {"span_id": 1, "text": "株式会社千曲川ホーム", "bbox": [10, 20, 110, 40], "conf": 0.95},
+        {"span_id": 2, "text": "御請求書", "bbox": None, "conf": 0.8},
+    ]
+    with repo._engine.begin() as c:  # noqa: SLF001 - orchestrator が書いた状態を再現
+        c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+        c.execute(
+            text(
+                "INSERT INTO run_spans (run_id, tenant_id, page_no, spans)"
+                " VALUES (:r, :t, 1, CAST(:s AS jsonb))"
+            ),
+            {"r": run_id, "t": tenant, "s": json.dumps(spans, ensure_ascii=False)},
+        )
+    try:
+        assert repo.get_run_spans(tenant, run_id, 1) == spans
+        assert repo.get_run_spans(tenant, run_id, 2) == []  # 行の無いページ
+        assert repo.get_run_spans("ten_other", run_id, 1) == []  # テナント境界
+    finally:
+        with repo._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("DELETE FROM run_spans WHERE run_id = :r"), {"r": run_id})
+
+
+def test_pg_legacy_reserved_field_name_does_not_break_reads() -> None:
+    """検査導入前に保存された予約名（``__`` 始まり）の行があっても、読み出しは落ちない。
+
+    敵対的レビューで実 Pg に再現された事故: 予約名の validator を読み出しモデルにも
+    置いていたため、旧データ 1 行で ``list_schemas`` が **同テナントの健全な doc_type
+    まで巻き込んで** ValidationError になった（GET /v1/schemas がテナント丸ごと 500、
+    スキーマ管理画面もテンプレート化画面も開けず、DELETE /schemas は無いので SQL 以外に
+    復旧手段が無い）。拒否は書き込み側（put_schema）に限り、読み出しは旧データを通す。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_gateway.records import SchemaFieldDef
+
+    admin = PgAdminRepository(_DSN)  # type: ignore[arg-type]
+    tenant = "ten_test"
+    legacy_type = f"legacy_reserved_{uuid.uuid4().hex[:8]}"
+    healthy_type = f"healthy_{uuid.uuid4().hex[:8]}"
+    legacy_id = f"sch_{uuid.uuid4().hex[:12]}"
+    made: list[str] = []
+    with admin._engine.begin() as c:  # noqa: SLF001 - テスト用の前提データ投入
+        c.execute(
+            text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+            {"i": tenant, "n": "test"},
+        )
+    try:
+        healthy = admin.put_schema(tenant, healthy_type, [SchemaFieldDef(name="total")])
+        made.append(healthy.id)
+        # 検査導入前の旧データを直接 INSERT で再現する（put_schema は今は拒む）
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(
+                text(
+                    "INSERT INTO field_schemas (id, tenant_id, doc_type, version, fields)"
+                    " VALUES (:i, :t, :d, 1, CAST(:f AS jsonb))"
+                ),
+                {
+                    "i": legacy_id, "t": tenant, "d": legacy_type,
+                    "f": '[{"name": "__memo", "label": "メモ", "type": "string",'
+                    ' "required": false, "critical": false, "columns": null, "region": null}]',
+                },
+            )
+        made.append(legacy_id)
+
+        # 旧データ自身も、同テナントの一覧も読める
+        got = admin.get_schema(tenant, legacy_type)
+        assert got is not None and [f.name for f in got.fields] == ["__memo"]
+        assert admin.get_schema_by_id(tenant, legacy_id) is not None
+        listed = {s.doc_type for s in admin.list_schemas(tenant)}
+        assert {legacy_type, healthy_type} <= listed
+
+        # 一方、新しく書こうとすると拒む（書き込み側の共通入口）
+        import pytest
+
+        with pytest.raises(ValueError, match="予約"):
+            admin.put_schema(tenant, healthy_type, [SchemaFieldDef(name="__memo")])
+    finally:
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            for sid in made:
+                c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": sid})

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import unicodedata
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -12,6 +14,64 @@ from newfan_schemas.enums import FieldType
 # 正規化矩形の最小面積。クリック誤検出（1px ドラッグ）で潰れた矩形が保存され、
 # 以降のフィルタで予期しない挙動になるのを防ぐ。ページ全体の 0.01%。
 MIN_REGION_AREA = 0.0001
+
+# 例示値（RegionRect.example_value）の上限文字数。LLM プロンプトに入る文字列なので
+# 無制限にしない。kie.py が自動発見時の label に課す 120 字と同じ考え方。
+EXAMPLE_VALUE_MAX_LEN = 200
+
+
+# ---- 予約された項目名（設計 region-field-add-and-hint-v2 §1.1 D9） ----
+#
+# confidence_gate は「特定の項目に紐付かない所見」（読み取れなかったページ・除外領域
+# の集約所見）を、擬似的な field_name を持つ ReviewItem として積む。スキーマの項目が
+# 同じ名前を持つと、検証画面でその項目の所見と集約所見が区別できなくなる。
+# 先頭 ``__`` は将来の集約名のために丸ごと予約する。
+# 定義をここ（newfan_schemas）に置くのは、orchestrator（積む側）と gateway
+# （項目名を検査する側）の両方が同じ定数を見るため。二重定義にしない。
+LOST_PAGE_FIELD = "__pages__"
+REGION_AGGREGATE_FIELD = "__region__"
+REVIEW_AGGREGATE_FIELD_NAMES: frozenset[str] = frozenset(
+    {LOST_PAGE_FIELD, REGION_AGGREGATE_FIELD}
+)
+RESERVED_FIELD_NAME_PREFIX = "__"
+
+
+def check_field_name(name: str) -> None:
+    """スキーマ項目名として使えない予約名なら ValueError（D9）。
+
+    UI の命名規則（英字始まり）は通さないが、チャット経路は任意の名前を受けるので、
+    経路によらずサーバ側で拒む。呼ぶのは**書き込み側だけ**: gateway の put_schema
+    （InMemory / Pg 共通の入口）と ``PUT /schemas`` の明示検査（API のエラー封筒で
+    返すため）。読み出しモデル（FieldDef / SchemaFieldDef）には置かない ── 検査導入前に
+    保存された旧データを読めなくすると、同テナントの健全なスキーマまで巻き込んで
+    一覧 API ごと落ちる。
+    """
+    if name in REVIEW_AGGREGATE_FIELD_NAMES or name.startswith(RESERVED_FIELD_NAME_PREFIX):
+        raise ValueError(
+            f"項目名「{name}」は予約されています"
+            f"（先頭が {RESERVED_FIELD_NAME_PREFIX} の名前はレビュー所見の集約名に使うため指定できません）"
+        )
+
+
+def sanitize_example_value(v: Optional[str]) -> Optional[str]:
+    """例示値の消毒（設計 region-field-add-and-hint-v2 §2.3）。
+
+    制御文字（U+0000 は Pg の TEXT に入らず保存ごと落ちる）・改行を落とし、前後の空白を
+    除いて上限で切る。残らなければ「例示値なし」と同じ None。
+
+    全角スペース U+3000 は isprintable() が False を返す（Zs）が、日本語の社名・氏名の
+    区切りとして紙面に普通に現れる。設計 §2.3「正規化しない（紙面の見た目に近いほど
+    照合しやすい）」に従い**残す**。kie.py の label の規則（isprintable のみ）とは
+    ここで分かれる。制御文字（Cc）・書式文字（Cf）は引き続き落とす。
+
+    保存時（RegionRect の validator）と、プロンプトへ載せる直前（orchestrator の
+    読取領域ヒント）の両方がこれを呼ぶ。JSONB は検査導入前のデータや手修正で規則を
+    素通りし得るので、LLM に渡す側でも同じ規則を当てる（規則は 1 箇所に置く）。
+    """
+    if v is None:
+        return None
+    cleaned = "".join(ch for ch in v if ch.isprintable() or unicodedata.category(ch) == "Zs")
+    return cleaned.strip()[:EXAMPLE_VALUE_MAX_LEN] or None
 
 
 class RegionRect(BaseModel):
@@ -27,11 +87,52 @@ class RegionRect(BaseModel):
       - "last": ページ数可変帳票の最終ページ（承認印・合計欄）
       - None: 全ページ。**exclude でのみ許可**（include に許すと「どこを読むか」
         の指定にならない）。文脈依存の制約なので gateway の put_schema で検査する。
+
+    example_value / origin / created_at（設計 region-field-add-and-hint-v2 §2.3）:
+      **読取領域のみ。除外領域では未使用**（付いていても無害で、検証は通る）。
+      - example_value: テンプレート元の帳票でこの領域にあった span の原文。KIE に
+        「前回ここには何があったか」を伝える。正規化しない。**帳票の値（取引先名・
+        担当者の個人名を含み得る）であり、スキーマの版が残る限り残る**
+        （``put_schema`` は常に新版 INSERT で旧版を残す。``DELETE /documents`` は
+        帳票を消してもこれは消さない）。LLM プロンプトに入るので、印字可能文字のみ・
+        前後空白除去・200 字で打ち切る（kie.py が label に課すのと同じ規則）。
+      - origin: 領域の出どころ。``ghost`` = AI が見つけた位置をクリックで採った /
+        ``manual`` = 手描き。例示値の信頼度と計測の切り口が変わる。
+      - created_at: ISO 8601。ヒント有効化前に引かれた領域を識別する。
+      fields JSONB の中なのでマイグレーション不要。既存の領域は 3 つとも None。
     """
 
     page: Optional[Union[int, Literal["last"]]] = None
     rect: list[float]  # [x1, y1, x2, y2] 正規化 0..1
     label: Optional[str] = None  # exclude の表示名（「社印」等）。include では未使用
+    # --- 以下、読取領域のみ（除外領域では未使用） ---
+    example_value: Optional[str] = None
+    origin: Optional[Literal["ghost", "manual"]] = None
+    created_at: Optional[str] = None
+
+    @field_validator("example_value")
+    @classmethod
+    def _sanitize_example_value(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_example_value(v)
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_iso8601(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        # JS の Date.toISOString() は末尾 Z。Python 3.12 の fromisoformat は Z を
+        # 受けるが、規約として +00:00 に読み替えてから解釈する（版差で揺れない）。
+        probe = v[:-1] + "+00:00" if v.endswith("Z") else v
+        try:
+            dt = datetime.fromisoformat(probe)
+        except ValueError as exc:
+            raise ValueError(f"created_at は ISO 8601 形式で指定してください: {v!r}") from exc
+        # **tz 付き UTC の 1 形式に正規化して保存する。** 受けたまま保持すると Z / +09:00 /
+        # naive / 日付のみ が混在し、後で「有効化前に引かれた領域か」を `<` で比べたときに
+        # naive と aware の比較で TypeError になる。naive は UTC とみなす。
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     @field_validator("page")
     @classmethod
@@ -124,6 +225,10 @@ class FieldDef(BaseModel):
     # 読み取ってほしい領域（設計 §4.2）。**hint であって hard crop ではない**ため、
     # region の外で見つかった値を捨てる根拠にはしない。
     region: Optional[RegionRect] = None
+    # 予約名（D9）の検査は**ここには置かない**。FieldDef は保存済みスキーマを読む側でも
+    # 使われる（orchestrator の load_context → FieldSchema.model_validate）。検査導入前に
+    # チャット経路で保存された `__` 始まりの行が 1 つあるだけで、その run が落ちる。
+    # 拒否は書き込み側（gateway の put_schema）に限る。
 
 
 class FieldSchema(BaseModel):

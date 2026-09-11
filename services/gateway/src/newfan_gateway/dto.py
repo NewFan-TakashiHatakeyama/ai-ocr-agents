@@ -119,6 +119,22 @@ class ResultResponse(BaseModel):
     schema_doc_type: Optional[str] = None
 
 
+class RunSpanDto(BaseModel):
+    """run_spans の 1 span（設計 §2.4）。conf は返さない（UI の用途は原文と位置だけ）。"""
+
+    span_id: int
+    text: str
+    bbox: Optional[list[int]] = None  # [x1, y1, x2, y2]（前処理後画像の画素）。無ければ null
+
+
+class RunSpans(BaseModel):
+    """GET /documents/{id}/spans の応答。行が無ければ spans は空配列（エラーにしない）。"""
+
+    run_id: str
+    page_no: int
+    spans: list[RunSpanDto] = Field(default_factory=list)
+
+
 class CorrectionItem(BaseModel):
     field_name: str
     original_value: Optional[str] = None
