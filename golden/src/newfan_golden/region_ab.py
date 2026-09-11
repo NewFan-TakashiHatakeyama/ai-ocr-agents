@@ -141,6 +141,85 @@ def mcnemar(
     }
 
 
+def per_doc_net(
+    control_runs: list[dict[str, Any]], treat_runs: list[dict[str, Any]]
+) -> dict[str, dict[str, int]]:
+    """帳票ごとの「介入 − 対照」の正解数の純増減（設計 v2 §3 G2 の材料）。
+
+    同じ帳票・同じ試行番号で両アームが成功した対だけを足す。片方が失敗した試行を
+    数えると、成功側の勝ちに化ける（mcnemar と同じ理由）。"""
+    control_by = {(r["document_id"], r["trial"]): r for r in control_runs}
+    out: dict[str, dict[str, int]] = {}
+    for t in treat_runs:
+        c = control_by.get((t["document_id"], t["trial"]))
+        if c is None:
+            continue
+        e = out.setdefault(t["document_id"], {"pairs": 0, "control_hits": 0, "treat_hits": 0, "net": 0})
+        e["pairs"] += 1
+        e["control_hits"] += int(c["hits"])
+        e["treat_hits"] += int(t["hits"])
+        e["net"] = e["treat_hits"] - e["control_hits"]
+    return out
+
+
+def hint_summary(
+    control_runs: list[dict[str, Any]], treat_runs: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """ヒントの内訳（設計 v2 §3 G3・G4 の材料）。
+
+    介入アームの各行が ``hints``（run の ``metrics.region.hints`` の写し）と
+    ``field_hits`` を持つ前提。項目ごとに given / outcomes / dropped を試行数で集計し、
+    **落とした（dropped）か捨てた（rejected）項目**については、同じ試行の対照と
+    正解を対にして「落としたことで悪くなっていないか」を出す（非対称性の実測）。
+
+    ``no_evidence`` は「LLM が値を返さなかった」で、位置の当否を言えないので
+    affected に含めない。"""
+    control_by = {(r["document_id"], r["trial"]): r for r in control_runs}
+    per_field: dict[str, dict[str, Any]] = {}
+
+    def _entry(doc: str, name: str) -> dict[str, Any]:
+        return per_field.setdefault(
+            f"{doc}::{name}",
+            {"given": 0, "followed": 0, "partial": 0, "rejected": 0, "no_evidence": 0,
+             "dropped": {}},
+        )
+
+    affected = {"pairs": 0, "control_hits": 0, "treat_hits": 0, "delta": 0}
+    affected_rows: list[dict[str, Any]] = []
+    for t in treat_runs:
+        doc = str(t["document_id"])
+        h = t.get("hints") or {}
+        outcomes = dict(h.get("outcomes") or {})
+        dropped = dict(h.get("dropped") or {})
+        for name in h.get("given") or []:
+            _entry(doc, str(name))["given"] += 1
+        for name, o in outcomes.items():
+            e = _entry(doc, str(name))
+            e[str(o)] = int(e.get(str(o), 0)) + 1
+        for name, reason in dropped.items():
+            d = _entry(doc, str(name))["dropped"]
+            d[str(reason)] = int(d.get(str(reason), 0)) + 1
+        c = control_by.get((t["document_id"], t["trial"]))
+        if c is None:
+            continue
+        fh = t.get("field_hits") or {}
+        cfh = c.get("field_hits") or {}
+        names = set(dropped) | {n for n, o in outcomes.items() if o == "rejected"}
+        for name in sorted(names):
+            if name not in fh or name not in cfh:
+                continue  # 正解値の無い項目は数えない
+            affected["pairs"] += 1
+            affected["control_hits"] += int(cfh[name])
+            affected["treat_hits"] += int(fh[name])
+            affected_rows.append({
+                "document_id": doc, "trial": t["trial"], "field": name,
+                "why": dropped.get(name, outcomes.get(name)),
+                "control": bool(cfh[name]), "treat": bool(fh[name]),
+            })
+    affected["delta"] = affected["treat_hits"] - affected["control_hits"]
+    return {"per_field": per_field, "affected": affected, "affected_rows": affected_rows}
+
+
 def _norm(v: Optional[str]) -> str:
     """比較用の正規化。**表記の揺れは同一視する。**
 
@@ -293,16 +372,24 @@ def run(
                             for f in res.get("fields", [])
                         }
                         hits = 0
+                        field_hits: dict[str, bool] = {}
                         for name, want in gold.items():
                             hit = bool(want) and got.get(name, "") == want
                             hits += int(hit)
+                            if want:
+                                field_hits[name] = hit
                             tally.note(doc.document_id, name, name in positional, arm, hit, i)
+                        # 帳票は試行ごとに消すので、run の metrics はここで写しておかないと
+                        # 失われる（G3・G4 は「落とした／捨てた項目」の内訳が要る）
+                        region_stats = res.get("region_stats") or {}
                         row = {
                             "document_id": doc.document_id,
                             "trial": i,
                             "hits": hits,
                             "total": sum(1 for v in gold.values() if v),
                             "run_id": res.get("run_id"),
+                            "field_hits": field_hits,
+                            "hints": region_stats.get("hints") if arm == "treat" else None,
                         }
                         (tally.control_runs if arm == "control" else tally.treat_runs).append(
                             row
@@ -332,6 +419,9 @@ def run(
         # **差がノイズの範囲かどうか**を数字で出す（率の引き算だけでは判断できない）
         "mcnemar_all": mcnemar(tally.paired),
         "mcnemar_positional": mcnemar(tally.paired, only=positional_names),
+        # 帳票ごとの純増減（G2）と、ヒントの内訳（G3・G4）
+        "per_doc_net": per_doc_net(tally.control_runs, tally.treat_runs),
+        "hint_summary": hint_summary(tally.control_runs, tally.treat_runs),
     }
 
 
