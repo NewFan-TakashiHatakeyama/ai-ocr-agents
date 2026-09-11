@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import unicodedata
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -39,8 +40,11 @@ def check_field_name(name: str) -> None:
     """スキーマ項目名として使えない予約名なら ValueError（D9）。
 
     UI の命名規則（英字始まり）は通さないが、チャット経路は任意の名前を受けるので、
-    経路によらずサーバ側で拒む。``FieldDef`` / gateway の ``SchemaFieldDef`` の
-    validator と、``PUT /schemas`` の明示検査（API のエラー封筒で返すため）が呼ぶ。
+    経路によらずサーバ側で拒む。呼ぶのは**書き込み側だけ**: gateway の put_schema
+    （InMemory / Pg 共通の入口）と ``PUT /schemas`` の明示検査（API のエラー封筒で
+    返すため）。読み出しモデル（FieldDef / SchemaFieldDef）には置かない ── 検査導入前に
+    保存された旧データを読めなくすると、同テナントの健全なスキーマまで巻き込んで
+    一覧 API ごと落ちる。
     """
     if name in REVIEW_AGGREGATE_FIELD_NAMES or name.startswith(RESERVED_FIELD_NAME_PREFIX):
         raise ValueError(
@@ -92,7 +96,13 @@ class RegionRect(BaseModel):
         # 前後の空白を除いて上限で切る。残らなければ「例示値なし」と同じ None。
         if v is None:
             return None
-        cleaned = "".join(ch for ch in v if ch.isprintable())
+        # 全角スペース U+3000 は isprintable() が False を返す（Zs）が、日本語の社名・氏名の
+        # 区切りとして紙面に普通に現れる。設計 §2.3「正規化しない（紙面の見た目に近いほど
+        # 照合しやすい）」に従い**残す**。kie.py の label の規則（isprintable のみ）とは
+        # ここで分かれる。制御文字（Cc）・書式文字（Cf）は引き続き落とす。
+        cleaned = "".join(
+            ch for ch in v if ch.isprintable() or unicodedata.category(ch) == "Zs"
+        )
         return cleaned.strip()[:EXAMPLE_VALUE_MAX_LEN] or None
 
     @field_validator("created_at")
@@ -104,10 +114,15 @@ class RegionRect(BaseModel):
         # 受けるが、規約として +00:00 に読み替えてから解釈する（版差で揺れない）。
         probe = v[:-1] + "+00:00" if v.endswith("Z") else v
         try:
-            datetime.fromisoformat(probe)
+            dt = datetime.fromisoformat(probe)
         except ValueError as exc:
             raise ValueError(f"created_at は ISO 8601 形式で指定してください: {v!r}") from exc
-        return v
+        # **tz 付き UTC の 1 形式に正規化して保存する。** 受けたまま保持すると Z / +09:00 /
+        # naive / 日付のみ が混在し、後で「有効化前に引かれた領域か」を `<` で比べたときに
+        # naive と aware の比較で TypeError になる。naive は UTC とみなす。
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     @field_validator("page")
     @classmethod
@@ -200,12 +215,10 @@ class FieldDef(BaseModel):
     # 読み取ってほしい領域（設計 §4.2）。**hint であって hard crop ではない**ため、
     # region の外で見つかった値を捨てる根拠にはしない。
     region: Optional[RegionRect] = None
-
-    @field_validator("name")
-    @classmethod
-    def _name_not_reserved(cls, v: str) -> str:
-        check_field_name(v)  # D9: 集約 ReviewItem の擬似 field 名と衝突させない
-        return v
+    # 予約名（D9）の検査は**ここには置かない**。FieldDef は保存済みスキーマを読む側でも
+    # 使われる（orchestrator の load_context → FieldSchema.model_validate）。検査導入前に
+    # チャット経路で保存された `__` 始まりの行が 1 つあるだけで、その run が落ちる。
+    # 拒否は書き込み側（gateway の put_schema）に限る。
 
 
 class FieldSchema(BaseModel):

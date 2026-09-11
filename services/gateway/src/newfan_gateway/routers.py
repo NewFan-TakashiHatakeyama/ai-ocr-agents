@@ -8,7 +8,7 @@ import secrets
 import uuid
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
@@ -517,7 +517,8 @@ def get_result(
 @router.get("/documents/{document_id}/spans", response_model=dto.RunSpans)
 def get_run_spans(
     document_id: str,
-    page: int = 1,
+    # 1 始まり。0 や負数を空配列で返すと、UI 側の 0 始まりの取り違えが黙って隠れる
+    page: int = Query(default=1, ge=1),
     principal: Principal = Depends(require_role("viewer")),
     repo: Repository = Depends(get_repo),
 ) -> dto.RunSpans:
@@ -1804,7 +1805,11 @@ def chat_confirm(
             fields.append(SchemaFieldDef(**fld))
         except ValidationError as exc:
             return dto.ChatConfirmResult(ok=False, message=field_validation_message(exc))
-        rec = admin.put_schema(principal.tenant_id, doc_type, fields)
+        try:
+            rec = admin.put_schema(principal.tenant_id, doc_type, fields)
+        except ValueError as exc:
+            # 予約名（D9）は put_schema（書き込み側の共通入口）が ValueError で拒む
+            return dto.ChatConfirmResult(ok=False, message=str(exc))
         return dto.ChatConfirmResult(
             ok=True,
             message=f"スキーマ「{doc_type}」に「{fld.get('label', fld.get('name'))}」を追加し、v{rec.version} として保存しました。",

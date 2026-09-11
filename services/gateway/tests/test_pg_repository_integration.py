@@ -505,3 +505,66 @@ def test_pg_get_run_spans_は自テナントの行だけ返す(repo, seeded) -> 
     finally:
         with repo._engine.begin() as c:  # noqa: SLF001
             c.execute(text("DELETE FROM run_spans WHERE run_id = :r"), {"r": run_id})
+
+
+def test_pg_legacy_reserved_field_name_does_not_break_reads() -> None:
+    """検査導入前に保存された予約名（``__`` 始まり）の行があっても、読み出しは落ちない。
+
+    敵対的レビューで実 Pg に再現された事故: 予約名の validator を読み出しモデルにも
+    置いていたため、旧データ 1 行で ``list_schemas`` が **同テナントの健全な doc_type
+    まで巻き込んで** ValidationError になった（GET /v1/schemas がテナント丸ごと 500、
+    スキーマ管理画面もテンプレート化画面も開けず、DELETE /schemas は無いので SQL 以外に
+    復旧手段が無い）。拒否は書き込み側（put_schema）に限り、読み出しは旧データを通す。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_gateway.records import SchemaFieldDef
+
+    admin = PgAdminRepository(_DSN)  # type: ignore[arg-type]
+    tenant = "ten_test"
+    legacy_type = f"legacy_reserved_{uuid.uuid4().hex[:8]}"
+    healthy_type = f"healthy_{uuid.uuid4().hex[:8]}"
+    legacy_id = f"sch_{uuid.uuid4().hex[:12]}"
+    made: list[str] = []
+    with admin._engine.begin() as c:  # noqa: SLF001 - テスト用の前提データ投入
+        c.execute(
+            text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+            {"i": tenant, "n": "test"},
+        )
+    try:
+        healthy = admin.put_schema(tenant, healthy_type, [SchemaFieldDef(name="total")])
+        made.append(healthy.id)
+        # 検査導入前の旧データを直接 INSERT で再現する（put_schema は今は拒む）
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(
+                text(
+                    "INSERT INTO field_schemas (id, tenant_id, doc_type, version, fields)"
+                    " VALUES (:i, :t, :d, 1, CAST(:f AS jsonb))"
+                ),
+                {
+                    "i": legacy_id, "t": tenant, "d": legacy_type,
+                    "f": '[{"name": "__memo", "label": "メモ", "type": "string",'
+                    ' "required": false, "critical": false, "columns": null, "region": null}]',
+                },
+            )
+        made.append(legacy_id)
+
+        # 旧データ自身も、同テナントの一覧も読める
+        got = admin.get_schema(tenant, legacy_type)
+        assert got is not None and [f.name for f in got.fields] == ["__memo"]
+        assert admin.get_schema_by_id(tenant, legacy_id) is not None
+        listed = {s.doc_type for s in admin.list_schemas(tenant)}
+        assert {legacy_type, healthy_type} <= listed
+
+        # 一方、新しく書こうとすると拒む（書き込み側の共通入口）
+        import pytest
+
+        with pytest.raises(ValueError, match="予約"):
+            admin.put_schema(tenant, healthy_type, [SchemaFieldDef(name="__memo")])
+    finally:
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            for sid in made:
+                c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": sid})

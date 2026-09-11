@@ -202,24 +202,51 @@ def test_aggregate_field_names_are_reserved_schema_names() -> None:
     nodes.py で再定義すると「gate は新しい名前で積むのに put_schema は拒まない」
     片肺になる。積む側と拒む側が同じ定数を見ていることを固定する。
     """
+    import ast
+    import inspect
+
     import newfan_schemas
     from newfan_schemas import check_field_name
 
     from newfan_orchestrator import nodes
 
-    assert nodes.REGION_AGGREGATE_FIELD is newfan_schemas.REGION_AGGREGATE_FIELD
-    assert nodes.LOST_PAGE_FIELD is newfan_schemas.LOST_PAGE_FIELD
-    out = _gate(
+    # `is` 比較では固定できない: CPython は識別子形の文字列リテラルを intern するので、
+    # nodes.py が同じリテラルでローカル再定義しても True になる。トップレベルの代入が
+    # 無いこと（＝import 経由でしか持たないこと）を AST で見る。
+    tree = ast.parse(inspect.getsource(nodes))
+    assigned = {
+        t.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for t in node.targets
+        if isinstance(t, ast.Name)
+    }
+    assert not ({"REGION_AGGREGATE_FIELD", "LOST_PAGE_FIELD"} & assigned), assigned
+    assert nodes.REGION_AGGREGATE_FIELD == newfan_schemas.REGION_AGGREGATE_FIELD
+    assert nodes.LOST_PAGE_FIELD == newfan_schemas.LOST_PAGE_FIELD
+
+    # 除外領域の集約（__region__）と、読めなかったページ（__pages__）の両経路で、
+    # gate が積む field 名が put_schema の拒否対象と一致する。
+    region_out = _gate(
         {
             "schema": {"doc_type": "invoice", "fields": []},
             "fields": [_good_field()],
             "metrics": {"region": {"excluded_cells": 3, "excluded_rows": 1}},
         }
     )
-    for item in out["review_items"]:
-        assert item.field_name in newfan_schemas.REVIEW_AGGREGATE_FIELD_NAMES
+    pages_out = _gate(
+        {
+            "schema": {"doc_type": "invoice", "fields": []},
+            "fields": [],
+            "spans": [],
+            "errors": [{"page": 2, "stage": "structure_ocr", "error": "boom"}],
+        }
+    )
+    names = {i.field_name for i in region_out["review_items"] + pages_out["review_items"]}
+    assert names == newfan_schemas.REVIEW_AGGREGATE_FIELD_NAMES, names
+    for name in names:
         with pytest.raises(ValueError):
-            check_field_name(item.field_name)
+            check_field_name(name)
 
 
 def test_no_review_item_for_ordinary_span_exclusion() -> None:

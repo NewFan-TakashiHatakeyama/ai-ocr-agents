@@ -182,15 +182,19 @@ class ChatTools:
         fields = list(cur.fields) if cur else []
         if any(f.name == field.get("name") for f in fields):
             return {"ok": False, "message": "同名の項目が既に存在します。"}
-        # LLM は任意の名前を渡し得る。予約名（__pages__ / __region__ / 先頭 __。設計
-        # region-field-add-and-hint-v2 D9）や型違いは SchemaFieldDef の validator が
-        # 落とすが、例外のまま返すとグラフごと落ちて会話が途切れる。ok=False で返し、
-        # LLM が言い直せるようにする。
+        # LLM は任意の名前を渡し得る。型違いは SchemaFieldDef の validator が、予約名
+        # （__pages__ / __region__ / 先頭 __。設計 region-field-add-and-hint-v2 D9）は
+        # put_schema が落とす。例外のまま返すとグラフごと落ちて会話が途切れるので、
+        # ok=False で返して LLM が言い直せるようにする。
         try:
             fields.append(SchemaFieldDef(**field))
         except ValidationError as exc:
             return {"ok": False, "message": field_validation_message(exc)}
-        rec = self._admin.put_schema(tenant_id, doc_type, fields)
+        try:
+            rec = self._admin.put_schema(tenant_id, doc_type, fields)
+        except ValueError as exc:
+            # 予約名（D9）は put_schema（書き込み側の共通入口）が ValueError で拒む
+            return {"ok": False, "message": str(exc)}
         return {"ok": True, "doc_type": rec.doc_type, "version": rec.version}
 
     def manage_rules(self, tenant_id: str, rule_id: str, status: str) -> dict[str, Any]:

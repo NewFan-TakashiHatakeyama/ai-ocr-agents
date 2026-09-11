@@ -513,7 +513,7 @@ off のまま、結果を実測記録（第 3 回）に残す。
 | `packages/schemas/tests` | `RegionRect` の 3 項目の往復、消毒（印字不可文字・200 字）、除外領域に付けても無害、`origin` の値域 | 契約 |
 | `packages/schemas/tests`（`textnorm`） | 3 つの正規化関数を置き換えても golden のテストが全て通る | D18 |
 | `services/gateway/tests/test_schema_regions.py` | PUT → GET で 3 項目が返る（extra="ignore" の罠）、予約名は API でもチャット経路でも E1003 | DTO 漏れ・D9 |
-| `services/gateway/tests` | `GET /documents/{id}/spans` の RLS・ページ指定・未抽出は空 | D12 |
+| `services/gateway/tests` | `GET /documents/{id}/spans` の RLS・ページ指定（1 始まり、0 以下は 422）・run が無ければ E1001・行が無いページは空 | D12 |
 | `services/orchestrator/tests/test_pg_save_result_integration.py` | span が保存される、needs_review → confirmed で消えない、再配信で二重にならない | D12 |
 | `services/orchestrator/tests/test_llm_nodes.py` | 候補の判定（中心点／30%／別ページ）、順位が重なり順、12 件で切る、`no_spans` / `overlaps_exclude` / `type_mismatch`（**分割された日付は落ちない**）/ `kind_conflict`（**「大熊邸」は落ちる**、`company` ↔ `person` は落ちない、`unknown` は落ちない）、`columns` 持ちには付かない、metrics に理由が残る、再配信で書き直される | D13 / D14 |
 | 同上 | 種類判定の表（各種類の代表例と、社名に「町」が入る例が `company` になること） | §2.5 |

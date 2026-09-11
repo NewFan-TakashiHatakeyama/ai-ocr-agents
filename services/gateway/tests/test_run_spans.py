@@ -132,3 +132,15 @@ def test_帳票削除でInMemoryのrun_spansも消える(ctx: SimpleNamespace) -
     ctx.repo.set_document_status("ten_1", doc_id, "confirmed")
     assert ctx.repo.delete_document("ten_1", doc_id, actor_id="u1", detail={}) is not None
     assert ctx.repo.get_run_spans("ten_1", run_id, 1) == []
+    # get_run_spans は run の存在を先に見るので、上の assert だけでは掃除ループが無くても
+    # 通る（run が消えれば [] になる）。内部の保持そのものが消えたことを直接見る。
+    assert not [k for k in ctx.repo._run_spans if k[0] == run_id]  # noqa: SLF001
+
+
+def test_page_は1始まり_0以下は422(ctx: SimpleNamespace) -> None:
+    """0 や負数を空配列で返すと、UI 側の 0 始まりの取り違えが黙って隠れる。"""
+    doc_id = _upload(ctx)
+    _seed_run_with_spans(ctx, doc_id)
+    for bad in (0, -3):
+        r = ctx.client.get(f"/v1/documents/{doc_id}/spans", params={"page": bad}, headers=auth("viewer"))
+        assert r.status_code == 422, (bad, r.text)

@@ -597,3 +597,27 @@ def test_result_の所見なしはキー自体が無い(ctx: SimpleNamespace) ->
     body = ctx.client.get(f"/v1/documents/{doc_id}/result", headers=auth("viewer")).json()
     assert "mismatch_fields" not in body["region_stats"]
     assert "layout_mismatch" not in body["region_stats"]
+
+
+def test_legacy_reserved_field_name_is_readable_but_not_writable(ctx: SimpleNamespace) -> None:
+    """予約名の拒否は書き込み側だけ。読み出しは旧データを通す（InMemory 版）。
+
+    実 Pg 版は test_pg_repository_integration.py。ここでは InMemory の
+    seed_schema で「検査導入前に入った行」を再現し、GET が落ちないことと、
+    PUT では拒むことを固定する。
+    """
+    from newfan_gateway.records import SchemaFieldDef, SchemaRecord
+
+    ctx.admin.seed_schema(
+        SchemaRecord(
+            id="sch_legacy", tenant_id="ten_1", doc_type="legacy_memo", version=1,
+            fields=[SchemaFieldDef(name="__memo", label="メモ", type="string")],
+        )
+    )
+    r = ctx.client.get("/v1/schemas", headers=auth("admin"))
+    assert r.status_code == 200, r.text
+    assert "legacy_memo" in {s["doc_type"] for s in r.json()["items"]}
+    assert ctx.client.get("/v1/schemas/legacy_memo", headers=auth("admin")).status_code == 200
+    # 書き込みは拒む
+    r = _put(ctx, {"doc_type": "legacy_memo", "fields": [{"name": "__memo", "type": "string"}]})
+    assert r.status == 422 and r.json["error"]["code"] == "E1003"
