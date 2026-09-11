@@ -383,6 +383,28 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   const layoutMismatch = regionStats.layout_mismatch === true;
   const labelOfField = (name: string) =>
     data.fields.find((f) => f.name === name)?.label ?? name;
+  // 読取領域ヒントの内訳（§2.8）。**参考表示に閉じる**: レビュー件数・確信度・run status には
+  // 一切入れない。「使った」は followed / partial、「捨てた」は渡す前に落としたもの（dropped）と
+  // LLM が別の場所から取ったもの（rejected）。根拠なし（no_evidence）はどちらにも数えない。
+  const hints = regionStats.hints ?? {};
+  const hintOutcomes = hints.outcomes ?? {};
+  const hintUsed = Object.entries(hintOutcomes).filter(([, o]) => o === "followed" || o === "partial");
+  const hintDroppedReasons: Record<string, string> = {
+    no_spans_in_region: "この帳票ではその位置に文字が無い",
+    overlaps_exclude: "除外領域と重なっている",
+    type_mismatch: "その位置の文字が項目の型に合わない",
+    kind_conflict: "前回その位置にあった値と種類が合わない",
+    page_out_of_range: "テンプレートのページがこの帳票に無い",
+    page_unprojectable: "ページ寸法が取れない",
+  };
+  const hintDiscarded: Array<[string, string]> = [
+    ...Object.entries(hints.dropped ?? {}).map(
+      ([n, r]) => [n, hintDroppedReasons[r] ?? r] as [string, string],
+    ),
+    ...Object.entries(hintOutcomes)
+      .filter(([, o]) => o === "rejected")
+      .map(([n]) => [n, "AI が別の場所から値を取った"] as [string, string]),
+  ];
   // 編集対象の doc_type は「サーバが解決した doc_type → このセッションで作成した
   // doc_type」の順。どちらも取れないときは編集させない（空のプリロードで保存すると
   // 既存の定義を空の新版で上書きしてしまう）。
@@ -464,6 +486,31 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             {layoutMismatch
               ? "📐 別レイアウトの可能性（参考）"
               : `📐 領域外で検出 ${mismatchFields.length} 項目（参考）`}
+          </span>
+        )}
+        {hintUsed.length > 0 && (
+          <span
+            className="rv-rgnbadge"
+            title={
+              `位置ヒント（前回その位置にあった値）を使って読んだ項目: ${hintUsed
+                .map(([n]) => labelOfField(n))
+                .join("・")}` + NOTE_NO_EFFECT
+            }
+          >
+            📍 位置ヒントを使用 {hintUsed.length} 項目（参考）
+          </span>
+        )}
+        {hintDiscarded.length > 0 && (
+          <span
+            className="rv-rgnbadge"
+            title={
+              `位置ヒントを使わなかった項目:\n${hintDiscarded
+                .map(([n, r]) => `${labelOfField(n)}: ${r}`)
+                .join("\n")}\n（テンプレートの領域がこの帳票に合っていない可能性があります）` +
+              NOTE_NO_EFFECT
+            }
+          >
+            📍 ヒントを捨てた {hintDiscarded.length} 項目（参考）
           </span>
         )}
         {canEditRegions && (

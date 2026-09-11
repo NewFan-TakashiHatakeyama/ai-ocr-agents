@@ -113,6 +113,17 @@ export interface RegionStats {
   markdown_dropped_pages?: number[];
   mismatch_fields?: string[];
   layout_mismatch?: boolean;
+  /** 読取領域ヒント（設計 region-field-add-and-hint-v2 §2.5・§2.6）。ヒント有効時のみ */
+  hints?: RegionHintStats;
+}
+
+/** ヒントの内訳。given は渡した項目、dropped は渡す前に落とした項目と理由、
+ *  outcomes は LLM が従ったか（span_ids と候補の集合演算。モデルの申告ではない）。 */
+export interface RegionHintStats {
+  given?: string[];
+  dropped?: Record<string, string>;
+  truncated?: Record<string, number>;
+  outcomes?: Record<string, "followed" | "partial" | "rejected" | "no_evidence" | string>;
 }
 
 export interface DocumentMeta {
