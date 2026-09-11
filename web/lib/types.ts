@@ -55,6 +55,23 @@ export interface ResultResponse {
   schema_doc_type?: string | null;
 }
 
+/** 最新 run の OCR span 1 件（除外領域の適用後）。bbox は前処理後画像の画素。 */
+export interface RunSpanDto {
+  span_id: number;
+  text: string;
+  bbox?: BBox | null;
+}
+
+/**
+ * GET /documents/{id}/spans?page=n の応答（設計 D12）。テンプレート化画面が
+ * 「枠に含まれる文字」を出し、例示値の出どころにする。行が無ければ spans は空。
+ */
+export interface RunSpans {
+  run_id: string;
+  page_no: number;
+  spans: RunSpanDto[];
+}
+
 /** ページの正規寸法（前処理後 PNG 画素）。領域の正規化・逆正規化に使う。 */
 export interface PageDim {
   page_no: number;

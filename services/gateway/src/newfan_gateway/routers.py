@@ -513,6 +513,37 @@ def get_result(
     )
 
 
+@router.get("/documents/{document_id}/spans", response_model=dto.RunSpans)
+def get_run_spans(
+    document_id: str,
+    page: int = 1,
+    principal: Principal = Depends(require_role("viewer")),
+    repo: Repository = Depends(get_repo),
+) -> dto.RunSpans:
+    """最新 run の OCR span（除外領域の適用後）をページ単位で返す（設計 D12 / §2.4）。
+
+    テンプレート化画面が、枠を引いた／選んだときに「枠に含まれる文字」を出し、
+    例示値（`example_value`）の出どころにする。structure-svc への都度問い合わせは
+    採らない（ページあたり数秒〜数十秒）。
+
+    run_spans の行が無い（0008 より前の run、失敗 run、範囲外のページ）場合は
+    spans を空で返す。「未抽出」（run が無い）だけをエラーにする。
+    """
+    _require_document(repo, principal.tenant_id, document_id)
+    run = repo.get_latest_run(principal.tenant_id, document_id)
+    if run is None:
+        raise ApiError("E1001", "抽出結果がありません", details={"document_id": document_id})
+    rows = repo.get_run_spans(principal.tenant_id, run.id, page)
+    return dto.RunSpans(
+        run_id=run.id,
+        page_no=page,
+        spans=[
+            dto.RunSpanDto(span_id=s["span_id"], text=s.get("text") or "", bbox=s.get("bbox"))
+            for s in rows
+        ],
+    )
+
+
 @router.get("/documents/{document_id}/pages/{page_no}/image", response_model=dto.SignedUrl)
 def get_page_image(
     request: Request,

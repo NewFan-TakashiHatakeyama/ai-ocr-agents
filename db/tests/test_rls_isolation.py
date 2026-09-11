@@ -153,9 +153,11 @@ def test_業務テーブルは_force_rls_になっている(owner) -> None:
                 " WHERE relname IN ('documents','extraction_fields','correction_logs',"
                 " 'tenant_memories','tenant_rules','jobs','audit_logs',"
                 " 'workflows','workflow_runs','workflow_node_runs','connections',"
-                " 'source_cursors')"
+                " 'source_cursors','run_spans')"
             )
         ).all()
     assert rows, "対象テーブルが見つからない（migration 未適用？）"
+    # IN で名前を挙げただけでは「表が無い」を検知できない（0 行になるだけ）ので件数も見る
+    assert len(rows) == 13, f"対象テーブルが欠けている: {sorted(r[0] for r in rows)}"
     not_forced = [r[0] for r in rows if not (r[1] and r[2])]
     assert not_forced == [], f"RLS が ENABLE+FORCE でないテーブル: {not_forced}"

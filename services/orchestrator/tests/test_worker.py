@@ -410,6 +410,37 @@ def test_region_stats_none_without_regions() -> None:
     assert store.saved_region_stats("run_1") is None
 
 
+# ---------- run_spans の配線（設計 D12 / §2.4） ----------
+
+
+def test_needs_review_save_includes_spans() -> None:
+    """interrupt 停止の時点で span が保存されていること（テンプレート化はレビュー中に開く）。
+
+    キーワード引数は省略しても通ってしまうため、worker → store の配線は
+    InMemory で観測して固定する（region_stats と同じ理由）。
+    """
+    worker, store, _, _ = _build_with_regions(0.70, [])
+    assert worker.process({"run_id": "run_1", "tenant_id": "ten_1"}) == "needs_review"
+    saved = store.saved_spans("run_1", 1)
+    assert [s["text"] for s in saved] == ["128000"]
+    assert saved[0]["bbox"] == [300, 180, 430, 212]
+    assert set(saved[0]) == {"span_id", "text", "bbox", "conf"}
+
+
+def test_finalize_save_includes_spans() -> None:
+    """自動確定（interrupt を経ない）経路では finalize が唯一の保存点なので、そこでも書く。"""
+    worker, store, _, _ = _build_with_regions(0.99, [])
+    assert worker.process({"run_id": "run_1", "tenant_id": "ten_1"}) == "confirmed"
+    assert [s["text"] for s in store.saved_spans("run_1", 1)] == ["128000"]
+
+
+def test_saved_spans_are_post_exclusion() -> None:
+    """保存されるのは除外領域の適用**後**の span（印影の文字を枠の下の文字として見せない）。"""
+    worker, store, _, _ = _build_with_regions(0.99, [_COVER_SPAN_REGION])
+    worker.process({"run_id": "run_1", "tenant_id": "ten_1"})
+    assert store.saved_spans("run_1", 1) == []
+
+
 def test_exclude_run_completes_without_page_dims() -> None:
     """寸法の無いページ（既存 seed 形式）でも exclude 有り run が完走する。
 

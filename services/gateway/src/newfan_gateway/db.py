@@ -398,7 +398,7 @@ class PgRepository:
         """帳票と派生データを 1 トランザクションで消す。
 
         FK CASCADE が効くのは pages / extraction_runs（→ extraction_fields /
-        extraction_tables）だけ。correction_logs・jobs・workflow_runs は
+        extraction_tables / run_spans）だけ。correction_logs・jobs・workflow_runs は
         documents を TEXT 列で指すだけなので DB は何もしてくれない（0001 の
         :154 / :206 / :265）。ここで明示的に消さないと、消したはずの原本の値が
         correction_logs に残り、jobs は参照先を失って無限に再配信される。
@@ -525,7 +525,7 @@ class PgRepository:
                 },
             )
 
-            # 7) 本体。CASCADE で pages / extraction_runs → fields / tables が消える
+            # 7) 本体。CASCADE で pages / extraction_runs → fields / tables / run_spans が消える
             deleted = s.execute(
                 text("DELETE FROM documents WHERE tenant_id=:t AND id=:d"),
                 {"t": tenant_id, "d": document_id},
@@ -619,6 +619,20 @@ class PgRepository:
                 )
             ).all()
         return {r[0]: int(r[1] or 0) for r in rows}
+
+    def get_run_spans(self, tenant_id, run_id, page_no):
+        # run_spans（0008）は ORM を持たず生 SQL で読む（書き手は orchestrator の
+        # pg_persistence）。RLS に加えて tenant_id を WHERE に明示する二重防御
+        # （ポリシーは USING のみ。ローカル compose の所有者接続は RLS を素通りする）。
+        with self._rls(tenant_id) as s:
+            raw = s.execute(
+                text(
+                    "SELECT spans FROM run_spans"
+                    " WHERE tenant_id=:t AND run_id=:r AND page_no=:p"
+                ),
+                {"t": tenant_id, "r": run_id, "p": page_no},
+            ).scalar()
+        return list(raw or [])
 
 
 def _doc_record(row: Document) -> DocumentRecord:
