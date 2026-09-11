@@ -102,12 +102,16 @@ class HintReport:
     - dropped: 落とした項目名 → 理由（region_hint の理由定数）
     - truncated: 候補を HINT_MAX_CANDIDATES で切った項目名 → 切った件数
     - outcomes: 従った／捨てた（D15。KieResult.hint_outcomes から写す）
+    - detail: 項目名 → 例示値と候補の原文（先頭数件）。検証画面の参考表示（§2.8）が
+      「種類が合わない（例示: 株式会社〜 / 候補: 大熊邸）」と**何と何が合わなかったか**を
+      出すため。理由の定数だけでは、テンプレートの作者が領域を引き直す判断ができない
     """
 
     given: list[str] = dc_field(default_factory=list)
     dropped: dict[str, str] = dc_field(default_factory=dict)
     truncated: dict[str, int] = dc_field(default_factory=dict)
     outcomes: dict[str, str] = dc_field(default_factory=dict)
+    detail: dict[str, dict[str, Any]] = dc_field(default_factory=dict)
 
     def __bool__(self) -> bool:
         """領域を持つ項目が 1 つでも評価されたか（given か dropped に載る）。"""
@@ -119,7 +123,25 @@ class HintReport:
             "dropped": dict(self.dropped),
             "truncated": dict(self.truncated),
             "outcomes": dict(self.outcomes),
+            "detail": {k: dict(v) for k, v in self.detail.items()},
         }
+
+
+# 参考表示に載せる原文の上限。metrics は run ごとに JSONB へ入るので、候補 12 件 × 200 字を
+# そのまま写さない（表示に要るのは「何と何が合わなかったか」が分かる程度）
+DETAIL_MAX_CANDIDATES = 3
+DETAIL_MAX_CHARS = 40
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= DETAIL_MAX_CHARS else text[: DETAIL_MAX_CHARS - 1] + "…"
+
+
+def _hint_detail(example_value: Optional[str], ranked: list[Span]) -> dict[str, Any]:
+    return {
+        "example_value": _clip(example_value) if example_value else None,
+        "candidates": [_clip(s.text) for s in ranked[:DETAIL_MAX_CANDIDATES]],
+    }
 
 
 def build_region_hints(
@@ -189,6 +211,8 @@ def build_region_hints(
             # （JSONB は検査導入前のデータや手修正で規則を素通りし得る）
             ev_raw = region.get("example_value")
             ev = sanitize_example_value(ev_raw) if isinstance(ev_raw, str) else None
+            if ev or ranked:
+                report.detail[name] = _hint_detail(ev, ranked)
             # 事前ガードは**切った後の候補**に当てる。切り捨て件数を残すのは、
             # 「13 件目に数字があったのに type_mismatch で落ちた」を後から追えるようにするため
             reason = prevalidate(f, ranked, ev, rect, list(exclude_by_page.get(page_no, [])))

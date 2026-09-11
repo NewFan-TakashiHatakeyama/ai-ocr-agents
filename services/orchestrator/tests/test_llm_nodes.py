@@ -604,6 +604,10 @@ def test_metrics_に理由と結果が残り再実行で書き直され既存の
         "dropped": {"customer_name": "kind_conflict", "issue_date": "no_spans_in_region"},
         "truncated": {},
         "outcomes": {"total_amount": "followed"},
+        "detail": {
+            "total_amount": {"example_value": None, "candidates": ["¥128,000"]},
+            "customer_name": {"example_value": "株式会社千曲川ホーム", "candidates": ["大熊邸"]},
+        },
     }
 
 

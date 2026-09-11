@@ -388,6 +388,11 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   // LLM が別の場所から取ったもの（rejected）。根拠なし（no_evidence）はどちらにも数えない。
   const hints = regionStats.hints ?? {};
   const hintOutcomes = hints.outcomes ?? {};
+  const hintDetail = hints.detail ?? {};
+  // 「何と何が合わなかったか」を title に出す（§2.8: 例示: 株式会社〜 / 候補: 大熊邸）。
+  // 理由の定数だけでは、テンプレートの作者が領域を引き直すべきか判断できない
+  const hintExample = (n: string) => hintDetail[n]?.example_value ?? null;
+  const hintCandidates = (n: string) => (hintDetail[n]?.candidates ?? []).filter(Boolean);
   const hintUsed = Object.entries(hintOutcomes).filter(([, o]) => o === "followed" || o === "partial");
   const hintDroppedReasons: Record<string, string> = {
     no_spans_in_region: "この帳票ではその位置に文字が無い",
@@ -397,13 +402,29 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     page_out_of_range: "テンプレートのページがこの帳票に無い",
     page_unprojectable: "ページ寸法が取れない",
   };
+  const withEvidence = (n: string, reason: string, r: string) => {
+    // 種類・型の不一致は「例示 / 候補」を並べると一目で分かる。他の理由は候補が無いか無関係
+    if (r !== "kind_conflict" && r !== "type_mismatch") return reason;
+    const ev = hintExample(n);
+    const cands = hintCandidates(n);
+    const parts = [ev ? `例示: ${ev}` : null, cands.length ? `候補: ${cands.join("・")}` : null].filter(
+      Boolean,
+    );
+    return parts.length ? `${reason}（${parts.join(" / ")}）` : reason;
+  };
   const hintDiscarded: Array<[string, string]> = [
     ...Object.entries(hints.dropped ?? {}).map(
-      ([n, r]) => [n, hintDroppedReasons[r] ?? r] as [string, string],
+      ([n, r]) => [n, withEvidence(n, hintDroppedReasons[r] ?? r, r)] as [string, string],
     ),
     ...Object.entries(hintOutcomes)
       .filter(([, o]) => o === "rejected")
-      .map(([n]) => [n, "AI が別の場所から値を取った"] as [string, string]),
+      .map(([n]) => {
+        const ev = hintExample(n);
+        return [n, ev ? `AI が別の場所から値を取った（例示: ${ev}）` : "AI が別の場所から値を取った"] as [
+          string,
+          string,
+        ];
+      }),
   ];
   // 編集対象の doc_type は「サーバが解決した doc_type → このセッションで作成した
   // doc_type」の順。どちらも取れないときは編集させない（空のプリロードで保存すると
@@ -493,7 +514,10 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             className="rv-rgnbadge"
             title={
               `位置ヒント（前回その位置にあった値）を使って読んだ項目: ${hintUsed
-                .map(([n]) => labelOfField(n))
+                .map(([n]) => {
+                  const ev = hintExample(n);
+                  return ev ? `${labelOfField(n)}（例示: ${ev}）` : labelOfField(n);
+                })
                 .join("・")}` + NOTE_NO_EFFECT
             }
           >

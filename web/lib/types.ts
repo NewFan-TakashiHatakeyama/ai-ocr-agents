@@ -124,6 +124,8 @@ export interface RegionHintStats {
   dropped?: Record<string, string>;
   truncated?: Record<string, number>;
   outcomes?: Record<string, "followed" | "partial" | "rejected" | "no_evidence" | string>;
+  /** 項目名 → 例示値と候補の原文（先頭数件、各 40 字まで）。参考表示の title 用 */
+  detail?: Record<string, { example_value?: string | null; candidates?: string[] }>;
 }
 
 export interface DocumentMeta {
