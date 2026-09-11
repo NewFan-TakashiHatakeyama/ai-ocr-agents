@@ -25,6 +25,7 @@ import type {
   RegionRect,
   ReviewQueueItem,
   RuleDto,
+  RunSpans,
   SchemaDto,
   SchemaFieldDto,
   SignedUrl,
@@ -92,6 +93,12 @@ export const api = {
 
   getResult: (documentId: string) =>
     request<ResultResponse>(`/documents/${documentId}/result`),
+
+  // 最新 run の OCR span（除外領域の適用後）をページ単位で引く（設計 D12）。
+  // テンプレート化画面で「枠に含まれる文字」を出し、例示値の出どころにする。
+  // 未抽出（run が無い）は 400/E1001。行が無いページは spans が空で返る。
+  getRunSpans: (documentId: string, page: number) =>
+    request<RunSpans>(`/documents/${documentId}/spans?page=${page}`),
 
   // 取り込んだ帳票を消す（原本・ページ画像・抽出結果・学習例まで。復元不可）。
   // 呼ぶ前に必ず確認を取ること。409(E1005) は処理中/他者ロック中で、時間をおけば通る。

@@ -12,6 +12,7 @@ DATABASE_URL_TEST が設定されている時だけ動く（CI/ローカルは c
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -399,3 +400,34 @@ def test_pg_set_document_doc_type_は他テナントの行を書き換えない(
             text("SELECT doc_type FROM documents WHERE id = :d"), {"d": doc_id}
         ).scalar()
     assert got == "invoice"  # seeded のまま（他テナント指定では書き換わらない）
+
+
+def test_pg_get_run_spans_は自テナントの行だけ返す(repo, seeded) -> None:
+    """run_spans（0008）を実 DDL で読めること、他テナントからは空になること（設計 D12）。
+
+    ローカル compose の接続ロールは所有者（RLS を素通り）なので、テナント境界は
+    WHERE の tenant_id が唯一の防御。行が無いページは空配列（エラーにしない）。
+    """
+    from sqlalchemy import text
+
+    tenant, _doc_id, run_id = seeded
+    spans = [
+        {"span_id": 1, "text": "株式会社千曲川ホーム", "bbox": [10, 20, 110, 40], "conf": 0.95},
+        {"span_id": 2, "text": "御請求書", "bbox": None, "conf": 0.8},
+    ]
+    with repo._engine.begin() as c:  # noqa: SLF001 - orchestrator が書いた状態を再現
+        c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+        c.execute(
+            text(
+                "INSERT INTO run_spans (run_id, tenant_id, page_no, spans)"
+                " VALUES (:r, :t, 1, CAST(:s AS jsonb))"
+            ),
+            {"r": run_id, "t": tenant, "s": json.dumps(spans, ensure_ascii=False)},
+        )
+    try:
+        assert repo.get_run_spans(tenant, run_id, 1) == spans
+        assert repo.get_run_spans(tenant, run_id, 2) == []  # 行の無いページ
+        assert repo.get_run_spans("ten_other", run_id, 1) == []  # テナント境界
+    finally:
+        with repo._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("DELETE FROM run_spans WHERE run_id = :r"), {"r": run_id})

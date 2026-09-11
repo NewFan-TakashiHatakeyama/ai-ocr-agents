@@ -7,6 +7,8 @@
 2. 再配信の再実行（同 run_id への再保存）は行全体を書き直す（キメラ行防止）
 3. 人手確定（corrected/approved）は機械の再抽出（pending/auto）で巻き戻らない
 4. confirmed の run/document 状態は needs_review へ巻き戻らない
+5. spans（run_spans, 0008）は書ける・confirmed の再保存で消えない・再配信で二重にならない・
+   帳票削除で消える（設計 D12 / §2.4）
 
 DATABASE_URL_TEST が設定されている時だけ動く。
 """
@@ -24,7 +26,7 @@ pytest.importorskip("psycopg")
 _DSN = os.environ.get("DATABASE_URL_TEST")
 pytestmark = pytest.mark.skipif(not _DSN, reason="DATABASE_URL_TEST 未設定（実 DB が要る）")
 
-from newfan_schemas import ExtractedField, ReviewStatus  # noqa: E402
+from newfan_schemas import ExtractedField, ReviewStatus, Span  # noqa: E402
 
 TENANT = "ten_savepin"
 
@@ -325,3 +327,147 @@ def test_needs_reviewからconfirmedの再保存でregionが残る(env) -> None:
             text("SELECT metrics FROM extraction_runs WHERE id=:r"), {"r": run_id}
         ).scalar_one()
     assert m["region"] == stats
+
+
+# ---- run_spans（設計 D12 / §2.4） ----
+
+
+def _span(span_id, page, text_, bbox=(10, 20, 110, 40), conf=0.95):
+    return Span(
+        span_id=span_id, page=page, text=text_, conf=conf, bbox=list(bbox),
+        # 保存対象外の付随情報。これが JSONB に漏れないことも見る
+        char_boxes=[[10, 20, 30, 40]], char_confs=[0.9], block_id=7,
+    )
+
+
+def _span_rows(owner, run_id):
+    """run_spans を page_no → spans で返す。"""
+    from sqlalchemy import text
+
+    with owner.begin() as c:
+        return {
+            r[0]: r[1]
+            for r in c.execute(
+                text("SELECT page_no, spans FROM run_spans WHERE run_id=:r ORDER BY page_no"),
+                {"r": run_id},
+            )
+        }
+
+
+def test_spansがrun_spansへページごとに保存される(env) -> None:
+    """(a) 渡した span が run × ページで JSONB に入り、1 span は 4 キーだけになること。
+
+    page は行のキーなので span 側には書かない。char_boxes 等の付随情報も書かない
+    （1 ページ数百 span × 100 バイト程度に収める。設計 §2.4）。
+    """
+    owner, store, _doc, run_id = env
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review",
+        spans=[
+            _span(1, 1, "株式会社千曲川ホーム"),
+            _span(2, 1, "御請求書", bbox=(300, 20, 400, 40), conf=0.8),
+            _span(3, 2, "2 ページ目", bbox=(5, 5, 50, 15)),
+        ],
+    )
+    rows = _span_rows(owner, run_id)
+    assert set(rows) == {1, 2}
+    assert rows[1] == [
+        {"span_id": 1, "text": "株式会社千曲川ホーム", "bbox": [10, 20, 110, 40], "conf": 0.95},
+        {"span_id": 2, "text": "御請求書", "bbox": [300, 20, 400, 40], "conf": 0.8},
+    ]
+    assert rows[2] == [{"span_id": 3, "text": "2 ページ目", "bbox": [5, 5, 50, 15], "conf": 0.95}]
+    # tenant_id が行に載っている（RLS の判定列）
+    from sqlalchemy import text
+
+    with owner.begin() as c:
+        tenants = {
+            r[0] for r in c.execute(
+                text("SELECT tenant_id FROM run_spans WHERE run_id=:r"), {"r": run_id}
+            )
+        }
+    assert tenants == {TENANT}
+
+
+def test_spans無しのconfirmed再保存でrun_spansが残る(env) -> None:
+    """(b) needs_review 保存で書いた span が、finalize（spans=None）で消えないこと。
+
+    metrics.region で踏んだ「needs_review → confirmed で消える」穴と同型。resume 経路の
+    finalize は state に spans を持たないことがあるため、None／空は「触らない」に倒す。
+    """
+    owner, store, _doc, run_id = env
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review", spans=[_span(1, 1, "残るべき文字")],
+    )
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1", rs=ReviewStatus.APPROVED)], tables=[],
+        review_items=[], status="confirmed", spans=None,
+    )
+    # 空リストも「触らない」
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1", rs=ReviewStatus.APPROVED)], tables=[],
+        review_items=[], status="confirmed", spans=[],
+    )
+    rows = _span_rows(owner, run_id)
+    assert rows == {1: [{"span_id": 1, "text": "残るべき文字", "bbox": [10, 20, 110, 40], "conf": 0.95}]}
+
+
+def test_同じspansの再保存でページごとに1行のまま(env) -> None:
+    """(c) 再配信の再実行（同 run_id への再保存）で行が増えず、中身は新しい方になること。"""
+    owner, store, _doc, run_id = env
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review", spans=[_span(1, 1, "1 回目"), _span(2, 2, "1 回目 p2")],
+    )
+    # OCR 揺れで原文が変わった再実行
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review", spans=[_span(1, 1, "2 回目"), _span(2, 2, "2 回目 p2")],
+    )
+    from sqlalchemy import text
+
+    with owner.begin() as c:
+        n = c.execute(
+            text("SELECT count(*) FROM run_spans WHERE run_id=:r"), {"r": run_id}
+        ).scalar_one()
+    assert n == 2  # page 1 と 2 で 1 行ずつ
+    rows = _span_rows(owner, run_id)
+    assert rows[1][0]["text"] == "2 回目"
+    assert rows[2][0]["text"] == "2 回目 p2"
+
+
+def test_帳票削除でrun_spansが消える(env) -> None:
+    """(d) documents → extraction_runs → run_spans の CASCADE。delete_document の手順は変えない。"""
+    from sqlalchemy import text
+
+    owner, store, doc_id, run_id = env
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review", spans=[_span(1, 1, "消えるべき文字")],
+    )
+    assert _span_rows(owner, run_id)
+    with owner.begin() as c:
+        c.execute(text("DELETE FROM documents WHERE id=:d"), {"d": doc_id})
+    assert _span_rows(owner, run_id) == {}
+
+
+def test_dict形のspansでも保存できる(env) -> None:
+    """checkpoint 復元経路で Span モデルでなく素の dict が来ても同じ形で書けること。"""
+    owner, store, _doc, run_id = env
+    store.save_result(
+        TENANT, run_id,
+        fields=[_field("total_amount", "1", "1")], tables=[], review_items=[],
+        status="needs_review",
+        spans=[{"span_id": 9, "page": 1, "text": "dict 由来", "conf": 0.5, "bbox": [1, 2, 3, 4]}],
+    )
+    assert _span_rows(owner, run_id) == {
+        1: [{"span_id": 9, "text": "dict 由来", "bbox": [1, 2, 3, 4], "conf": 0.5}]
+    }
