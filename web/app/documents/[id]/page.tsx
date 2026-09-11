@@ -399,7 +399,6 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     overlaps_exclude: "除外領域と重なっている",
     type_mismatch: "その位置の文字が項目の型に合わない",
     kind_conflict: "前回その位置にあった値と種類が合わない",
-    address_field: "住所（複数行の値）には位置ヒントを使わない",
     page_out_of_range: "テンプレートのページがこの帳票に無い",
     page_unprojectable: "ページ寸法が取れない",
   };

@@ -461,54 +461,6 @@ def test_kind_conflict_unknown_は落とさない(monkeypatch) -> None:
     assert report3.dropped == {}
 
 
-def test_address_field_住所の例示値はヒントを渡さない(monkeypatch) -> None:
-    """第 3 回計測 S1: 住所だけは候補の中から取って（followed）なお不正解が増えた
-    （対照のみ 18 / 介入のみ 5、p = 0.011）。複数行の一部を取って切り詰める。"""
-    monkeypatch.setenv("REGION_KIE_HINTS", "1")
-    schema = _field_schema("issuer_address", "string", "東京都品川区北品川5-10-20 サンプルビル2F")
-    out, report = llm_nodes.build_region_hints(
-        schema, _PAGES_1,
-        [_sp(1, "東京都品川区北品川5-10-20", [320, 220, 480, 260]),
-         _sp(2, "サンプルビル2F", [320, 265, 480, 300])],
-    )
-    assert report.dropped == {"issuer_address": "address_field"}
-    assert "region_hint" not in out["fields"][0]
-
-
-def test_address_field_例示値が無くても候補が住所なら渡さない(monkeypatch) -> None:
-    """S1（その帳票自身の領域、例示値なし）でも同じ害が出るので、候補の連結で判定する。"""
-    monkeypatch.setenv("REGION_KIE_HINTS", "1")
-    schema = _field_schema("customer_address", "string")
-    _, report = llm_nodes.build_region_hints(
-        schema, _PAGES_1,
-        [_sp(1, "596-0006", [320, 220, 480, 260]), _sp(2, "大阪府岸和田市", [320, 265, 480, 300]),
-         _sp(3, "春木若松町1026-56", [320, 305, 480, 340])],
-    )
-    assert report.dropped == {"customer_address": "address_field"}
-
-
-def test_address_field_会社名の項目が住所を指したら_kind_conflict_が先(monkeypatch) -> None:
-    """作者には「種類が合わない（例示: 会社 / 候補: 住所）」の方が役に立つ。"""
-    monkeypatch.setenv("REGION_KIE_HINTS", "1")
-    schema = _field_schema("customer_name", "string", "株式会社千曲川ホーム")
-    _, report = llm_nodes.build_region_hints(
-        schema, _PAGES_1, [_sp(1, "東京都千代田区住所1", [320, 220, 480, 260])]
-    )
-    assert report.dropped == {"customer_name": "kind_conflict"}
-
-
-def test_address_field_人名や会社名の候補は落とさない(monkeypatch) -> None:
-    monkeypatch.setenv("REGION_KIE_HINTS", "1")
-    schema = _field_schema("customer_name", "string")
-    _, report = llm_nodes.build_region_hints(
-        schema, _PAGES_1, [_sp(1, "大島捆包輸送株式会社御中", [320, 220, 480, 260])]
-    )
-    assert report.dropped == {}
-    schema2 = _field_schema("customer_name", "string")
-    _, report2 = llm_nodes.build_region_hints(schema2, _PAGES_1, [_sp(1, "矢部 隆司", [320, 220, 480, 260])])
-    assert report2.dropped == {}
-
-
 def test_kind_conflict_同じ種類の候補が1つでもあれば落とさない(monkeypatch) -> None:
     monkeypatch.setenv("REGION_KIE_HINTS", "1")
     schema = _field_schema("customer_name", "string", "株式会社千曲川ホーム")

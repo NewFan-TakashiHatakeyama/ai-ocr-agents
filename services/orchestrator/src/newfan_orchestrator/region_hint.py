@@ -54,11 +54,6 @@ REASON_NO_SPANS = "no_spans_in_region"
 REASON_OVERLAPS_EXCLUDE = "overlaps_exclude"
 REASON_TYPE_MISMATCH = "type_mismatch"
 REASON_KIND_CONFLICT = "kind_conflict"
-# 住所（複数行にまたがる値）にはヒントを渡さない。第 3 回計測（2026-09-12）の S1 で、
-# 住所だけは候補の中から取って（followed）なお不正解が増えた（対照のみ正解 18 / 介入のみ 5、
-# p = 0.011）── 複数行の一部だけを取って切り詰める。名前は同じ計測で 4 / 35（p < 1e-6）
-# 改善しているので、項目の種類で分ける（設計 v2 §4.4 が「第 3 回の計測で決める」とした点）。
-REASON_ADDRESS_FIELD = "address_field"
 
 BBox = list[int]
 
@@ -255,9 +250,6 @@ def prevalidate(
       ものが無い。連結を見るのは日付が「令和」「5年」「5月」「1日」に割れるため
       （単体で見ると全部落ちる。R6）
     - kind_conflict: 例示値と候補の種類が衝突する（sample8: 会社名の項目に建物名）
-    - address_field: 例示値か候補（連結）が住所。複数行の値はヒントが害になる
-      （第 3 回計測 S1）。kind_conflict より後ろに置くのは、会社名の項目が住所を指した
-      ときに「種類が合わない」と伝える方が作者に役立つため
     """
     if not cands:
         if rect_overlaps_any(region_px, exclude_px):
@@ -272,25 +264,9 @@ def prevalidate(
         ):
             return REASON_TYPE_MISMATCH
     # 連結の判定（kinds_conflict / example_present）は読み順で渡す
-    in_order = [s.text for s in sorted(cands, key=lambda x: x.span_id)]
-    if kinds_conflict(example_value, in_order):
+    if kinds_conflict(example_value, [s.text for s in sorted(cands, key=lambda x: x.span_id)]):
         return REASON_KIND_CONFLICT
-    if is_address_hint(example_value, in_order):
-        return REASON_ADDRESS_FIELD
     return None
-
-
-def is_address_hint(example_value: Optional[str], candidate_texts: list[str]) -> bool:
-    """ヒントが指す値が住所か（例示値、無ければ候補の連結で判定）。
-
-    例示値があるときは例示値だけで決める（テンプレート元でその位置が住所なら、この帳票で
-    何があっても住所項目のヒントとして扱う）。無いときは候補を読み順で連結して分類する。
-    """
-    if example_value:
-        return classify_kind(example_value) == "address"
-    if not candidate_texts:
-        return False
-    return classify_kind(" ".join(candidate_texts)) == "address"
 
 
 def example_present(example_value: Optional[str], cands: list[Span]) -> bool:
