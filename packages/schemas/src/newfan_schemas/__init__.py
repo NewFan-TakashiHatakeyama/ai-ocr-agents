@@ -27,8 +27,10 @@ from newfan_schemas.field_schema import (
     check_field_name,
     resolve_page,
     resolve_regions,
+    sanitize_example_value,
 )
 from newfan_schemas.enums import DocStatus, FieldType, ReviewStatus, RunStatus, SpanSource
+from newfan_schemas.textnorm import norm_key
 
 __all__ = [
     "Span",
@@ -51,6 +53,8 @@ __all__ = [
     "check_field_name",
     "resolve_page",
     "resolve_regions",
+    "norm_key",
+    "sanitize_example_value",
     "FieldType",
     "SpanSource",
     "ReviewStatus",

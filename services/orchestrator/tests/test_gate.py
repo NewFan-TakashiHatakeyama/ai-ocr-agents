@@ -492,3 +492,36 @@ def test_解消した_mismatch_が前回実行から残らない(monkeypatch) ->
     assert "mismatch_fields" not in region, region
     assert "layout_mismatch" not in region, region
     assert region["excluded_spans"] == 1  # 除外件数は消さない
+
+
+def test_hints_outcomes_があっても_review_items_は空で_finalize_のまま(monkeypatch) -> None:
+    """読取領域ヒントの観測（設計 v2 §2.5 / D17）は metrics に残すだけ。
+
+    「従った／捨てた」「落とした理由」を検証画面に参考表示するようになっても、
+    レビュー件数・確信度・run status には一切触らない。kie_extract ノードが書いた
+    ``metrics.region.hints`` は gate を素通りし、消されもしない。
+    """
+    monkeypatch.delenv("REGION_GUARD_ENFORCE", raising=False)
+    from newfan_orchestrator import nodes
+
+    hints = {
+        "given": ["title"],
+        "dropped": {"customer_name": "kind_conflict"},
+        "truncated": {"title": 2},
+        "outcomes": {"title": "rejected"},
+    }
+    before = _good_field()
+    out = _gate(
+        {
+            "schema": _REGION_SCHEMA,
+            "fields": [_good_field()],
+            "pages": _PAGES,
+            "source_page_count": 1,
+            "metrics": {"region": {"hints": hints}},
+        }
+    )
+    assert out["review_items"] == []
+    assert out["fields"][0].confidence == before.confidence
+    assert out["fields"][0].review_status.value != "pending"
+    assert nodes.route_confidence_gate(out) == "finalize"
+    assert out["metrics"]["region"]["hints"] == hints  # gate は hints を触らない

@@ -24,45 +24,76 @@ class KieResult:
     tables: list[TableResult] = field(default_factory=list)
     unmapped_required: list[str] = field(default_factory=list)
     response: LLMResponse | None = None
+    # 読取領域ヒントを持つ項目ごとの「従った／捨てた」（設計 v2 D15）。ExtractedField
+    # にも DB 列にも載せない。orchestrator が metrics.region.hints.outcomes に写す。
+    hint_outcomes: dict[str, str] = field(default_factory=dict)
 
 
-def _spans_for_prompt(spans: list[Span], *, with_bbox: bool = False) -> str:
-    """span 一覧を JSON 化する。
+# 従った／捨てた（hint_outcomes の値）
+HINT_FOLLOWED = "followed"
+HINT_PARTIAL = "partial"
+HINT_REJECTED = "rejected"
 
-    ``with_bbox`` は **読取領域のヒントを渡すときだけ** True にする。座標を常に載せると
-    領域を使っていないスキーマまでプロンプトが膨らみ（span 1 件あたり 4 数値ぶん）、
-    「領域機能を使っていない run の挙動は一切変わらない」という受け入れ条件も壊れる。
-    ヒントが無ければ LLM は座標を照合しようがないので、載せる意味も無い。
+
+def _spans_for_prompt(spans: list[Span]) -> str:
+    """span 一覧を JSON 化する（span_id / page / text / conf のみ）。
+
+    座標は載せない。読取領域のヒントは矩形ではなく **候補 span の id と原文**
+    （``region_hint.candidates``）として渡すので（設計 v2 D13）、LLM が座標を照合する
+    場面が無い。以前の「ヒント有りのときだけ全 span に bbox を付ける」方式は、
+    プロンプトが膨らむうえに矩形の注入と座標付与の効果を分離できなかった。
     """
-    if not with_bbox:
-        return json.dumps(
-            [
-                {"span_id": s.span_id, "page": s.page, "text": s.text, "conf": round(s.conf, 3)}
-                for s in spans
-            ],
-            ensure_ascii=False,
-        )
     return json.dumps(
         [
-            {
-                "span_id": s.span_id,
-                "page": s.page,
-                "text": s.text,
-                "conf": round(s.conf, 3),
-                "bbox": list(s.bbox) if s.bbox else None,
-            }
+            {"span_id": s.span_id, "page": s.page, "text": s.text, "conf": round(s.conf, 3)}
             for s in spans
         ],
         ensure_ascii=False,
     )
 
 
-def _has_region_hint(schema_json: dict[str, Any]) -> bool:
-    """スキーマに region_px（読取領域のヒント）を持つ field があるか。"""
+def _region_hint_candidates(schema_json: dict[str, Any]) -> dict[str, list[int]]:
+    """``region_hint`` を持つ field ごとの候補 span_id（設計 v2 §2.5）。"""
+    out: dict[str, list[int]] = {}
     for f in schema_json.get("fields") or []:
-        if isinstance(f, dict) and f.get("region_px"):
-            return True
-    return False
+        if not isinstance(f, dict):
+            continue
+        hint = f.get("region_hint")
+        name = f.get("name")
+        if not isinstance(hint, dict) or not name:
+            continue
+        ids: list[int] = []
+        for c in hint.get("candidates") or []:
+            sid = c.get("span_id") if isinstance(c, dict) else None
+            if isinstance(sid, int) and not isinstance(sid, bool):
+                ids.append(sid)
+        out[str(name)] = ids
+    return out
+
+
+def _has_region_hint(schema_json: dict[str, Any]) -> bool:
+    """スキーマに region_hint（読取領域のヒント）を持つ field があるか。"""
+    return bool(_region_hint_candidates(schema_json))
+
+
+def hint_outcome(chosen_span_ids: list[int], candidate_ids: list[int]) -> str:
+    """span_ids と候補 id の集合演算で「従った／捨てた」を決める（設計 v2 D15）。
+
+    モデルに申告させない（本体テンプレートの出力例に無いキーを付録で要求しても
+    従わないし、申告漏れも嘘も起こり得る）。集合演算なら決定論で決まる。
+
+    - followed: chosen ⊆ candidates（空でない）
+    - partial : 共通部分はあるが候補外の span も含む
+    - rejected: 共通部分なし。別の場所から取った。根拠 span が無い（value=null /
+      捏造 id のみ）場合も候補から取っていないのでここに数える
+    """
+    chosen = set(chosen_span_ids)
+    cands = set(candidate_ids)
+    if chosen and chosen <= cands:
+        return HINT_FOLLOWED
+    if chosen & cands:
+        return HINT_PARTIAL
+    return HINT_REJECTED
 
 
 def _valid_span_ids(raw: Any, span_map: dict[int, Span]) -> list[int]:
@@ -138,18 +169,17 @@ def kie_extract(
         if isinstance(f, dict)
     }
     system = "あなたは帳票からの項目抽出エンジンです。出力はJSONのみ。"
-    with_hint = _has_region_hint(schema_json)
+    hint_candidates = _region_hint_candidates(schema_json)
     user = render(
         bundle.kie_template,
         {
             "layout_markdown": layout_markdown,
-            # 領域ヒントを渡すときだけ span にも座標を載せる（照合できるようにする）
-            "spans": _spans_for_prompt(spans, with_bbox=with_hint),
+            "spans": _spans_for_prompt(spans),
             "schema_json": json.dumps(schema_json, ensure_ascii=False),
             "rule_hints": rule_hints,
         },
     )
-    if with_hint:
+    if hint_candidates:
         # 領域ヒントの説明は**ヒントを持つ run にだけ**足す。テンプレート本体に
         # 書くと、領域を使っていないテナントのプロンプトまで変わってしまう。
         user = user + bundle.kie_region_hint_template
@@ -219,4 +249,15 @@ def kie_extract(
         result.tables.append(TableResult(name=table.get("name", "table"), rows=rows))
 
     result.unmapped_required = [str(x) for x in (data.get("unmapped_required") or [])]
+
+    # 従った／捨てた（D15）。region_hint を持つ項目ごとに、検証済み span_ids と候補 id の
+    # 集合演算で決める。同名の重複はスキーマ指定では起きない（起きても最初の項目を見る）。
+    if hint_candidates:
+        chosen_by_name: dict[str, list[int]] = {}
+        for f in result.fields:
+            chosen_by_name.setdefault(f.name, f.span_ids)
+        result.hint_outcomes = {
+            name: hint_outcome(chosen_by_name.get(name, []), ids)
+            for name, ids in hint_candidates.items()
+        }
     return result
