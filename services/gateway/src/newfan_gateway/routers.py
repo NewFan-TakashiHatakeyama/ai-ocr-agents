@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, U
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
-from newfan_schemas import resolve_regions
+from newfan_schemas import check_field_name, resolve_regions
 from newfan_workflow import WorkflowGraph, build_candidate, catalog, classify_text, has_errors, lint
 from newfan_workflow.lint import Finding
 from pydantic import ValidationError
@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from newfan_gateway import dto
 from newfan_gateway.auth import Principal
 from newfan_gateway.chat import ChatAgent
+from newfan_gateway.chat_tools import field_validation_message
 from newfan_gateway.config import Settings
 from newfan_gateway.admin import AdminRepository, is_activatable
 from newfan_gateway.deps import (
@@ -873,6 +874,15 @@ def put_schema(
     # 「どのページのどこを読むか」の指定にならず、全ページに同座標を当てる意図とも
     # 区別できないため。exclude は page:null（全ページ）が正当な指定。
     for f in body.fields:
+        # 予約名（__pages__ / __region__ / 先頭 __）は集約 ReviewItem の擬似 field 名と
+        # 衝突する（設計 region-field-add-and-hint-v2 D9）。SchemaFieldDef の validator
+        # でも落ちるが、そこで落とすと pydantic の ValidationError が未捕捉 500 になる。
+        # DTO（SchemaFieldDto）に validator を置くと FastAPI の 422 形式で返ってしまい
+        # プロジェクトのエラー封筒（E1003）にならないので、ここで明示的に検査する。
+        try:
+            check_field_name(f.name)
+        except ValueError as exc:
+            raise ApiError("E1003", str(exc), details={"field": f.name}) from exc
         if f.region is not None and f.region.page is None:
             raise ApiError(
                 "E1003",
@@ -1757,7 +1767,12 @@ def chat_confirm(
         fields = list(cur.fields) if cur else []
         if any(f.name == fld.get("name") for f in fields):
             return dto.ChatConfirmResult(ok=False, message="同名の項目が既に存在します。")
-        fields.append(SchemaFieldDef(**fld))
+        # LLM 由来の dict なので予約名（D9）や型違いが来る。素通しすると ValidationError
+        # が未捕捉 500 になり、会話が「内部エラー」で途切れる。
+        try:
+            fields.append(SchemaFieldDef(**fld))
+        except ValidationError as exc:
+            return dto.ChatConfirmResult(ok=False, message=field_validation_message(exc))
         rec = admin.put_schema(principal.tenant_id, doc_type, fields)
         return dto.ChatConfirmResult(
             ok=True,

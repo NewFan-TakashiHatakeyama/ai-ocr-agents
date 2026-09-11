@@ -71,6 +71,13 @@ export interface RegionRect {
   page?: number | "last" | null;
   rect: [number, number, number, number];
   label?: string | null;
+  // --- 以下、読取領域のみ（除外領域では未使用）。設計 region-field-add-and-hint-v2 §2.3 ---
+  /** テンプレート元の帳票でこの領域にあった span の原文（正規化しない）。帳票の値であり個人名を含み得る */
+  example_value?: string | null;
+  /** 領域の出どころ。ghost = AI が見つけた位置をクリックで採った / manual = 手描き */
+  origin?: "ghost" | "manual" | null;
+  /** ISO 8601。ヒント有効化前に引かれた領域を識別する */
+  created_at?: string | null;
 }
 
 /** サーバ側でページ番号まで解決済みの領域（検証画面のオーバーレイ用）。 */

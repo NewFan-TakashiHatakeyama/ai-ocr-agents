@@ -184,6 +184,80 @@ def test_get_schema_by_id_matches_real_ddl() -> None:
             c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": rec.id})
 
 
+def test_pg_region_hint_fields_roundtrip_jsonb() -> None:
+    """example_value / origin / created_at が fields JSONB を経由して戻ること。
+
+    設計 region-field-add-and-hint-v2 §2.3。InMemory はモデルをそのまま持つので
+    JSONB の直列化（``schema_fields_payload``）→ ``SchemaFieldDef.model_validate``
+    の経路は実 Pg でしか通らない。3 項目のキーが無い旧 JSONB も読めることを併せて見る。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_gateway.records import SchemaFieldDef
+    from newfan_schemas import RegionRect
+
+    admin = PgAdminRepository(_DSN)  # type: ignore[arg-type]
+    tenant = "ten_test"
+    doc_type = f"hint_probe_{uuid.uuid4().hex[:8]}"
+    with admin._engine.begin() as c:  # noqa: SLF001 - テスト用の前提データ投入
+        c.execute(
+            text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+            {"i": tenant, "n": "test"},
+        )
+    hinted = RegionRect(
+        page=1,
+        rect=[0.30, 0.02, 0.72, 0.09],
+        example_value="株式会社千曲川ホーム",
+        origin="ghost",
+        created_at="2026-09-11T00:00:00Z",
+    )
+    made: list[str] = []
+    try:
+        rec = admin.put_schema(
+            tenant,
+            doc_type,
+            [
+                SchemaFieldDef(name="issuer", type="string", region=hinted),
+                SchemaFieldDef(
+                    name="total", type="money_jpy",
+                    region=RegionRect(page="last", rect=[0.65, 0.80, 0.95, 0.88]),
+                ),
+            ],
+        )
+        made.append(rec.id)
+        for got in (admin.get_schema(tenant, doc_type), admin.get_schema_by_id(tenant, rec.id)):
+            assert got is not None
+            by_name = {f.name: f for f in got.fields}
+            assert by_name["issuer"].region == hinted
+            plain = by_name["total"].region
+            assert plain is not None and plain.page == "last"
+            assert (plain.example_value, plain.origin, plain.created_at) == (None, None, None)
+
+        # 旧世代の JSONB（region に 3 項目のキー自体が無い）も読める
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(
+                text("UPDATE field_schemas SET fields = CAST(:f AS jsonb) WHERE id=:i"),
+                {
+                    "f": '[{"name": "issuer", "label": null, "type": "string", "required": false,'
+                    ' "critical": false, "columns": null,'
+                    ' "region": {"page": 1, "rect": [0.3, 0.02, 0.72, 0.09], "label": null}}]',
+                    "i": rec.id,
+                },
+            )
+        legacy = admin.get_schema_by_id(tenant, rec.id)
+        assert legacy is not None
+        region = legacy.fields[0].region
+        assert region is not None and region.rect == [0.3, 0.02, 0.72, 0.09]
+        assert (region.example_value, region.origin, region.created_at) == (None, None, None)
+    finally:
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            for sid in made:
+                c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": sid})
+
+
 def test_pg_put_schema_legacy_put_inherits_exclude_regions() -> None:
     """exclude_regions の引き継ぎが**実 Pg の SQL で**成立すること（設計 §4.4 / C22）。
 
