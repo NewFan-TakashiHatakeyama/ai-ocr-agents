@@ -426,6 +426,8 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         ];
       }),
   ];
+  // 有効化前に引かれた領域（§1.5）。サーバが created_at で判定した項目名の写し
+  const hintPreActivation = hints.pre_activation ?? [];
   // 編集対象の doc_type は「サーバが解決した doc_type → このセッションで作成した
   // doc_type」の順。どちらも取れないときは編集させない（空のプリロードで保存すると
   // 既存の定義を空の新版で上書きしてしまう）。
@@ -535,6 +537,23 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             }
           >
             📍 ヒントを捨てた {hintDiscarded.length} 項目（参考）
+          </span>
+        )}
+        {hintPreActivation.length > 0 && (
+          // 有効化前（既定 off の期間）に引かれた領域が、既定 on にした瞬間に初めてヒントとして
+          // 使われ始める。作者はその意味で検証していないので区別して見せる（§1.5 / §2.8・R20）。
+          // 参考表示に閉じる: レビュー件数・確信度には触らない
+          <span
+            className="rv-rgnbadge"
+            title={
+              `有効化前に引かれた領域を持つ項目: ${hintPreActivation.map(labelOfField).join("・")}\n` +
+              "これらの読取領域は、位置ヒントが有効になる前（2026-09-12 より前）に引かれたもので、" +
+              "作成者はヒントとしての効果を確認していません。値が想定と違えば、テンプレート化画面で" +
+              "領域を引き直してください。" +
+              NOTE_NO_EFFECT
+            }
+          >
+            📍 有効化前に引かれた領域 {hintPreActivation.length} 項目（参考）
           </span>
         )}
         {canEditRegions && (

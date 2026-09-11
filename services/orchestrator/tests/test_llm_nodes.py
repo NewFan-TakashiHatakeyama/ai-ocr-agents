@@ -190,10 +190,12 @@ def test_schema_for_prompt_handles_malformed_fields() -> None:
     assert out["fields"] == ["junk", {"name": "a"}]
 
 
-# ---------- 読取領域を KIE ヒントとして渡す（既定 off・計測ゲート付き） ----------
+# ---------- 読取領域を KIE ヒントとして渡す（既定 on・REGION_KIE_HINTS はキルスイッチ） ----------
 #
 # 設計 region-field-add-and-hint-v2 §2.5〜§2.7 / D13〜D16。ヒントは矩形ではなく
 # 「矩形の中にある span の候補列」として渡し、渡す前に決定論で落とす。
+# 第 3 回計測（2026-09-12）で出荷ゲートを通し既定 on（§2.10）。各テストで setenv "1" と
+# しているのは「on を明示」で、未設定でも同じ結果になる（フラグの意味は下の表で固定）。
 
 _PAGES_1 = [{"page_no": 1, "width": 1000, "height": 2000}]
 _PAGES_3 = [
@@ -227,11 +229,38 @@ _IN = _sp(11, "¥128,000", [320, 220, 480, 260])  # 矩形の中
 _OUT = _sp(12, "備考", [10, 1500, 200, 1540])  # 矩形の外
 
 
-def test_ヒント既定offならプロンプトは現行と完全一致(monkeypatch) -> None:
-    """設計の約束は「精度改善を実測できた場合のみ出荷」。既定では領域を持つ
-    スキーマでも現行と 1 バイトも変わらず、metrics にも触らないこと。
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, True),  # 未設定 → on（既定）
+        ("", True),  # 空文字 → on（compose の `${REGION_KIE_HINTS:-}` が渡す値）
+        ("0", False),
+        ("false", False),
+        ("OFF", False),  # 大小文字を無視
+        ("no", False),
+        (" off ", False),  # 前後空白を無視
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+        ("anything-else", True),  # 未知の値は止めない（キルスイッチは明示の否定だけ）
+    ],
+)
+def test_フラグは未設定onで否定値だけがキルスイッチ(monkeypatch, value, expected) -> None:
+    """設計 v2 §2.10 / R19。既定 on を「コードで反転するだけ」にすると explicit off が
+    効かない。未設定・空・肯定値・未知の値は on、否定値だけ off。"""
+    if value is None:
+        monkeypatch.delenv("REGION_KIE_HINTS", raising=False)
+    else:
+        monkeypatch.setenv("REGION_KIE_HINTS", value)
+    assert llm_nodes.region_hints_enabled() is expected
+
+
+def test_キルスイッチoffならプロンプトは現行と完全一致(monkeypatch) -> None:
+    """``REGION_KIE_HINTS=0`` で止めたとき、領域を持つスキーマでもヒント導入前と
+    1 バイトも変わらず、metrics にも触らないこと（ロールバック経路の保証）。
     """
-    monkeypatch.delenv("REGION_KIE_HINTS", raising=False)
+    monkeypatch.setenv("REGION_KIE_HINTS", "0")
     baseline = _kie_prompt(
         {"doc_type": "invoice", "fields": [
             {"name": "total_amount", "type": "money_jpy"}, {"name": "memo", "type": "string"}]}
@@ -298,6 +327,70 @@ def test_例示値は渡す直前にも消毒する(monkeypatch) -> None:
     schema2 = _field_schema("customer_name", "string", "\x00\x07")
     out2, _ = llm_nodes.build_region_hints(schema2, _PAGES_1, [_sp(1, "何か", [320, 220, 480, 260])])
     assert out2["fields"][0]["region_hint"]["example_value"] is None
+
+
+# ---------- 有効化前に引かれた領域（設計 v2 §1.5 / §2.8・R20） ----------
+#
+# off の期間に引かれた領域は、既定 on にした瞬間に初めてヒントとして使われる。作者は
+# その意味で検証していないので、created_at で識別して検証画面の参考表示で区別する。
+
+
+def _schema_created_at(created_at: object) -> dict:
+    region: dict = {"page": 1, "rect": [0.3, 0.1, 0.7, 0.2]}
+    if created_at is not None:
+        region["created_at"] = created_at
+    return {"doc_type": "invoice", "fields": [{"name": "total_amount", "type": "money_jpy", "region": region}]}
+
+
+@pytest.mark.parametrize(
+    ("created_at", "listed"),
+    [
+        (None, True),  # 列が無い ＝ 有効化前のデータ
+        ("", True),
+        ("2026-09-11T23:59:59Z", True),  # 有効化の直前
+        ("2026-09-12T00:00:00Z", False),  # 有効化の時刻ちょうど → 有効化後
+        ("2026-09-13T09:00:00Z", False),
+        ("2026-09-13T09:00:00+09:00", False),  # tz 付きは UTC に読み替えて比べる
+        ("2026-09-12T08:59:00+09:00", True),  # JST 08:59 = UTC 前日 23:59 → 有効化前
+        ("2026-09-13", False),  # 日付のみ（naive）は UTC とみなす
+        ("garbage", True),  # 解釈できないものは「有効化前」に倒す（黙って使う側に倒さない）
+        (12345, True),  # 文字列でないものも同じ
+    ],
+)
+def test_created_at_で有効化前に引かれた領域を識別する(monkeypatch, created_at, listed) -> None:
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    _, report = llm_nodes.build_region_hints(_schema_created_at(created_at), _PAGES_1, [_IN])
+    assert report.given == ["total_amount"]
+    assert report.pre_activation == (["total_amount"] if listed else [])
+    assert report.as_dict()["pre_activation"] == report.pre_activation
+
+
+def test_有効化前の判定は_dropped_の項目にも付く(monkeypatch) -> None:
+    """「評価した項目」＝ given か dropped。落とした項目も有効化前なら載せる
+    （落とした理由と一緒に見せるため）。"""
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    _, report = llm_nodes.build_region_hints(_schema_created_at(None), _PAGES_1, [_OUT])
+    assert report.dropped == {"total_amount": "no_spans_in_region"}
+    assert report.pre_activation == ["total_amount"]
+
+
+def test_キルスイッチoffでは有効化前の判定もしない(monkeypatch) -> None:
+    """off のときは given / dropped と同じく何も評価しない（metrics も書かない）。"""
+    monkeypatch.setenv("REGION_KIE_HINTS", "0")
+    _, report = llm_nodes.build_region_hints(_schema_created_at(None), _PAGES_1, [_IN])
+    assert not report and report.pre_activation == []
+
+
+def test_明細フィールドは有効化前の判定の対象外(monkeypatch) -> None:
+    """ヒントを評価しない項目（columns 持ち）は pre_activation にも載せない。"""
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    schema = {
+        "doc_type": "invoice",
+        "fields": [{"name": "line_items", "type": "table", "columns": [{"name": "item", "type": "string"}],
+                    "region": {"page": 1, "rect": [0.1, 0.4, 0.9, 0.8]}}],
+    }
+    _, report = llm_nodes.build_region_hints(schema, _PAGES_1, [_sp(1, "品名", [200, 900, 300, 940])])
+    assert not report and report.pre_activation == []
 
 
 @pytest.mark.parametrize(
@@ -590,7 +683,8 @@ def test_metrics_に理由と結果が残り再実行で書き直され既存の
                     "excluded_spans": 3,
                     "mismatch_fields": ["x"],
                     "hints": {"given": ["stale"], "dropped": {"stale2": "no_spans_in_region"},
-                              "truncated": {"stale": 9}, "outcomes": {"stale": "followed"}},
+                              "truncated": {"stale": 9}, "outcomes": {"stale": "followed"},
+                              "pre_activation": ["stale"]},
                 },
                 "other": 1,
             },
@@ -608,6 +702,8 @@ def test_metrics_に理由と結果が残り再実行で書き直され既存の
             "total_amount": {"example_value": None, "candidates": ["¥128,000"]},
             "customer_name": {"example_value": "株式会社千曲川ホーム", "candidates": ["大熊邸"]},
         },
+        # created_at の無い領域は 3 つとも「有効化前」。given / dropped のどちらでも載る
+        "pre_activation": ["total_amount", "customer_name", "issue_date"],
     }
 
 
@@ -662,6 +758,9 @@ def test_領域を使わないプロンプトはスナップショットと完�
     kie_extract.yaml へヒント文を足してしまい、ヒント off でも全テナントのプロンプトが
     1016 バイト変わった状態に気付けなかった。テンプレートは全 KIE 呼び出しが読むので、
     領域を 1 つも使っていないテナントまで巻き込む。外部の固定値で縛る。
+
+    フラグ未設定＝**既定（on）**で走らせる。領域を持たないスキーマは既定 on でも
+    ヒント導入前のスナップショットと一致すること（出荷ゲート G5）。
     """
     import pathlib
 
@@ -683,11 +782,12 @@ def test_領域を使わないプロンプトはスナップショットと完�
     assert got_user == want_user, "領域を使わない run のプロンプトが変わっている"
 
 
-def test_ヒント有効でも領域なしスキーマのプロンプトは変わらない(monkeypatch) -> None:
-    """フラグを立てても、領域を持たないスキーマには何も足さない。"""
+def test_キルスイッチoffでも領域なしスキーマのプロンプトは変わらない(monkeypatch) -> None:
+    """止めても、領域を持たないスキーマのプロンプトは既定（on）のときと同じ
+    スナップショット。on / off の両方で領域なしテナントの挙動不変を固定する。"""
     import pathlib
 
-    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    monkeypatch.setenv("REGION_KIE_HINTS", "0")
     snap = pathlib.Path(__file__).parent / "snapshots" / "kie_prompt_no_region.txt"
     _, want_user = snap.read_text(encoding="utf-8").split("\n---8<---\n", 1)
 

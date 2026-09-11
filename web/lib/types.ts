@@ -118,7 +118,9 @@ export interface RegionStats {
 }
 
 /** ヒントの内訳。given は渡した項目、dropped は渡す前に落とした項目と理由、
- *  outcomes は LLM が従ったか（span_ids と候補の集合演算。モデルの申告ではない）。 */
+ *  outcomes は LLM が従ったか（span_ids と候補の集合演算。モデルの申告ではない）。
+ *  pre_activation は評価した項目のうち、領域がヒント有効化（2026-09-12）より前に
+ *  引かれたもの（created_at が無い・古い。§1.5）。参考表示にしか使わない。 */
 export interface RegionHintStats {
   given?: string[];
   dropped?: Record<string, string>;
@@ -126,6 +128,7 @@ export interface RegionHintStats {
   outcomes?: Record<string, "followed" | "partial" | "rejected" | "no_evidence" | string>;
   /** 項目名 → 例示値と候補の原文（先頭数件、各 40 字まで）。参考表示の title 用 */
   detail?: Record<string, { example_value?: string | null; candidates?: string[] }>;
+  pre_activation?: string[];
 }
 
 export interface DocumentMeta {

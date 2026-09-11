@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from dataclasses import field as dc_field
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from newfan_llm_adapter import LLMAdapter, PromptBundle, kie_extract, llm_correct
@@ -42,13 +43,28 @@ def _rule_hints(active_rules: list[dict[str, Any]]) -> str:
     return "\n".join(h for h in hints if h)
 
 
-def region_hints_enabled() -> bool:
-    """読取領域を KIE プロンプトのヒントとして渡すか（Phase 4・既定 off）。
+#: 読取領域ヒントを既定 on にした時点（設計 v2 §1.5 / §2.8）。これより前に
+#: 引かれた領域（``created_at`` が無い・これより古い）は、作者がヒントとしての効果を
+#: 確認していないので、検証画面で「有効化前に引かれた領域」として区別して見せる。
+REGION_HINTS_ACTIVATED_AT = "2026-09-12T00:00:00Z"
+_REGION_HINTS_ACTIVATED_DT = datetime.fromisoformat(
+    REGION_HINTS_ACTIVATED_AT.replace("Z", "+00:00")
+)
 
-    設計の約束は「fixture ベースの精度計測で改善が確認できた場合のみ出荷」。
-    実装は入れておき、**計測で改善を示せるまで既定 off** にする。
+
+def region_hints_enabled() -> bool:
+    """読取領域を KIE プロンプトのヒントとして渡すか（設計 v2 §2.10・**既定 on**）。
+
+    出荷ゲート（§3 G1〜G6）を第 3 回計測（2026-09-12）で通したので既定 on にした。
+    環境変数 ``REGION_KIE_HINTS`` は**キルスイッチ**である: 未設定・空文字は on、
+    ``0`` / ``false`` / ``no`` / ``off``（大小文字・前後空白を無視）だけが off。
+    それ以外の値（``1`` / ``true`` 等）は on。
+
+    以前の実装は ``("1","true","yes","on")`` に入るときだけ on だったため、既定を
+    コードで反転するだけでは explicit off が効かなかった（R19）。ここで意味を反転する。
     """
-    return os.environ.get("REGION_KIE_HINTS", "").lower() in ("1", "true", "yes", "on")
+    value = os.environ.get("REGION_KIE_HINTS", "").strip().lower()
+    return value not in ("0", "false", "no", "off")
 
 
 def _hint_page_no(region: dict[str, Any], page_count: int) -> Optional[int]:
@@ -94,6 +110,28 @@ def _region_px(region: dict[str, Any], pages: list[dict[str, Any]]) -> Optional[
     }
 
 
+def _is_pre_activation(created_at: Any) -> bool:
+    """領域が ``REGION_HINTS_ACTIVATED_AT`` より前に引かれたものか（設計 v2 §1.5）。
+
+    ``created_at`` は RegionRect が tz 付き UTC の ISO 8601（末尾 Z）に正規化して保存
+    するが、JSONB は検査導入前のデータや手修正で規則を素通りし得る。**無い・解釈できない
+    ものは「有効化前」に倒す**（列を足したのが有効化と同じ設計なので、無い＝古い。
+    解釈できないものを「有効化後」と見なすと注記が消えて、作者が確認していない領域が
+    黙って使われる側に倒れる）。
+    """
+    if not isinstance(created_at, str) or not created_at.strip():
+        return True
+    raw = created_at.strip()
+    probe = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+    try:
+        dt = datetime.fromisoformat(probe)
+    except ValueError:
+        return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt < _REGION_HINTS_ACTIVATED_DT
+
+
 @dataclass
 class HintReport:
     """``metrics.region.hints`` に載せる観測値（設計 §2.5）。
@@ -105,6 +143,9 @@ class HintReport:
     - detail: 項目名 → 例示値と候補の原文（先頭数件）。検証画面の参考表示（§2.8）が
       「種類が合わない（例示: 株式会社〜 / 候補: 大熊邸）」と**何と何が合わなかったか**を
       出すため。理由の定数だけでは、テンプレートの作者が領域を引き直す判断ができない
+    - pre_activation: 評価した（given か dropped に載った）項目のうち、領域の
+      ``created_at`` が無い・``REGION_HINTS_ACTIVATED_AT`` より前のもの（§1.5 / §2.8）。
+      検証画面の**参考表示だけ**に使う。レビュー件数・確信度には触らない
     """
 
     given: list[str] = dc_field(default_factory=list)
@@ -112,6 +153,7 @@ class HintReport:
     truncated: dict[str, int] = dc_field(default_factory=dict)
     outcomes: dict[str, str] = dc_field(default_factory=dict)
     detail: dict[str, dict[str, Any]] = dc_field(default_factory=dict)
+    pre_activation: list[str] = dc_field(default_factory=list)
 
     def __bool__(self) -> bool:
         """領域を持つ項目が 1 つでも評価されたか（given か dropped に載る）。"""
@@ -124,6 +166,7 @@ class HintReport:
             "truncated": dict(self.truncated),
             "outcomes": dict(self.outcomes),
             "detail": {k: dict(v) for k, v in self.detail.items()},
+            "pre_activation": list(self.pre_activation),
         }
 
 
@@ -158,11 +201,12 @@ def build_region_hints(
     だけでプロンプトが変わる（＝抽出結果が変わり得る）。よって ``region`` キーは
     **必ず落とす**。
 
-    ヒントを有効化しているとき（既定 off）に限り、代わりに ``region_hint`` を載せる:
-    矩形の中にある span の候補列（id と原文）・例示値・例示値が候補にあるか（D13）。
-    渡す前に決定論の事前ガード（``region_hint.prevalidate``）で落とし、落とした理由・
-    切った候補数は report に残す（D14）。``spans`` を省略した呼び出し（旧来の
-    呼び方）ではヒントを付けない。
+    ヒントが有効なとき（既定 on。``REGION_KIE_HINTS`` はキルスイッチ）に限り、代わりに
+    ``region_hint`` を載せる: 矩形の中にある span の候補列（id と原文）・例示値・
+    例示値が候補にあるか（D13）。渡す前に決定論の事前ガード（``region_hint.prevalidate``）
+    で落とし、落とした理由・切った候補数は report に残す（D14）。評価した項目のうち
+    領域が有効化前に引かれたもの（``created_at`` が無い・古い）は ``pre_activation`` に
+    残す（§1.5）。``spans`` を省略した呼び出し（旧来の呼び方）ではヒントを付けない。
 
     **領域を持たない field には何も足さない**ので、領域を使っていないスキーマの
     プロンプトはヒント有効化後も現行と 1 バイトも変わらない。
@@ -192,6 +236,10 @@ def build_region_hints(
         # name の無い field は metrics に記録しない（"" キーで上書きし合うだけで意味が無い）
         if hint and isinstance(region, dict) and not f.get("columns") and f.get("name"):
             name = str(f["name"])
+            # 評価した項目（この先 given か dropped のどちらかに必ず載る）のうち、
+            # 有効化前に引かれた領域を先に控える。参考表示（§2.8）にしか使わない
+            if _is_pre_activation(region.get("created_at")):
+                report.pre_activation.append(name)
             px = _region_px(region, page_list)
             if px is None:
                 report.dropped[name] = (
