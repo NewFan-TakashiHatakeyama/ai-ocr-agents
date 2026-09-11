@@ -102,12 +102,13 @@ jobs:
         run: uv run --no-sync python golden/scripts/check_critical.py
 
   web:
-    name: web (typecheck / build)
+    name: web (typecheck / test / build)
     runs-on: ubuntu-latest
     # web には自動テストが 1 本も無く、CI にも載っていなかった。検証画面の変更が
     # 機械的に守られないと、型が合わない・ビルドが通らない状態でマージできてしまう。
     # `next lint` は入れない: eslint の依存も設定ファイルも無く、対話セットアップを
     # 要求して失敗する（入れるなら eslint 一式の導入とセットで別途）。
+    # test は vitest（web/lib の純粋関数のみ。DOM を使わないので node 環境で完結する）。
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -120,6 +121,9 @@ jobs:
         working-directory: web
       - name: typecheck
         run: npm run typecheck
+        working-directory: web
+      - name: test
+        run: npm test
         working-directory: web
       - name: build
         run: npm run build
