@@ -1,15 +1,22 @@
 // テンプレート化プレビュー（TemplatizePreview）の純粋な計算部分（設計 v2 §1.4）。
 //
-// 保存 body の生成・保存前の検査・ゴーストの解決を、DOM と React に依存しない
-// 関数としてここに置く。TemplatizePreview.tsx は state とイベントを持ち、
-// 計算はこの 3 関数を呼ぶだけにする。壊れやすさの本体はこの 3 関数なので、
+// 保存 body の生成・保存前の検査・ゴーストの解決・枠の下の文字（例示値）の計算を、
+// DOM と React に依存しない関数としてここに置く。TemplatizePreview.tsx は state と
+// イベントを持ち、計算はここの関数を呼ぶだけにする。壊れやすさの本体はここなので、
 // 単体テスト（templatize.test.ts）はここにだけ付ける。
 //
 // 型だけの import は実行時に消えるので、RegionCanvas（"use client"）を
 // 読み込むことはない（vitest は node 環境で動く）。
 
 import type { CanvasGhost, Px } from "@/components/RegionCanvas";
-import type { ExtractedField, PageDim, RegionRect, SchemaFieldDto } from "@/lib/types";
+import type {
+  ExtractedField,
+  PageDim,
+  RegionRect,
+  RunSpanDto,
+  RunSpans,
+  SchemaFieldDto,
+} from "@/lib/types";
 
 // 画素矩形の型は RegionCanvas が定義元。ここを使う側（テスト等）が
 // キャンバスを import しなくて済むよう型だけ再公開する。
@@ -23,6 +30,10 @@ export type DraftRow = {
   include: boolean;
   sample: string;
   base?: SchemaFieldDto; // 編集モードでプリロードした元フィールド（丸ごと保全する）
+  // この画面で足した行（設計 v2 §1.3）。base が無いので保存では新しい項目の分岐に
+  // 落ちる。name / label の両方が必須（D5）、型に table は選べない（D7）、
+  // 「残す」の代わりに × で行ごと消す（include=false と同じ意味）。
+  isNew?: boolean;
 };
 
 export type PreviewRegion = {
@@ -39,6 +50,17 @@ export type PreviewRegion = {
   // ずれが積み上がる（設計の受け入れ条件「矩形を触らなければ完全一致」に反する）。
   origin?: RegionRect;
   originBbox?: Px;
+  // --- 以下、この画面で作った include 領域の出どころ（設計 v2 D8・D11）。保存時に
+  // RegionRect の origin / created_at / example_value に載せる。**undefined のキーは
+  // 保存 body に載せない**（旧来の経路で作った領域の body を 1 バイトも変えない）。
+  // 触っていない既存領域は origin（原本）をそのまま返すので、ここは見ない。
+  //
+  // 名前が originKind なのは、origin が既に「読み込んだ原本」の意味で使われているため。
+  originKind?: "ghost" | "manual"; // ghost = AI の位置をクリックで採った / manual = 手描き
+  createdAt?: string; // ISO 8601
+  // ゴースト由来は source_quote、手描きは枠の下の span の原文（取得は非同期）。
+  // undefined = まだ取得中、null = 取れなかった（該当 0 件・API 失敗）。
+  exampleValue?: string | null;
 };
 
 /**
@@ -110,6 +132,14 @@ export function validateDrafts({
   if (!dt) return "帳票種別（doc_type）を入力してください。";
   const chosen = drafts.filter((d) => d.include);
   if (chosen.length === 0) return "抽出する項目を 1 つ以上選んでください。";
+  // 新規行は name と label の**両方**が必須（D5）。label は KIE がその項目を探す
+  // 唯一の語彙の手掛かりで、空だと name（例: due_date）が代用されて日本語帳票では
+  // 探せない。行番号は一覧の見た目（1 始まり・include=false の行も数える）に合わせる。
+  // 領域が無いことは止めない（D2。AI が語彙から探す）。
+  const blank = drafts.findIndex(
+    (d) => d.include && d.isNew && (!d.name.trim() || !d.label.trim()),
+  );
+  if (blank >= 0) return `項目名と表示名を入力してください（${blank + 1} 行目）。`;
   const names = chosen.map((d) => d.name.trim());
   // 命名規則は**新しく付けた／変えた名前**にだけ課す。chat の項目追加は任意の
   // 名前を通すので、既存スキーマには日本語名の項目があり得る。既存名まで弾くと
@@ -121,6 +151,102 @@ export function validateDrafts({
   const orphan = includes.find((r) => !drafts.some((d) => d.rowId === r.rowId && d.include));
   if (orphan) return "項目に紐づいていない読取領域があります。項目を選び直してください。";
   return null;
+}
+
+// ---- 例示値（枠の下の文字）と切り詰め ----
+
+/** 例示値の上限文字数。サーバ（newfan_schemas.field_schema.EXAMPLE_VALUE_MAX_LEN）と揃える。 */
+export const EXAMPLE_VALUE_MAX_LEN = 200;
+/** ゴーストに添える原文（source_quote）の上限（D6）。 */
+export const GHOST_QUOTE_MAX_LEN = 40;
+/**
+ * 枠に含まれる span の判定に使う、重なりの下限（span 面積に対する比）。設計 §2.5 の
+ * `_inside` と同じ規則で、除外領域の 50% 判定は流用しない（除外は「消しすぎ」が危険で
+ * 厳しめが正しいが、ヒントは「拾い漏れ」が危険。手で引いた枠は文字の一部にしか
+ * 掛からないことが普通で、0 件になるとヒントごと落ちる）。
+ */
+export const HINT_SPAN_RATIO = 0.3;
+
+/**
+ * コードポイント単位で n 文字に切る。サーバの `[:200]` は Python の文字（コード
+ * ポイント）単位なので、UTF-16 の `slice` でサロゲートペアを割らないよう揃える。
+ */
+export function truncateChars(s: string, n: number): string {
+  const cps = Array.from(s);
+  return cps.length > n ? cps.slice(0, n).join("") : s;
+}
+
+/**
+ * 画素矩形 bbox に含まれる span を**読み順（span_id 昇順）**で返す。採る条件は
+ * 「span の中心点が矩形内（境界を含む）」または「重なりが span 面積の 30% 以上」の
+ * どちらか。bbox の無い span は対象外。逆向きの矩形は min/max で吸収する。
+ */
+export function spansInRect(spans: readonly RunSpanDto[], bbox: Px): RunSpanDto[] {
+  const left = Math.min(bbox[0], bbox[2]);
+  const right = Math.max(bbox[0], bbox[2]);
+  const top = Math.min(bbox[1], bbox[3]);
+  const bottom = Math.max(bbox[1], bbox[3]);
+  return spans
+    .filter((s) => {
+      const b = s.bbox;
+      if (!b) return false;
+      const sx1 = Math.min(b[0], b[2]);
+      const sx2 = Math.max(b[0], b[2]);
+      const sy1 = Math.min(b[1], b[3]);
+      const sy2 = Math.max(b[1], b[3]);
+      const cx = (sx1 + sx2) / 2;
+      const cy = (sy1 + sy2) / 2;
+      if (cx >= left && cx <= right && cy >= top && cy <= bottom) return true;
+      const area = (sx2 - sx1) * (sy2 - sy1);
+      if (area <= 0) return false; // 面積の無い span は中心点だけで判定する
+      const ix = Math.max(0, Math.min(right, sx2) - Math.max(left, sx1));
+      const iy = Math.max(0, Math.min(bottom, sy2) - Math.max(top, sy1));
+      return (ix * iy) / area >= HINT_SPAN_RATIO;
+    })
+    .sort((a, b) => a.span_id - b.span_id);
+}
+
+/**
+ * 手描き領域の例示値（D11）。`run` は GET /documents/{id}/spans の応答（ページごとに
+ * キャッシュしたもの）で、取得に失敗していれば null を渡す。**別ページの応答は使わない**
+ * （page_no が一致しなければ null）。枠に文字が無ければ null。span の原文を読み順に
+ * 空白 1 つで連結し、前後空白を除いて 200 字で切る（サーバの消毒と同じ上限）。
+ * 正規化はしない（紙面の見た目に近いほど照合しやすい）。
+ */
+export function exampleValueFromSpans(
+  run: RunSpans | null | undefined,
+  page: number,
+  bbox: Px,
+): string | null {
+  if (!run || run.page_no !== page) return null;
+  const text = spansInRect(run.spans, bbox)
+    .map((s) => s.text.trim())
+    .filter((t) => t.length > 0)
+    .join(" ")
+    .trim();
+  if (!text) return null;
+  return truncateChars(text, EXAMPLE_VALUE_MAX_LEN);
+}
+
+/**
+ * ゴーストをクリックして採った領域の例示値（D11）: その項目の source_quote
+ * （AI が根拠にした span の原文）。無ければ null。上限は span 経由と同じ 200 字。
+ */
+export function exampleValueFromQuote(quote: string | null | undefined): string | null {
+  const t = quote?.trim() ?? "";
+  return t ? truncateChars(t, EXAMPLE_VALUE_MAX_LEN) : null;
+}
+
+/**
+ * この画面で作った領域の出どころを RegionRect に載せる。**undefined のキーは載せない**:
+ * 旧来の経路（出どころを持たない PreviewRegion）の body を 1 バイトも変えないため。
+ * 値が null（例示値が取れなかった）は null のまま載せる（前の値を引きずらない）。
+ */
+function withProvenance(rect: RegionRect, r: PreviewRegion): RegionRect {
+  if (r.exampleValue !== undefined) rect.example_value = r.exampleValue;
+  if (r.originKind !== undefined) rect.origin = r.originKind;
+  if (r.createdAt !== undefined) rect.created_at = r.createdAt;
+  return rect;
 }
 
 // ---- 保存 body ----
@@ -137,8 +263,12 @@ export type SaveBody = {
  * そのまま移したもので、規則は変えていない:
  *   - base 持ちは include=false でも版から落とさない
  *   - 触っていない矩形は origin（読み込んだ原本）をそのまま返す
+ *     （example_value / origin / created_at ごと保全される）
  *   - 画面で編集できなかった領域（preserved）は無変換で戻す
  *   - ページ寸法が取れないときは sourcePageCount を記録しない
+ * 設計 v2 で足したのは 1 点だけ: この画面で作った include 領域は、出どころ
+ * （originKind / createdAt / exampleValue）を RegionRect に載せる。新規行（isNew）は
+ * base が無いので、既存の「新しい項目」の分岐にそのまま落ちる。
  */
 export function buildSaveBody({
   drafts,
@@ -172,7 +302,9 @@ export function buildSaveBody({
     if (isUntouched(r)) return r.origin!; // 丸め往復で座標を動かさない
     const d = dimsByPage.get(r.drawnPage);
     if (!d?.width || !d?.height) return preserved.fieldRegions[rowId] ?? null;
-    return { page: r.drawnPage, rect: normalize(r.bbox, d.width, d.height) };
+    // 引き直した領域は origin（原本）の example_value 等を**引きずらない**。載るのは
+    // この PreviewRegion 自身に付いた値だけ（引き直しは必ず取り直す。D11）。
+    return withProvenance({ page: r.drawnPage, rect: normalize(r.bbox, d.width, d.height) }, r);
   }
 
   const fields: SchemaFieldDto[] = drafts
@@ -223,6 +355,9 @@ export function buildSaveBody({
 /**
  * 表示中のページに出すゴースト（AI が見つけた位置の参考表示）。
  * 確定済み（領域を持つ）行には出さない。
+ * AI が読んだ原文（source_quote）があれば 40 字に切って `quote` に添える（D6）。
+ * 正規化後の値ではなく原文 —— 「何をどこから読んだか」が分かるのは原文だけ。
+ * 無い項目は従来どおり（bbox があればゴーストは出る。quote は付かない）。
  */
 export function resolveGhosts({
   fields,
@@ -245,9 +380,10 @@ export function resolveGhosts({
       const d = byName.get(f.name);
       return d && !regionByRow.has(d.rowId); // 確定済みの行にはゴーストを出さない
     })
-    .map((f) => ({
-      key: f.name,
-      bbox: f.bbox as Px,
-      label: f.label ?? f.name,
-    }));
+    .map((f) => {
+      const g: CanvasGhost = { key: f.name, bbox: f.bbox as Px, label: f.label ?? f.name };
+      const quote = f.source_quote?.trim();
+      if (quote) g.quote = truncateChars(quote, GHOST_QUOTE_MAX_LEN);
+      return g;
+    });
 }
