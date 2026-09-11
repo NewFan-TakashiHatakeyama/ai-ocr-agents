@@ -1253,10 +1253,16 @@ source = { editable = "golden" }
 [package.optional-dependencies]
 collect = [
     { name = "httpx" },
+    { name = "newfan-paddle-client" },
+    { name = "newfan-schemas" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "httpx", marker = "extra == 'collect'", specifier = ">=0.27" }]
+requires-dist = [
+    { name = "httpx", marker = "extra == 'collect'", specifier = ">=0.27" },
+    { name = "newfan-paddle-client", marker = "extra == 'collect'", editable = "packages/paddle_client" },
+    { name = "newfan-schemas", marker = "extra == 'collect'", editable = "packages/schemas" },
+]
 provides-extras = ["collect"]
 
 [[package]]

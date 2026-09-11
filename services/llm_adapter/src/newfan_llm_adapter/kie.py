@@ -33,6 +33,7 @@ class KieResult:
 HINT_FOLLOWED = "followed"
 HINT_PARTIAL = "partial"
 HINT_REJECTED = "rejected"
+HINT_NO_EVIDENCE = "no_evidence"
 
 
 def _spans_for_prompt(spans: list[Span]) -> str:
@@ -82,14 +83,18 @@ def hint_outcome(chosen_span_ids: list[int], candidate_ids: list[int]) -> str:
     モデルに申告させない（本体テンプレートの出力例に無いキーを付録で要求しても
     従わないし、申告漏れも嘘も起こり得る）。集合演算なら決定論で決まる。
 
-    - followed: chosen ⊆ candidates（空でない）
-    - partial : 共通部分はあるが候補外の span も含む
-    - rejected: 共通部分なし。別の場所から取った。根拠 span が無い（value=null /
-      捏造 id のみ）場合も候補から取っていないのでここに数える
+    - followed   : chosen ⊆ candidates（空でない）
+    - partial    : 共通部分はあるが候補外の span も含む
+    - rejected   : 共通部分なし。**別の場所から取った**
+    - no_evidence: 根拠 span が無い（項目を返さなかった / value=null / 捏造 id のみ）。
+      rejected に混ぜない ── §2.9 は rejected を位置ガードの集計母集団に使うので、
+      「別の場所から取った」と「何も取れなかった」を区別しておく必要がある
     """
     chosen = set(chosen_span_ids)
     cands = set(candidate_ids)
-    if chosen and chosen <= cands:
+    if not chosen:
+        return HINT_NO_EVIDENCE
+    if chosen <= cands:
         return HINT_FOLLOWED
     if chosen & cands:
         return HINT_PARTIAL

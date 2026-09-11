@@ -1,0 +1,132 @@
+{
+ "s3_sample12_from_sample17": {
+  "template_image": "samples/sample17.png",
+  "gold": {
+   "issuer_name": "わくわくファッション株式会社",
+   "issuer_address": "東京都新宿区四谷9-9-9 ファッションビル99F",
+   "customer_name": "鈴木 邦夫",
+   "customer_address": "兵庫県神戸市東灘区住吉浜町",
+   "total_amount": "11870",
+   "document_date": "令和02年01月15日",
+   "document_no": "NH0001"
+  }
+ },
+ "s3_sample17_from_sample12": {
+  "template_image": "samples/sample12.png",
+  "gold": {
+   "issuer_name": "わくわくリフォーム株式会社",
+   "issuer_address": "東京都新宿区四谷0-0-0四ツ谷ビル12F",
+   "customer_name": "山田　太郎",
+   "total_amount": "2200000",
+   "document_date": "令和02年03月03日",
+   "document_no": "MI0001"
+  }
+ },
+ "s3_sample16_from_sample19": {
+  "template_image": "samples/sample19.png",
+  "gold": {
+   "issuer_name": "ビズリフォーム株式会社",
+   "customer_name": "グランドコート浦和美園 管理組合 理事長 駒林 次郎",
+   "total_amount": "60500",
+   "document_date": "2023年4月17日",
+   "document_no": "15082"
+  }
+ },
+ "s3_sample19_from_sample16": {
+  "template_image": "samples/sample16.png",
+  "gold": {
+   "issuer_name": "ビズリフォーム株式会社",
+   "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
+   "customer_name": "グランドコート浦和美園",
+   "total_amount": "49500",
+   "document_date": "2023年4月17日",
+   "document_no": "15082"
+  }
+ },
+ "s3_sample2_from_sample13": {
+  "template_image": "samples/sample13.png",
+  "gold": {
+   "issuer_name": "自社名(ロゴや社判も登録できます)",
+   "issuer_address": "東京都千代田区住所1住所2ビル名等",
+   "customer_name": "得意先の会社名",
+   "document_date": "令和02年02月01日",
+   "document_no": "MI0001"
+  }
+ },
+ "s3_sample13_from_sample2": {
+  "template_image": "samples/sample2.png",
+  "gold": {
+   "issuer_name": "わくわく物産株式会社",
+   "issuer_address": "東京都新宿区四谷9－9－9サプライビル2F",
+   "customer_name": "株式会社エイビーエム",
+   "customer_address": "神奈川県横浜市港北区樽町エイビービル",
+   "total_amount": "7003",
+   "document_date": "令和02年01月31日",
+   "document_no": "GS0001"
+  }
+ },
+ "s3_sample27_from_sample29": {
+  "template_image": "samples/sample29.png",
+  "gold": {
+   "issuer_name": "サンプル商事株式会社",
+   "issuer_address": "東京都サンプル区サンプル1-2-3",
+   "customer_name": "株式会社山田製作所",
+   "total_amount": "985600",
+   "document_date": "2026/06/15",
+   "document_no": "EST-2026-0042"
+  }
+ },
+ "s3_sample29_from_sample27": {
+  "template_image": "samples/sample27.jpg",
+  "gold": {
+   "issuer_name": "サンプル商事株式会社",
+   "issuer_address": "東京都品川区北品川５－１０－２０サンプルビル２Ｆ",
+   "customer_name": "矢部 隆司",
+   "total_amount": "75916",
+   "document_date": "2019年3月27日",
+   "document_no": "24"
+  }
+ },
+ "s3_sample6_from_sample": {
+  "template_image": "samples/sample.png",
+  "gold": {
+   "issuer_name": "SystemBase",
+   "customer_name": "ＡＡＡ食品株式会社 ＡＡＡ支社",
+   "total_amount": "136998",
+   "document_date": "2014年04月01日",
+   "document_no": "00000101"
+  }
+ },
+ "s3_sample_from_sample6": {
+  "template_image": "samples/sample6.png",
+  "gold": {
+   "issuer_name": "東日本東京商社株式会社",
+   "issuer_address": "仙台市泉区紫山3-1-4",
+   "customer_name": "長崎カントリーフーズ",
+   "total_amount": "895860",
+   "document_date": "2003年09月30日"
+  }
+ },
+ "s3_sample4_from_sample19": {
+  "template_image": "samples/sample19.png",
+  "gold": {
+   "issuer_name": "ビズリフォーム株式会社",
+   "customer_name": "グランドコート浦和美園 管理組合 理事長 駒林 次郎",
+   "total_amount": "60500",
+   "document_date": "2023年4月17日",
+   "document_no": "15082"
+  }
+ },
+ "s3_sample19_from_sample4": {
+  "template_image": "samples/sample4.jpeg",
+  "gold": {
+   "issuer_name": "ABCモータース",
+   "issuer_address": "東京都千代田区永田町1丁目7-1",
+   "customer_name": "伊達 政宗",
+   "customer_address": "宮城県仙台市青葉区川内1-1-1",
+   "total_amount": "50228",
+   "document_date": "2024-07-24",
+   "document_no": "599"
+  }
+ }
+}

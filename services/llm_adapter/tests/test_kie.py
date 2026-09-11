@@ -334,8 +334,8 @@ def test_hint_outcomes_は集合演算で決まる(bundle: PromptBundle) -> None
     assert _outcome(bundle, [11, 12]) == {"total_amount": "followed"}  # 候補の部分集合
     assert _outcome(bundle, [11, 13]) == {"total_amount": "partial"}  # 候補外も混ざる
     assert _outcome(bundle, [13]) == {"total_amount": "rejected"}  # 別の場所から取った
-    assert _outcome(bundle, []) == {"total_amount": "rejected"}  # 根拠なし
-    assert _outcome(bundle, [999]) == {"total_amount": "rejected"}  # 捏造 id は検証で落ちる
+    assert _outcome(bundle, []) == {"total_amount": "no_evidence"}  # 根拠なしは rejected と区別
+    assert _outcome(bundle, [999]) == {"total_amount": "no_evidence"}  # 捏造 id は検証で落ちる
 
 
 def test_hint_outcomes_はヒントを持つ項目にだけ付く(bundle: PromptBundle) -> None:
@@ -360,9 +360,9 @@ def test_hint_outcomes_はヒントを持つ項目にだけ付く(bundle: Prompt
     assert result2.hint_outcomes == {}
 
 
-def test_LLM_が返さなかったヒント項目は_rejected(bundle: PromptBundle) -> None:
+def test_LLM_が返さなかったヒント項目は_no_evidence(bundle: PromptBundle) -> None:
     result = kie_extract(
         LLMAdapter(FakeProvider([_kie_response([])])), bundle, spans=_HINT_SPANS,
         layout_markdown="", schema_json=_HINTED_SCHEMA,
     )
-    assert result.hint_outcomes == {"total_amount": "rejected"}
+    assert result.hint_outcomes == {"total_amount": "no_evidence"}

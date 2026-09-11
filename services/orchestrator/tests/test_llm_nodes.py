@@ -402,7 +402,13 @@ def test_type_mismatch_数字の無い金額欄は落ちる(monkeypatch) -> None
         ("tax_rate_jp", ["10%"], False),
         ("tax_rate_jp", ["軽減"], True),
         ("date", ["2024/05/01"], False),
-        ("date", ["5月31日"], False),  # 年省略も日付として解釈できる
+        # 年省略は落とす側に倒れる（文脈年を渡すと '10.5' '3-1' が日付として通る）
+        ("date", ["5月31日"], True),
+        ("date", ["10.5"], True),
+        # 数値系は数字を 1 つも含まなければ落とす（norm_money_jpy は '.' 入りを素通しする）
+        ("money_jpy", ["………"], True),
+        ("money_jpy", ["No."], True),
+        ("money_jpy", ["Co., Ltd."], True),
         ("date", ["大熊邸"], True),
         ("string", ["なんでも"], False),  # 型無しは判定しない
     ],
@@ -641,7 +647,7 @@ def test_outcomes_は_span_ids_と候補の集合演算で決まる(monkeypatch)
     assert _run([11, 13]) == "followed"
     assert _run([11, 14]) == "partial"
     assert _run([14]) == "rejected"
-    assert _run([]) == "rejected"
+    assert _run([]) == "no_evidence"  # 根拠なしは rejected と区別する（§2.9 の集計母集団）
 
 
 def test_領域を使わないプロンプトはスナップショットと完全一致(monkeypatch) -> None:
@@ -717,3 +723,73 @@ def test_明細フィールドにはヒントを注入しない(monkeypatch) -> 
     assert "region" not in out["fields"][0]
     assert out["fields"][0]["columns"] == [{"name": "item", "type": "string"}]
     assert not report  # 評価すらしない＝metrics にも載らない
+
+
+# ---------- 敵対的レビュー Phase B の major に対する回帰 ----------
+
+
+def test_順位は_span_面積ではなく矩形との重なりで決まる(monkeypatch) -> None:
+    """レビューで指摘された変異: rank_candidates を span 面積順にしても既存テストは通った。
+
+    大きい span が矩形に少ししか掛かっていない一方、小さい span が矩形の中に丸ごと
+    入っているとき、後者が先頭に来ること（重なり面積順）を固定する。
+    """
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    # 矩形は [300,200,700,400]。tall は中心が矩形内で候補になるが、縦に長く大半が外
+    tall = _sp(20, "tall", [400, 0, 600, 600])  # 面積 120,000、重なり 200×200 = 40,000
+    inside = _sp(21, "inside", [310, 210, 690, 390])  # 面積 68,400、重なり 68,400（全部）
+    tiny = _sp(22, "tiny", [330, 300, 380, 320])  # 面積 1,000、重なり 1,000
+    out, _ = llm_nodes.build_region_hints(_field_schema("title", "string"), _PAGES_1, [tall, tiny, inside])
+    ids = [c["span_id"] for c in out["fields"][0]["region_hint"]["candidates"]]
+    # 面積順なら tall が先頭、重なり順なら inside が先頭。読み順なら tall → tiny → inside
+    assert ids == [21, 20, 22]
+
+
+def test_分割された日付と見出し語が同じ枠にあっても_kind_conflict_で落ちない(monkeypatch) -> None:
+    """major: 候補を 1 span ずつ分類すると「発行日」（漢字の見出し語）が person、
+    「令和」「5年」「5月」「1日」は単体では date にならず、例示値が日付だと kind_conflict で
+    落ちていた。連結を見れば date になる。type_mismatch 側と同じ扱いにする。
+    """
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    spans = [
+        _sp(30, "発行日", [310, 210, 380, 240]),
+        _sp(31, "令和", [400, 210, 440, 240]),
+        _sp(32, "5年", [445, 210, 480, 240]),
+        _sp(33, "5月", [485, 210, 520, 240]),
+        _sp(34, "1日", [525, 210, 560, 240]),
+    ]
+    schema = _field_schema("document_date", "date", example="令和4年12月31日")
+    out, report = llm_nodes.build_region_hints(schema, _PAGES_1, spans)
+    assert report.dropped == {}, report.dropped
+    assert "region_hint" in out["fields"][0]
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("発行日", "unknown"),  # 見出し語は person にしない
+        ("合計金額", "unknown"),
+        ("御請求先", "unknown"),
+        ("山田工務店", "unknown"),  # 法人格の無い屋号
+        ("大熊 和一", "person"),  # 姓 名（空白あり）
+        ("大熊和一様", "person"),  # 末尾の様
+        ("大熊邸", "building"),
+    ],
+)
+def test_person_は空白区切りか末尾の様だけ(text: str, kind: str) -> None:
+    from newfan_orchestrator.region_hint import classify_kind
+
+    assert classify_kind(text) == kind
+
+
+def test_例示値が複数spanの連結でも_example_present_になる(monkeypatch) -> None:
+    """手描きの例示値は「枠の下の span を読み順で連結」（D11）。候補 1 つずつと比べると
+    同じ紙面でも一致しない（minor）。連結にも当てる。"""
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    spans = [
+        _sp(40, "株式会社", [310, 210, 400, 240]),
+        _sp(41, "千曲川ホーム", [405, 210, 560, 240]),
+    ]
+    schema = _field_schema("customer_name", "string", example="株式会社 千曲川ホーム")
+    out, _ = llm_nodes.build_region_hints(schema, _PAGES_1, spans)
+    assert out["fields"][0]["region_hint"]["example_present"] is True

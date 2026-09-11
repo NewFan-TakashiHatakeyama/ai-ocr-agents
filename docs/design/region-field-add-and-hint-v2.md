@@ -94,6 +94,9 @@ sample8（会社名の項目に建物名が入る）は文字列項目なので�
 
 このモードに入っていないときの挙動は現状のまま（行を選んでいれば紐づけ、選んで
 いなければ「行を選んでください」）。**暗黙に新規項目を作る経路は作らない。**
+モード中はゴースト（破線）を出さない ── ゴーストの上では pointerdown が矩形描画を
+始めないので「次のドラッグが新しい項目」が崩れる。Esc はモードを抜けるだけで、
+ドラッグ中の矩形は捨てない（pointerup は通常経路に落ちる）。
 
 **「＋ 項目を追加」**（D2）
 
@@ -129,8 +132,9 @@ PUT /schemas に載る。サーバ側の変更は D9 の予約名検査だけ。
 `issue()` の検査に足すもの:
 
 - 新規行の `name` または `label` が空 → 「項目名と表示名を入力してください（行 N）」
-- 新規行の `name` の重複・命名規則 → 既存の検査に乗せる（新規行は必ず「新しく付けた
-  名前」なので規則が課される）
+- 新規行の `name` の重複・命名規則 → 既存の検査に乗せ、**違反した行が新規行なら
+  「（N 行目）」を添える**（既存行の文言は変えない。§1.6-3 と §1.3 の食い違いを
+  こちらで解消）
 - 新規行で領域が無い → **保存を止めない**（D2）。保存後のトーストで「領域が無い項目は
   AI が語彙から探します」と伝える
 
@@ -231,6 +235,12 @@ class RegionRect(BaseModel):
   モデルに足せば往復する。**必ず往復テストを足す**（pydantic v2 の既定 `extra="ignore"`
   は DTO 側の漏れを黙って落とす。§4.2 で一度踏んでいる）。
 - web の `RegionRect` 型に同じ 3 つを足す。`isUntouched` の保全は 3 つごと保全する。
+  web の `PreviewRegion` 側は `originKind` / `createdAt` / `exampleValue`（`origin` は既に
+  「読み込んだ原本の RegionRect」の意味で使われているため）。保存 body 上のキーは上記のとおり。
+- **保存時に、手描き領域の例示値の取得がまだ終わっていなければ待って埋める**（取得前に
+  保存すると `example_value` が欠け、その項目だけ `kind_conflict` が効かない）。
+- 「例示値を消す」は矩形を再正規化せず、原本の RegionRect に `example_value: null` を
+  乗せて返す（丸め往復を起こさない）。
 - 消毒: `example_value` は kie.py が `label` に課しているのと同じ規則（印字可能文字のみ・
   上限で打ち切り）。LLM プロンプトに入る文字列なので、無検疫で通さない。
 
@@ -284,7 +294,9 @@ if reason:
 stripped["region_hint"] = {
     "candidates": [{"span_id": s.span_id, "text": s.text} for s in cands],
     "example_value": ev,
-    "example_present": ev is not None and any(norm(s.text) == norm(ev) for s in cands),
+    # 候補 1 つずつと、読み順で連結したものの両方と比べる（手描きの例示値は連結。D11）
+    "example_present": ev is not None and (any(norm(s.text) == norm(ev) for s in cands)
+                                          or norm(ev) in norm("".join(s.text for s in cands))),
 }
 ```
 
@@ -304,7 +316,7 @@ stripped["region_hint"] = {
 |---|---|---|
 | `no_spans_in_region` | 候補 0 件 | この帳票ではその位置に何も無い（レイアウト違い） |
 | `overlaps_exclude` | 候補 0 件で、かつ矩形が適用済み除外領域と重なる | 作者が矛盾した領域を引いた。`no_spans` と区別して伝える |
-| `type_mismatch` | 型付き項目（`money_jpy` / `date` / `number` / `tax_rate_jp` / `jp_invoice_reg_no` / `jp_bank_account`）で、候補の**連結**にも各候補にもその型として解釈できるものが無い | 金額項目の位置に数字が無い。**連結を見る**のは日付が「令和」「5年」「5月」「1日」に割れるため（単体で見ると全部落ちる） |
+| `type_mismatch` | 型付き項目（`money_jpy` / `date` / `number` / `tax_rate_jp` / `jp_invoice_reg_no` / `jp_bank_account`）で、候補の**連結**にも各候補にもその型として解釈できるものが無い。**数値系は数字を 1 つも含まなければ解釈不能**（正規化器が `.` 入りを素通しするため）。**日付に文脈年は渡さない**（年省略は落ちる側に倒す） | 金額項目の位置に数字が無い。**連結を見る**のは日付が「令和」「5年」「5月」「1日」に割れるため（単体で見ると全部落ちる） |
 | `kind_conflict` | 例示値と候補の「種類」が衝突する（下表） | **sample8**（会社名の項目に建物名） |
 
 型の解釈は決定論正規化のパーサをそのまま使う（新しく書かない）。
@@ -320,8 +332,11 @@ stripped["region_hint"] = {
 | `company` | 株式会社・有限会社・合同会社・(株)・㈱・Co.・Inc・Ltd・Corp・LLC を含む |
 | `address` | 都道府県・市区郡町村・丁目・番地・号 を含む（`company` より後に評価。社名に「町」が入る例があるため） |
 | `building` | 邸・ビル・マンション・ハイツ・荘・館 で終わる |
-| `person` | 上のどれでもなく、漢字 2〜4 ＋（空白）＋ 漢字 1〜3、または「様」が隣接 |
+| `person` | 上のどれでもなく、**漢字 1〜4 ＋ 空白 ＋ 漢字 1〜3**、または末尾が「様」。空白の無い漢字語（発行日・合計金額・山田工務店）は `unknown`（見出し語・屋号を人名にしない。第 2 回レビュー） |
 | `unknown` | 上のどれでもない |
+
+候補は **1 span ずつ**と**読み順で連結したもの**の両方を分類する（type_mismatch と同じ理由:
+日付は「令和」「5年」「5月」「1日」に割れる。第 2 回レビュー）。
 
 衝突とみなす組（例示値の種類 → 候補の種類）: `company` → `address` / `building` / `amount` / `date` / `id`、
 `person` → `address` / `building` / `amount` / `date` / `id`、`amount` → `amount` 以外、
@@ -363,10 +378,12 @@ LastValue チャネルなので既存の `region`（`excluded_*` 等）を読ん
 KIE ノードが `kie_extract` の戻り値から決定論で求める:
 
 ```
-followed : chosen span_ids ⊆ candidate ids（空でない）
-partial  : 一部が候補
-rejected : 候補と共通部分なし（別の場所から取った）
-none     : ヒントが無い／落とした
+followed    : chosen span_ids ⊆ candidate ids（空でない）
+partial     : 一部が候補
+rejected    : 候補と共通部分なし（**別の場所から取った**）
+no_evidence : 根拠 span が無い（項目を返さなかった / value=null / 捏造 id のみ）。
+              §2.9 の集計母集団から外すため rejected と区別する
+none        : ヒントが無い／落とした
 ```
 
 `ExtractedField` にも DB 列にも足さない。`metrics.region.hints.outcomes` に書く。
@@ -561,6 +578,23 @@ off のまま、結果を実測記録（第 3 回）に残す。
 | R27 | 軽微 | 例示値を無検疫でプロンプトに入れる | §2.3。`label` と同じ消毒 |
 
 反映しなかった指摘: なし。
+
+### 第 2 回（2026-09-12、実装のレビュー）
+
+コミット 0〜4 を worktree で並列実装し、各ブランチを独立したレビュアに反証させた。
+本文へ反映した主なもの:
+
+| 重大度 | 指摘 | 反映 |
+|---|---|---|
+| major | 予約名の validator を読み出しモデルに置いたため、旧データ 1 行で同テナントの一覧が 500 になる（実 Pg で再現） | 拒否を書き込み側（put_schema の共通入口）に限定。読み出しは旧データを通す |
+| major | `type_mismatch` が money_jpy で数字の無い候補（「………」「No.」）を通す（正規化器が `.` 入りを素通し） | 数値系は数字を含まなければ解釈不能。日付の文脈年を外す |
+| major | `kind_conflict` が候補を 1 span ずつ分類するため、分割日付＋見出し語（person 判定）＋日付例示値が必ず落ちる | 連結も分類。person は空白区切りか末尾「様」のみ |
+| minor | `example_present` が span 単体比較で、連結の例示値と一致しない | 連結とも比べる |
+| minor | 根拠 span 無しを rejected に混ぜると §2.9 の集計母集団が汚れる | `no_evidence` を分ける |
+| minor | 手描き領域の例示値取得が終わる前に保存すると `example_value` が欠ける | 保存前に待って埋める |
+| minor | ゴースト由来の「枠に含まれる文字」表示が保存値（source_quote）と別物 | 表示を保存値に揃える |
+| minor | 順位テストの fixture が「重なり順」と「面積順」を区別できない | 縦長 span の fixture に差し替え |
+| nit | 敬称の除去に「行」を含めると銀行名の末尾が落ちる | 様／御中／殿のみ |
 
 第 1 版で「判断をお願いしたい点」とした 3 つのうち、§3.1（span 永続化）は R2 により
 本体に含める判断に変えた。残る 2 つ（D4 の削除の扱い、例示値のデータ分類）は

@@ -53,6 +53,12 @@ export const TYPE_OPTIONS = [
 // 表項目ができてしまう。既存行は従来どおり（読み取り専用の table 行を表示できる）。
 const NEW_ROW_TYPE_OPTIONS = TYPE_OPTIONS.filter(([v]) => v !== "table");
 
+/** この領域に保存される例示値（画面で取った値か、読み込んだ原本のもの）。無ければ null。 */
+function exampleForRegion(r: PreviewRegion): string | null {
+  if (r.exampleValue !== undefined) return r.exampleValue;
+  return r.origin?.example_value ?? null;
+}
+
 type Selection = { kind: "row"; rowId: string } | { kind: "region"; regionId: string } | null;
 
 function emptyRow(): DraftRow {
@@ -81,6 +87,7 @@ export function TemplatizePreview({
     prevSchemaId: string | null;
     /** この画面で足した項目のうち領域なしで保存した件数（保存後の案内に使う） */
     newWithoutRegion?: number;
+    withExampleValue?: number;
   }) => void;
 }) {
   const pageCount = Math.max(pages.length, 1);
@@ -311,7 +318,9 @@ export function TemplatizePreview({
       : null;
   const selectedIncludePage = selectedInclude?.drawnPage ?? null;
   useEffect(() => {
-    if (selectedIncludePage === null || spansByPage.has(selectedIncludePage)) return;
+    if (selectedIncludePage === null) return;
+    // 取得済み（RunSpans）なら何もしない。失敗（null）は行を選び直したときに取り直す
+    if (spansByPage.get(selectedIncludePage)) return;
     void loadSpans(selectedIncludePage);
     // spansByPage は読むだけ（取得の完了で変わっても取り直す必要は無い）
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -325,7 +334,7 @@ export function TemplatizePreview({
       kind: r.kind,
       label:
         r.kind === "include"
-          ? (drafts.find((d) => d.rowId === r.rowId)?.label ?? "読取")
+          ? (drafts.find((d) => d.rowId === r.rowId)?.label || "新しい項目")
           : (r.label || "除外"),
     }));
 
@@ -484,9 +493,30 @@ export function TemplatizePreview({
       setErr(problem);
       return;
     }
+    // 手描き領域の例示値は非同期に取っている。取得が終わる前に保存すると example_value
+    // が載らず、ヒント on 後にその項目だけ kind_conflict ガードが効かない（レビュー指摘）。
+    // 未取得のものはここで待って埋める（失敗は null のまま送る＝サーバ既定と同じ）。
+    setBusy(true);
+    const pending = regions.filter(
+      (r) => r.kind === "include" && r.originKind === "manual" && r.exampleValue === undefined,
+    );
+    let regionsForSave = regions;
+    if (pending.length > 0) {
+      const filled = await Promise.all(
+        pending.map(async (r) => {
+          const run = await loadSpans(r.drawnPage);
+          return [r.id, exampleValueFromSpans(run, r.drawnPage, r.bbox)] as const;
+        }),
+      );
+      const byId = new Map(filled);
+      regionsForSave = regions.map((r) =>
+        byId.has(r.id) ? { ...r, exampleValue: byId.get(r.id) ?? null } : r,
+      );
+      setRegions(regionsForSave);
+    }
     const body = buildSaveBody({
       drafts,
-      regions,
+      regions: regionsForSave,
       preserved,
       dimsUnavailable,
       pageCount,
@@ -498,6 +528,7 @@ export function TemplatizePreview({
     const newWithoutRegion = drafts.filter(
       (d) => d.isNew && d.include && !regionByRow.has(d.rowId),
     ).length;
+    const withExampleValue = body.fields.filter((f) => f.region?.example_value).length;
 
     setBusy(true);
     setErr(null);
@@ -513,6 +544,7 @@ export function TemplatizePreview({
         version: saved.version,
         prevSchemaId: prev?.id ?? null,
         newWithoutRegion,
+        withExampleValue,
       });
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
@@ -639,7 +671,10 @@ export function TemplatizePreview({
                         キーに波及するので引き続きスキーマ管理画面で（D4）。行き止まりに
                         しないよう、その画面へのリンクを添える */}
                     項目の<b>削除</b>と必須／重要の設定は
-                    <Link href="/schemas">スキーマ管理画面</Link>で行います。ここでは
+                    <Link href="/schemas" target="_blank" rel="noopener">
+                      スキーマ管理画面
+                    </Link>
+                    （別タブで開きます）で行います。ここでは
                     項目の追加と、領域の指定・表示名・型の修正ができます。
                   </p>
                 )}
@@ -654,12 +689,14 @@ export function TemplatizePreview({
                   {drafts.map((d) => {
                     const r = regionByRow.get(d.rowId);
                     const on = activeRowId === d.rowId;
-                    // 選択中の読取領域なら「枠に含まれる文字」を出す（保存される例示値と
-                    // 同じ spans から。取得中／取れなかったも分けて出す）
+                    // 選択中の読取領域なら、**保存される例示値と同じもの**を出す。
+                    // ゴースト由来は AI が読んだ原文（source_quote）、手描きは枠の下の span
+                    // （取得中／失敗／0 件を分けて出す。失敗を「文字が無い」と伝えない）
                     const showSpans = !!r && r.id === selectedRegionId;
+                    const isGhost = r?.originKind === "ghost";
                     const pageSpans = r ? spansByPage.get(r.drawnPage) : undefined;
                     const inRect =
-                      showSpans && r && pageSpans !== undefined
+                      showSpans && r && !isGhost && pageSpans !== undefined && pageSpans !== null
                         ? exampleValueFromSpans(pageSpans, r.drawnPage, r.bbox)
                         : undefined;
                     return (
@@ -742,12 +779,37 @@ export function TemplatizePreview({
                             "—"
                           )}
                         </span>
-                        {showSpans && (
+                        {showSpans && isGhost && (
+                          <span className="sub rgn-rownote clip" title={r?.exampleValue ?? undefined}>
+                            AI が読んだ原文: {r?.exampleValue ?? "（原文なし）"}
+                          </span>
+                        )}
+                        {showSpans && r && exampleForRegion(r) && !r.exampleCleared && (
+                          // 例示値は帳票の値（個人名を含み得る）で、スキーマの版が残る限り残る。
+                          // 気になる場合に作者が外せるようにする（§2.3）
+                          <button
+                            className="btn sm ghost"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRegions((rs) =>
+                                rs.map((x) =>
+                                  x.id === r.id ? { ...x, exampleValue: null, exampleCleared: true } : x,
+                                ),
+                              );
+                            }}
+                            title="この領域の例示値（前回ここにあった値）を保存しない"
+                          >
+                            例示値を消す
+                          </button>
+                        )}
+                        {showSpans && !isGhost && (
                           <span className="sub rgn-rownote clip" title={inRect ?? undefined}>
                             枠に含まれる文字:{" "}
                             {pageSpans === undefined
                               ? "読み取り中…"
-                              : (inRect ?? "（この枠に文字は見つかりません）")}
+                              : pageSpans === null
+                                ? "（文字を読み取れませんでした。行を選び直すと再取得します）"
+                                : (inRect ?? "（この枠に文字は見つかりません）")}
                           </span>
                         )}
                         {d.isNew && (

@@ -241,6 +241,23 @@ export default function SchemasPage() {
               <span className="nm">
                 {f.label || f.name || "（無題）"}
                 <span className="sub">{f.name}</span>
+                {f.region && (
+                  // 読取領域と例示値（前回その位置にあった値）は隠さずに出す。何がヒントに
+                  // 使われるかを人が見られる状態にする（設計 region-field-add-and-hint-v2 §2.3）。
+                  // 編集はテンプレート化画面（画像を見ながら）で行う。
+                  <span
+                    className="sub"
+                    title={
+                      `読取領域: p.${String(f.region.page ?? "全")}` +
+                      (f.region.origin ? ` / ${f.region.origin === "ghost" ? "AI の位置" : "手描き"}` : "") +
+                      (f.region.example_value ? `
+例示値: ${f.region.example_value}` : "")
+                    }
+                  >
+                    📐 読取領域あり
+                    {f.region.example_value ? `（例示値: ${f.region.example_value.slice(0, 24)}${f.region.example_value.length > 24 ? "…" : ""}）` : ""}
+                  </span>
+                )}
               </span>
             )}
             <select

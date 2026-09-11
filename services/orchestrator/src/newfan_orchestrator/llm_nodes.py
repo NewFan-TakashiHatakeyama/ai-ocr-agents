@@ -167,8 +167,9 @@ def build_region_hints(
         # 明細（表）にはヒントを入れない。行数が増えたり次ページへ続いたりした
         # 帳票で「領域に近い行だけ」を選ばせると、行が静かに切り捨てられる。
         # 位置ガードも TableResult を見ないので、この壊れ方はどこにも掛からない。
-        if hint and isinstance(region, dict) and not f.get("columns"):
-            name = str(f.get("name") or "")
+        # name の無い field は metrics に記録しない（"" キーで上書きし合うだけで意味が無い）
+        if hint and isinstance(region, dict) and not f.get("columns") and f.get("name"):
+            name = str(f["name"])
             px = _region_px(region, page_list)
             if px is None:
                 report.dropped[name] = (

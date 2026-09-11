@@ -8,8 +8,12 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
-# collect（実系に流して予測を採る）だけが HTTP を使う。CI の採点側には要らない。
-collect = ["httpx>=0.27"]
+# collect（実系に流して予測を採る）と、領域の実測（region_ab / region_from_doc /
+# region_from_gold）だけが HTTP と他パッケージを使う。CI の採点側には要らない。
+# newfan-schemas は表記揺れの正規化（textnorm.norm_key）、newfan-paddle-client は
+# 正解値の位置探索（structure-svc の span 構築）のため。workspace 内の参照は
+# ルートの [tool.uv.sources] で解決される。
+collect = ["httpx>=0.27", "newfan-schemas", "newfan-paddle-client"]
 
 [build-system]
 requires = ["hatchling"]

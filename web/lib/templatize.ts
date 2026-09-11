@@ -61,6 +61,8 @@ export type PreviewRegion = {
   // ゴースト由来は source_quote、手描きは枠の下の span の原文（取得は非同期）。
   // undefined = まだ取得中、null = 取れなかった（該当 0 件・API 失敗）。
   exampleValue?: string | null;
+  /** 「例示値を消す」を押した。触っていない矩形でも example_value: null で保存する（§2.3） */
+  exampleCleared?: boolean;
 };
 
 /**
@@ -136,21 +138,33 @@ export function validateDrafts({
   // 唯一の語彙の手掛かりで、空だと name（例: due_date）が代用されて日本語帳票では
   // 探せない。行番号は一覧の見た目（1 始まり・include=false の行も数える）に合わせる。
   // 領域が無いことは止めない（D2。AI が語彙から探す）。
-  const blank = drafts.findIndex(
-    (d) => d.include && d.isNew && (!d.name.trim() || !d.label.trim()),
-  );
+  const blank = drafts.findIndex((d) => d.isNew && (!d.name.trim() || !d.label.trim()));
   if (blank >= 0) return `項目名と表示名を入力してください（${blank + 1} 行目）。`;
   const names = chosen.map((d) => d.name.trim());
   // 命名規則は**新しく付けた／変えた名前**にだけ課す。chat の項目追加は任意の
   // 名前を通すので、既存スキーマには日本語名の項目があり得る。既存名まで弾くと
   // 「開いて保存するだけ」ができないスキーマができてしまう。
   const renamed = chosen.filter((d) => d.name.trim() !== d.base?.name);
-  if (renamed.some((d) => !/^[A-Za-z][A-Za-z0-9_]*$/.test(d.name.trim())))
-    return "項目名（name）は英字始まりの英数字・アンダースコアにしてください。";
-  if (new Set(names).size !== names.length) return "項目名（name）が重複しています。";
+  const badName = renamed.find((d) => !/^[A-Za-z][A-Za-z0-9_]*$/.test(d.name.trim()));
+  if (badName) return `項目名（name）は英字始まりの英数字・アンダースコアにしてください。${rowRef(drafts, badName)}`;
+  if (new Set(names).size !== names.length) {
+    // どの行かが分かるように、重複している名前のうち**新規行**のものを指す（設計 §1.6-3）。
+    // 既存行どうしの重複は従来の文言のまま（既存の 38 テストと契約を変えない）。
+    const seen = new Map<string, number>();
+    names.forEach((n) => seen.set(n, (seen.get(n) ?? 0) + 1));
+    const dupNew = chosen.find((d) => d.isNew && (seen.get(d.name.trim()) ?? 0) > 1);
+    return `項目名（name）が重複しています。${dupNew ? rowRef(drafts, dupNew) : ""}`;
+  }
   const orphan = includes.find((r) => !drafts.some((d) => d.rowId === r.rowId && d.include));
   if (orphan) return "項目に紐づいていない読取領域があります。項目を選び直してください。";
   return null;
+}
+
+/** 新規行のときだけ「（N 行目）」を返す（既存行の文言を変えないため）。 */
+function rowRef(drafts: DraftRow[], d: DraftRow): string {
+  if (!d.isNew) return "";
+  const i = drafts.findIndex((x) => x.rowId === d.rowId);
+  return i >= 0 ? `（${i + 1} 行目）` : "";
 }
 
 // ---- 例示値（枠の下の文字）と切り詰め ----
@@ -299,7 +313,11 @@ export function buildSaveBody({
       // 画面で編集できなかった領域は、読み込んだ値をそのまま返す（消さない）
       return preserved.fieldRegions[rowId] ?? null;
     }
-    if (isUntouched(r)) return r.origin!; // 丸め往復で座標を動かさない
+    if (isUntouched(r)) {
+      // 丸め往復で座標を動かさない。「例示値を消す」だけは原本のまま example_value を
+      // null にして返す（矩形は触っていないので再正規化しない。設計 §2.3）
+      return r.exampleCleared ? { ...r.origin!, example_value: null } : r.origin!;
+    }
     const d = dimsByPage.get(r.drawnPage);
     if (!d?.width || !d?.height) return preserved.fieldRegions[rowId] ?? null;
     // 引き直した領域は origin（原本）の example_value 等を**引きずらない**。載るのは

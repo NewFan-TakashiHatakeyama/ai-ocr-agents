@@ -91,9 +91,12 @@ def rect_overlaps_any(rect: BBox, others: list[BBox]) -> bool:
 
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _REG_NO = re.compile(r"T[0-9A-Z]{13}")
-# 年を省いた「5月31日」も日付として解釈できる（支払期限欄に普通にある）。パーサは
-# 文脈年が無いと月日だけを解釈しないので、解釈可否の判定にだけ仮の年を渡す。
-_PROBE_CTX = NormContext(context_year=2000)
+_HAS_DIGIT = re.compile(r"\d")
+# 文脈年は渡さない。年を省いた「5月31日」は落ちる側に倒れる（ヒント無し＝対照の挙動）。
+# 文脈年を渡すと '10.5' '3-1' '12/31' のような数量・比率・分数まで日付として通る
+# （敵対的レビュー Phase B）。非対称性の原則: 迷ったら落とす。
+_PROBE_CTX = NormContext()
+_NUMERIC_TYPES = frozenset({FieldType.MONEY_JPY, FieldType.NUMBER, FieldType.TAX_RATE_JP})
 
 
 def interpretable_as(field_type: str, text: str) -> bool:
@@ -112,8 +115,16 @@ def interpretable_as(field_type: str, text: str) -> bool:
         ftype = FieldType(field_type)
     except ValueError:
         return True  # 未知の型は判定しない（落とす根拠が無い）
+    # 数値系は**数字を 1 つも含まなければ解釈できない**と先に決める。norm_money_jpy は
+    # 本文に '.' があると小数点あいまい扱いで入力をそのまま value に返すため、OCR の
+    # 点線リーダー「………」（NFKC で '...'）や「No.」「Co., Ltd.」が金額として通っていた
+    # （敵対的レビュー Phase B の major）。正規化器の返し方に依存せず、ここで止める。
+    if ftype in _NUMERIC_TYPES and not _HAS_DIGIT.search(text):
+        return False
     res = normalize(ftype, text, _PROBE_CTX)
     if res.value is None:
+        return False
+    if ftype in _NUMERIC_TYPES and not _HAS_DIGIT.search(res.value):
         return False
     if ftype is FieldType.DATE:
         return bool(_ISO_DATE.fullmatch(res.value))
@@ -142,7 +153,11 @@ _KIND_ADDRESS_WORD = re.compile(r"丁目|番地|〒")
 _KIND_LOCALITY = re.compile(r"[市区町村郡]")
 _KIND_BUILDING = re.compile(r"(?:邸|ビル|マンション|ハイツ|荘|館)$")
 _KANJI = r"[一-鿿々〆ヶ]"
-_KIND_PERSON = re.compile(rf"{_KANJI}{{2,4}}[ ]?{_KANJI}{{1,3}}")
+# 姓と名の**間に空白があるもの**だけを人名とみなす。空白無し（「請求書」「発行日」「合計金額」
+# 「山田工務店」）まで person にすると、見出し語が全部 person になり、日付・金額の例示値と
+# 衝突して分割日付を落とす（敵対的レビュー Phase B の major）。空白の無い人名は
+# unknown に落ちるが、unknown は衝突にしないので効き目は失わない。
+_KIND_PERSON = re.compile(rf"{_KANJI}{{1,4}} {_KANJI}{{1,3}}")
 
 
 def classify_kind(text: Optional[str]) -> str:
@@ -194,14 +209,22 @@ KIND_CONFLICTS: dict[str, frozenset[str]] = {
 
 
 def kinds_conflict(example_value: Optional[str], candidate_texts: list[str]) -> bool:
-    """例示値と候補の種類が衝突するか。候補に例示値と同じ種類が 1 つでもあれば衝突なし。"""
+    """例示値と候補の種類が衝突するか。
+
+    候補は **1 span ずつ**と**読み順で連結したもの**の両方を分類する。type_mismatch と同じ
+    理由で、日付は「令和」「5年」「5月」「1日」に割れるため、単体では date にならない。
+    候補（単体または連結）に例示値と同じ種類が 1 つでもあれば衝突なし。
+    """
     if not example_value:
         return False
     ex_kind = classify_kind(example_value)
     conflicts = KIND_CONFLICTS.get(ex_kind)
     if not conflicts:
         return False
-    cand_kinds = {classify_kind(t) for t in candidate_texts}
+    texts = list(candidate_texts)
+    if len(texts) > 1:
+        texts.append(" ".join(candidate_texts))
+    cand_kinds = {classify_kind(t) for t in texts}
     if ex_kind in cand_kinds:
         return False
     return bool(cand_kinds & conflicts)
@@ -240,7 +263,8 @@ def prevalidate(
             interpretable_as(ftype, joined) or any(interpretable_as(ftype, s.text) for s in cands)
         ):
             return REASON_TYPE_MISMATCH
-    if kinds_conflict(example_value, [s.text for s in cands]):
+    # 連結の判定（kinds_conflict / example_present）は読み順で渡す
+    if kinds_conflict(example_value, [s.text for s in sorted(cands, key=lambda x: x.span_id)]):
         return REASON_KIND_CONFLICT
     return None
 
@@ -252,7 +276,12 @@ def example_present(example_value: Optional[str], cands: list[Span]) -> bool:
     key = norm_key(example_value)
     if not key:
         return False
-    return any(norm_key(s.text) == key for s in cands)
+    if any(norm_key(s.text) == key for s in cands):
+        return True
+    # 手描きの例示値は「枠の下の span を読み順で連結したもの」（D11）なので、
+    # 候補 1 つずつと比べると同じ紙面でも一致しない。連結にも当てる。
+    joined = norm_key("".join(s.text for s in sorted(cands, key=lambda x: x.span_id)))
+    return bool(joined) and key in joined
 
 
 # 従った／捨てた（D15）の集合演算は llm_adapter の kie.py（``hint_outcome``）にある。

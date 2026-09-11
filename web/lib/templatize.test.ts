@@ -743,16 +743,25 @@ describe("validateDrafts: 新規行", () => {
     );
   });
 
-  it("新規行にも命名規則が課される（base が無い＝新しく付けた名前）", () => {
-    const drafts = [newRow({ rowId: "n1", name: "支払期日", label: "支払期日" })];
+  it("新規行にも命名規則が課される（base が無い＝新しく付けた名前）。行番号つき", () => {
+    // 受け入れ条件 §1.6-3: 新規行の違反は「どの行か」が分かる（既存行の文言は変えない）
+    const drafts = [existing, newRow({ rowId: "n1", name: "支払期日", label: "支払期日" })];
     expect(validateDrafts({ docType: "x", drafts, includes: [] })).toBe(
-      "項目名（name）は英字始まりの英数字・アンダースコアにしてください。",
+      "項目名（name）は英字始まりの英数字・アンダースコアにしてください。（2 行目）",
     );
   });
 
-  it("新規行の name が既存行と重複", () => {
+  it("新規行の name が既存行と重複。行番号つき", () => {
     const drafts = [existing, newRow({ rowId: "n1", name: "total", label: "合計" })];
     expect(validateDrafts({ docType: "x", drafts, includes: [] })).toBe(
+      "項目名（name）が重複しています。（2 行目）",
+    );
+  });
+
+  it("既存行どうしの重複・規則違反は従来の文言のまま（行番号なし）", () => {
+    const a = row({ rowId: "a", name: "total", base: { name: "total", type: "string", required: false, critical: false } });
+    const b = row({ rowId: "b", name: "total", base: { name: "total", type: "string", required: false, critical: false } });
+    expect(validateDrafts({ docType: "x", drafts: [a, b], includes: [] })).toBe(
       "項目名（name）が重複しています。",
     );
   });
@@ -929,5 +938,51 @@ describe("exampleValueFromQuote / truncateChars", () => {
     expect(truncateChars("a𠮷b", 2)).toBe("a𠮷");
     expect(truncateChars("abc", 3)).toBe("abc");
     expect(truncateChars("", 3)).toBe("");
+  });
+});
+
+describe("buildSaveBody: 例示値を消す（§2.3）", () => {
+  it("触っていない矩形でも exampleCleared なら原本のまま example_value だけ null にする", () => {
+    const origin = {
+      page: 1,
+      rect: [0.1, 0.1, 0.3, 0.2] as [number, number, number, number],
+      example_value: "大熊 和一",
+      origin: "ghost" as const,
+      created_at: "2026-09-11T00:00:00Z",
+    };
+    const px = denormalize(origin.rect, 1000, 2000);
+    const drafts = [
+      row({
+        rowId: "r1",
+        name: "customer",
+        base: { name: "customer", type: "string", required: false, critical: false, region: origin },
+      }),
+    ];
+    const region = {
+      id: "g1",
+      kind: "include" as const,
+      bbox: px,
+      drawnPage: 1,
+      page: 1,
+      rowId: "r1",
+      origin,
+      originBbox: px,
+      exampleValue: null,
+      exampleCleared: true,
+    };
+    const body = buildSaveBody({
+      drafts,
+      regions: [region],
+      preserved: { fieldRegions: {}, excludes: [], sourcePageCount: null },
+      dimsUnavailable: false,
+      pageCount: 1,
+      pageDims: [{ page_no: 1, width: 1000, height: 2000 }],
+      mode: "edit",
+    });
+    const saved = body.fields[0].region!;
+    expect(saved.rect).toEqual(origin.rect); // 矩形は再正規化しない（丸め往復なし）
+    expect(saved.example_value).toBeNull();
+    expect(saved.origin).toBe("ghost"); // 出どころ・作成時刻は保つ
+    expect(saved.created_at).toBe("2026-09-11T00:00:00Z");
   });
 });

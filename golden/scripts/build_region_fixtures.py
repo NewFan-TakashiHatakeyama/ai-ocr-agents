@@ -12,9 +12,19 @@
       ここで効かないなら機能としての価値は無い。同じ雛形の組は目視で確定した
       （samples_ground_truth.json の _layout_families）。
 
-S1 は 21 枚（発行元と宛先の両方が紙面にある帳票すべて）、S2 は 5 枚しか作れない。
+  S3「間違ったテンプレートを当てる」（第 3 回から）
+      目視で**別雛形**と判定した組の片方から起こした領域を、もう片方に当てる。
+      「ヒントを反証可能にした」ことの直接の検証で、介入が対照より悪くならないことを見る
+      （設計 region-field-add-and-hint-v2 §3 のゲート G2 / G4）。
+
+S1 は 21 枚（発行元と宛先の両方が紙面にある帳票すべて）、S2 は 5 枚、S3 は 12 件。
 帳簿・決算書・集計表など発行元/宛先ブロックを持たない 8 枚は、位置の仮説を
-検証できないので両方から外す。
+検証できないので全部から外す。
+
+例示値（example_value）は **S2 / S3 にだけ**付ける（テンプレート元の帳票で、その位置に
+あった span の原文。region_from_gold が見つけたもの）。S1 は同じ帳票なので例示値が必ず
+一致し、答えを教えるのと同じになる ── 2026-09-07 と同条件で「効き目を失っていない」
+だけを見るため、S1 には付けない（§3）。
 """
 
 from __future__ import annotations
@@ -108,6 +118,26 @@ def build() -> dict[str, Any]:
         for dt, src in s2_source.items()
     }
 
+    # ---- S3: 別雛形の帳票から起こした領域を当てる（間違ったテンプレートの害）----
+    # 両方向で当てる。同じ帳票が複数の組に出る（sample19）ので doc_type は元も含めて命名する。
+    pairs = gt.get("_different_layout_pairs", {}).get("pairs", [])
+    s3_gold: list[dict[str, Any]] = []
+    s3_source: dict[str, str] = {}
+    for a, b in pairs:
+        for target, source in ((a, b), (b, a)):
+            if target not in usable or source not in usable:
+                continue
+            doc_type = f"s3_{_stem(target)}_from_{_stem(source)}"
+            s3_gold.append(gold_line(doc_type, target))
+            s3_source[doc_type] = source
+    s3_goldspec = {
+        dt: {
+            "template_image": f"samples/{src}",
+            "gold": {n: docs[src]["fields"][n] for n in FIELDS if docs[src]["fields"].get(n)},
+        }
+        for dt, src in s3_source.items()
+    }
+
     return {
         "s1_gold": s1_gold,
         "s1_spec": s1_spec,
@@ -116,6 +146,9 @@ def build() -> dict[str, Any]:
         "s2_spec": s2_spec,
         "s2_goldspec": s2_goldspec,
         "s2_source": s2_source,
+        "s3_gold": s3_gold,
+        "s3_goldspec": s3_goldspec,
+        "s3_source": s3_source,
         "usable": usable,
         "excluded": sorted(set(docs) - set(usable)),
     }
@@ -125,6 +158,7 @@ def main() -> int:
     b = build()
     positional_s1 = {d["doc_type"]: POSITIONAL for d in b["s1_gold"]}
     positional_s2 = {d["doc_type"]: POSITIONAL for d in b["s2_gold"]}
+    positional_s3 = {d["doc_type"]: POSITIONAL for d in b["s3_gold"]}
 
     def write_jsonl(path: Path, header: list[str], rows: list[dict[str, Any]]) -> None:
         lines = [f"// {h}" for h in header]
@@ -152,6 +186,21 @@ def main() -> int:
         b["s2_gold"],
     )
 
+    write_jsonl(
+        OUT / "region_ab_s3.jsonl",
+        [
+            "S3「間違ったテンプレートを当てる」の A/B 用フィクスチャ（第 3 回から）。",
+            "領域は**別雛形**と目視判定した帳票から起こす（samples_ground_truth.json の _different_layout_pairs、両方向）。",
+            "介入が対照より悪くならないことを見る（設計 region-field-add-and-hint-v2 §3 G2 / G4）。",
+        ],
+        b["s3_gold"],
+    )
+    (OUT / "region_ab_s3_goldspec.json").write_text(
+        json.dumps(b["s3_goldspec"], ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+    (OUT / "region_ab_s3_positional.json").write_text(
+        json.dumps({"_positional": positional_s3}, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
     (OUT / "region_ab_s1_spec.json").write_text(
         json.dumps(b["s1_spec"], ensure_ascii=False, indent=1), encoding="utf-8"
     )
@@ -171,8 +220,9 @@ def main() -> int:
         json.dumps({"_positional": positional_s2}, ensure_ascii=False, indent=1), encoding="utf-8"
     )
 
-    print(f"S1 対象 {len(b['s1_gold'])} 枚 / S2 対象 {len(b['s2_gold'])} 枚")
+    print(f"S1 対象 {len(b['s1_gold'])} 枚 / S2 対象 {len(b['s2_gold'])} 枚 / S3 対象 {len(b['s3_gold'])} 件")
     print("S2 の領域の出どころ:", json.dumps(b["s2_source"], ensure_ascii=False))
+    print("S3 の領域の出どころ:", json.dumps(b["s3_source"], ensure_ascii=False))
     print(f"除外 {len(b['excluded'])} 枚（発行元/宛先ブロックが無い）:", ", ".join(b["excluded"]))
     return 0
 
