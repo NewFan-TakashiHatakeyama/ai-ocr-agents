@@ -31,12 +31,12 @@ import json
 import math
 import sys
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+from newfan_schemas import norm_key
 
 from newfan_golden.dataset import GoldenDoc, load_jsonl
 
@@ -154,18 +154,12 @@ def _norm(v: Optional[str]) -> str:
     これを別物として数えると、**両アームとも同じだけ外れて差が見えなくなる**
     （実際に 1/7 まで落ちた）。正規化は対照・介入に同じく効くので、比較の
     公平さは崩れない。逆に、値そのものの取り違えや欠落は正規化しても残る。
+
+    規則の実体は ``newfan_schemas.textnorm.norm_key``（設計 D18）。ランタイムの
+    例示値照合（``example_present``）と同じ関数で比べることで、「計測では一致
+    したのに実行時は一致しない」というずれを作らない。
     """
-    if v is None:
-        return ""
-    t = unicodedata.normalize("NFKC", str(v))
-    t = "".join(t.split())
-    for ch in (",", "￥", "¥", "円", "-", "−", "－", "ー", "‐", "･", "・"):
-        t = t.replace(ch, "")
-    # 宛名の敬称。紙面には付くが「誰宛か」の判定には関係しない
-    for suffix in ("様", "御中", "殿", "行", "宛"):
-        if t.endswith(suffix):
-            t = t[: -len(suffix)]
-    return t.casefold()
+    return norm_key(v)
 
 
 def _wait_job(client: httpx.Client, job_id: str, timeout_sec: float) -> str:

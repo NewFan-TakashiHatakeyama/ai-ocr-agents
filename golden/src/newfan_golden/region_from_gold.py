@@ -26,7 +26,6 @@ import argparse
 import base64
 import json
 import sys
-import unicodedata
 from pathlib import Path
 from typing import Any, Optional
 
@@ -34,6 +33,7 @@ import httpx
 
 from newfan_paddle_client.client import PaddleServingClient
 from newfan_paddle_client.spans import build_spans
+from newfan_schemas import norm_key
 from newfan_golden.region_ab import RegionAbError, _upload
 from newfan_golden.region_from_doc import pad_rect
 
@@ -43,14 +43,14 @@ MAX_JOIN = 4
 
 
 def key(s: Optional[str]) -> str:
-    """位置探索用のキー。表記の揺れを落として突き合わせる。"""
-    if s is None:
-        return ""
-    t = unicodedata.normalize("NFKC", str(s))
-    t = "".join(t.split())
-    for ch in (",", "￥", "¥", "円", "-", "−", "－", "ー", "‐", "･", "・", "様", "御中", "殿"):
-        t = t.replace(ch, "")
-    return t.casefold()
+    """位置探索用のキー。表記の揺れを落として突き合わせる。
+
+    規則の実体は ``newfan_schemas.textnorm.norm_key``（設計 D18）。以前はここだけ
+    敬称を**位置を問わず**落としていたが、ランタイムの例示値照合と同じ規則
+    （末尾の敬称のみ）に揃える。span 単位で適用して連結するため、「様」だけの
+    span も末尾規則で空になり、探索結果は変わらない。
+    """
+    return norm_key(s)
 
 
 def locate(spans: list[Any], want: str) -> tuple[Optional[list[float]], int]:

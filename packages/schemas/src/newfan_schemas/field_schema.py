@@ -53,6 +53,27 @@ def check_field_name(name: str) -> None:
         )
 
 
+def sanitize_example_value(v: Optional[str]) -> Optional[str]:
+    """例示値の消毒（設計 region-field-add-and-hint-v2 §2.3）。
+
+    制御文字（U+0000 は Pg の TEXT に入らず保存ごと落ちる）・改行を落とし、前後の空白を
+    除いて上限で切る。残らなければ「例示値なし」と同じ None。
+
+    全角スペース U+3000 は isprintable() が False を返す（Zs）が、日本語の社名・氏名の
+    区切りとして紙面に普通に現れる。設計 §2.3「正規化しない（紙面の見た目に近いほど
+    照合しやすい）」に従い**残す**。kie.py の label の規則（isprintable のみ）とは
+    ここで分かれる。制御文字（Cc）・書式文字（Cf）は引き続き落とす。
+
+    保存時（RegionRect の validator）と、プロンプトへ載せる直前（orchestrator の
+    読取領域ヒント）の両方がこれを呼ぶ。JSONB は検査導入前のデータや手修正で規則を
+    素通りし得るので、LLM に渡す側でも同じ規則を当てる（規則は 1 箇所に置く）。
+    """
+    if v is None:
+        return None
+    cleaned = "".join(ch for ch in v if ch.isprintable() or unicodedata.category(ch) == "Zs")
+    return cleaned.strip()[:EXAMPLE_VALUE_MAX_LEN] or None
+
+
 class RegionRect(BaseModel):
     """スキーマに保存する領域（設計 §4.1）。
 
@@ -92,18 +113,7 @@ class RegionRect(BaseModel):
     @field_validator("example_value")
     @classmethod
     def _sanitize_example_value(cls, v: Optional[str]) -> Optional[str]:
-        # 制御文字（U+0000 は Pg の TEXT に入らず保存ごと落ちる）・改行を落とし、
-        # 前後の空白を除いて上限で切る。残らなければ「例示値なし」と同じ None。
-        if v is None:
-            return None
-        # 全角スペース U+3000 は isprintable() が False を返す（Zs）が、日本語の社名・氏名の
-        # 区切りとして紙面に普通に現れる。設計 §2.3「正規化しない（紙面の見た目に近いほど
-        # 照合しやすい）」に従い**残す**。kie.py の label の規則（isprintable のみ）とは
-        # ここで分かれる。制御文字（Cc）・書式文字（Cf）は引き続き落とす。
-        cleaned = "".join(
-            ch for ch in v if ch.isprintable() or unicodedata.category(ch) == "Zs"
-        )
-        return cleaned.strip()[:EXAMPLE_VALUE_MAX_LEN] or None
+        return sanitize_example_value(v)
 
     @field_validator("created_at")
     @classmethod

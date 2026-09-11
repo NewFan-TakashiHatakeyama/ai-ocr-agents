@@ -277,3 +277,92 @@ def test_field_bbox_empty_span_ids_keeps_reported_page_no_bbox(bundle: PromptBun
     assert f.span_ids == []
     assert f.bbox is None
     assert f.page == 3  # 申告 page は残す（bbox が無いので矛盾しない）
+
+
+# --- 読取領域ヒント（設計 region-field-add-and-hint-v2 D13 / D15） ---
+
+_HINTED_SCHEMA = {
+    "doc_type": "invoice",
+    "fields": [
+        {
+            "name": "total_amount",
+            "type": "money_jpy",
+            "region_hint": {
+                "candidates": [{"span_id": 11, "text": "¥128,000"}, {"span_id": 12, "text": "税込"}],
+                "example_value": "¥120,000",
+                "example_present": False,
+            },
+        },
+        {"name": "memo", "type": "string"},
+    ],
+}
+_HINT_SPANS = _BOXED + [
+    Span(span_id=12, page=1, text="税込", conf=0.9, bbox=[190, 25, 220, 45]),
+    Span(span_id=13, page=1, text="¥99,000", conf=0.9, bbox=[100, 300, 180, 320]),
+]
+
+
+def test_region_hint_があっても_span_に_bbox_は載らない(bundle: PromptBundle) -> None:
+    """ヒントは候補 span の id と原文で渡す。全 span への座標付与（旧 with_bbox）は廃止。
+    座標を載せるとプロンプトが膨らむうえ、矩形注入と座標付与の効果を分離できない。"""
+    provider = FakeProvider([_kie_response([])])
+    kie_extract(
+        LLMAdapter(provider), bundle, spans=_HINT_SPANS, layout_markdown="", schema_json=_HINTED_SCHEMA
+    )
+    user = provider.calls[0][1]
+    assert '"bbox"' not in user
+    assert '"region_hint"' in user and '"candidates"' in user
+    # ヒントの説明文は region_hint を持つ run にだけ末尾に足す
+    assert user.endswith(bundle.kie_region_hint_template)
+    provider2 = FakeProvider([_kie_response([])])
+    kie_extract(LLMAdapter(provider2), bundle, spans=_HINT_SPANS, layout_markdown="", schema_json=_SCHEMA)
+    assert not provider2.calls[0][1].endswith(bundle.kie_region_hint_template)
+
+
+def _outcome(bundle: PromptBundle, span_ids: list[int]) -> dict[str, str]:
+    resp = _kie_response([{"name": "total_amount", "value": "x", "span_ids": span_ids}])
+    result = kie_extract(
+        LLMAdapter(FakeProvider([resp])), bundle, spans=_HINT_SPANS, layout_markdown="",
+        schema_json=_HINTED_SCHEMA,
+    )
+    return result.hint_outcomes
+
+
+def test_hint_outcomes_は集合演算で決まる(bundle: PromptBundle) -> None:
+    """モデルに申告させず、検証済み span_ids と候補 id の共通部分から決める（D15）。"""
+    assert _outcome(bundle, [11]) == {"total_amount": "followed"}
+    assert _outcome(bundle, [11, 12]) == {"total_amount": "followed"}  # 候補の部分集合
+    assert _outcome(bundle, [11, 13]) == {"total_amount": "partial"}  # 候補外も混ざる
+    assert _outcome(bundle, [13]) == {"total_amount": "rejected"}  # 別の場所から取った
+    assert _outcome(bundle, []) == {"total_amount": "rejected"}  # 根拠なし
+    assert _outcome(bundle, [999]) == {"total_amount": "rejected"}  # 捏造 id は検証で落ちる
+
+
+def test_hint_outcomes_はヒントを持つ項目にだけ付く(bundle: PromptBundle) -> None:
+    resp = _kie_response(
+        [
+            {"name": "total_amount", "value": "x", "span_ids": [11]},
+            {"name": "memo", "value": "y", "span_ids": [10]},
+        ]
+    )
+    result = kie_extract(
+        LLMAdapter(FakeProvider([resp])), bundle, spans=_HINT_SPANS, layout_markdown="",
+        schema_json=_HINTED_SCHEMA,
+    )
+    assert result.hint_outcomes == {"total_amount": "followed"}
+    # ExtractedField には載せない（DB 列にも足さない）
+    assert not hasattr(result.fields[0], "hint_outcome")
+    # ヒントの無い run では空
+    result2 = kie_extract(
+        LLMAdapter(FakeProvider([resp])), bundle, spans=_HINT_SPANS, layout_markdown="",
+        schema_json=_SCHEMA,
+    )
+    assert result2.hint_outcomes == {}
+
+
+def test_LLM_が返さなかったヒント項目は_rejected(bundle: PromptBundle) -> None:
+    result = kie_extract(
+        LLMAdapter(FakeProvider([_kie_response([])])), bundle, spans=_HINT_SPANS,
+        layout_markdown="", schema_json=_HINTED_SCHEMA,
+    )
+    assert result.hint_outcomes == {"total_amount": "rejected"}
