@@ -53,16 +53,19 @@ def key(s: Optional[str]) -> str:
     return norm_key(s)
 
 
-def locate(spans: list[Any], want: str) -> tuple[Optional[list[float]], int]:
+def locate(spans: list[Any], want: str) -> tuple[Optional[list[float]], int, Optional[str]]:
     """正解値を含む最小の span 連続列の外接を返す。
 
-    戻り値は (bbox, 候補数)。候補数が多い項目（同じ金額が複数箇所に出る等）は
-    人でも一意に引けないので、呼び出し側で記録して解釈に使う。
+    戻り値は (bbox, 候補数, 原文)。原文は一致した span の text を空白 1 つで連結した
+    もので、**例示値（RegionRect.example_value）の出どころ**になる（設計 v2 D11:
+    テンプレート元でその位置にあった span の原文。正規化後の値ではない）。
+    候補数が多い項目（同じ金額が複数箇所に出る等）は人でも一意に引けないので、
+    呼び出し側で記録して解釈に使う。
     """
     target = key(want)
     if not target:
-        return None, 0
-    hits: list[tuple[int, list[float]]] = []
+        return None, 0, None
+    hits: list[tuple[int, list[float], str]] = []
     for i in range(len(spans)):
         head = len(key(spans[i].text))
         joined = ""
@@ -85,15 +88,16 @@ def locate(spans: list[Any], want: str) -> tuple[Optional[list[float]], int]:
                             float(max(b[2] for b in boxes)),
                             float(max(b[3] for b in boxes)),
                         ],
+                        " ".join(str(spans[i + j].text) for j in range(n + 1)),
                     )
                 )
                 break
             if len(joined) > len(target) * 3:
                 break  # 伸ばしても届かない
     if not hits:
-        return None, 0
+        return None, 0, None
     hits.sort(key=lambda h: h[0])  # 連結数が少ない＝素直に一致したものを採る
-    return hits[0][1], len(hits)
+    return hits[0][1], len(hits), hits[0][2]
 
 
 def page_spans(
@@ -130,10 +134,16 @@ def derive_for_doc(
             for name, want in gold_fields.items():
                 if name in regions or not want:
                     continue
-                bbox, n = locate(spans, want)
+                bbox, n, quote = locate(spans, want)
                 if bbox is None:
                     continue
-                regions[name] = {"page": page_no, "rect": pad_rect(bbox, int(w), int(h))}
+                regions[name] = {
+                    "page": page_no,
+                    "rect": pad_rect(bbox, int(w), int(h)),
+                    # 例示値: テンプレート元の紙面でその位置にあった原文（実運用と同じ出どころ）
+                    "example_value": quote,
+                    "origin": "manual",
+                }
                 if n > 1:
                     report["ambiguous"][name] = n
         report["not_found"] = [n for n, v in gold_fields.items() if v and n not in regions]

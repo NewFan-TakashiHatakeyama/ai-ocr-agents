@@ -28,7 +28,7 @@ def test_1つの_span_に収まる値を見つける() -> None:
         ("株式会社エイビーエム", [100, 200, 300, 220]),
         ("わくわく物産株式会社", [500, 140, 700, 160]),
     )
-    bbox, n = locate(spans, "わくわく物産株式会社")
+    bbox, n, _q = locate(spans, "わくわく物産株式会社")
     assert bbox == [500.0, 140.0, 700.0, 160.0]
     assert n == 1
 
@@ -39,13 +39,13 @@ def test_複数の_span_に割れた住所を連結して見つける() -> None:
         ("東京都新宿区四谷9-9-9", [500, 200, 700, 220]),
         ("サプライビル2F", [500, 222, 640, 242]),
     )
-    bbox, _ = locate(spans, "東京都新宿区四谷9－9－9サプライビル2F")
+    bbox, _, _q = locate(spans, "東京都新宿区四谷9－9－9サプライビル2F")
     assert bbox == [500.0, 200.0, 700.0, 242.0]
 
 
 def test_表記の揺れを越えて見つける() -> None:
     spans = _spans(("￥395,217-", [200, 400, 340, 430]))
-    bbox, _ = locate(spans, "395217")
+    bbox, _, _q = locate(spans, "395217")
     assert bbox == [200.0, 400.0, 340.0, 430.0]
 
 
@@ -59,7 +59,7 @@ def test_同じ値が複数箇所にあれば候補数を返す() -> None:
         ("合計", [300, 900, 360, 920]),
         ("58,300", [600, 900, 700, 920]),
     )
-    bbox, n = locate(spans, "58300")
+    bbox, n, _q = locate(spans, "58300")
     assert n == 2
     assert bbox == [600.0, 300.0, 700.0, 320.0]  # 読み順で先に出た方
 
@@ -67,16 +67,27 @@ def test_同じ値が複数箇所にあれば候補数を返す() -> None:
 def test_見つからなければ領域を作らない() -> None:
     """OCR が文字を拾えていない項目は、どんなヒントを渡しても当てられない。"""
     spans = _spans(("まったく別の文字列", [0, 0, 10, 10]))
-    bbox, n = locate(spans, "わくわく物産株式会社")
+    bbox, n, _q = locate(spans, "わくわく物産株式会社")
     assert bbox is None
     assert n == 0
 
 
 def test_空の正解値は探さない() -> None:
-    assert locate(_spans(("なにか", [0, 0, 1, 1])), "") == (None, 0)
+    assert locate(_spans(("なにか", [0, 0, 1, 1])), "") == (None, 0, None)
 
 
 def test_探索キーは敬称と記号を落とす() -> None:
     assert key("大熊 和一 様") == key("大熊和一")
     assert key("￥395,217-") == key("395217")
     assert key("株式会社山田製作所 御中") == key("株式会社山田製作所")
+
+
+def test_一致した_span_の原文を例示値として返す() -> None:
+    """例示値の出どころはテンプレート元の span 原文（設計 v2 D11。正規化後の値ではない）。"""
+    spans = _spans(
+        ("株式会社", [500, 200, 600, 220]),
+        ("千曲川ホーム", [605, 200, 760, 220]),
+    )
+    bbox, _, quote = locate(spans, "株式会社千曲川ホーム")
+    assert bbox == [500.0, 200.0, 760.0, 220.0]
+    assert quote == "株式会社 千曲川ホーム"  # 空白 1 つで連結（web の手描きと同じ）
