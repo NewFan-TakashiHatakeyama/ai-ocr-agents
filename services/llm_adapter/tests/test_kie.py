@@ -68,6 +68,27 @@ def test_kie_tables(bundle: PromptBundle) -> None:
     assert result.tables[0].rows[0]["item"].span_ids == [10]
 
 
+def test_kie_要素の_null_で_run_を落とさない(bundle: PromptBundle) -> None:
+    """LLM は契約どおりの形でも要素に null を混ぜる（第 3 回計測の対照アームで
+    cells の値が null → AttributeError → run が failed になった）。欠陥のある要素だけ
+    捨てて、残りは通す。"""
+    resp = _kie_response(
+        [None, {"name": "total_amount", "value": "128000", "span_ids": [11], "page": 1}],
+        tables=[
+            None,
+            {"name": "broken", "rows": [None, {"cells": {"item": None, "qty": {"value": "2"}}}]},
+        ],
+    )
+    adapter = LLMAdapter(FakeProvider([resp]))
+    result = kie_extract(
+        adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA
+    )
+    assert [f.name for f in result.fields] == ["total_amount"]
+    assert len(result.tables) == 1
+    assert list(result.tables[0].rows[0]) == ["qty"]
+    assert result.tables[0].rows[0]["qty"].value == "2"
+
+
 def test_kie_discovery_uses_llm_label_when_schema_empty(bundle: PromptBundle) -> None:
     """スキーマレス自動発見（ADR-0006）: LLM 申告の見出し原文を label に使う。
 

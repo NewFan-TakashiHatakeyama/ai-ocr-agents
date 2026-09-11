@@ -193,6 +193,10 @@ def kie_extract(
     result = KieResult(response=resp)
     seen_names: set[str] = set()
     for item in data.get("fields", []) or []:
+        # LLM は契約どおりの JSON でも要素に null を混ぜることがある（実測: cells の値が
+        # null で AttributeError → run 全体が failed）。1 要素の欠陥で run を落とさない
+        if not isinstance(item, dict):
+            continue
         name = item.get("name")
         if not name:
             continue
@@ -242,10 +246,16 @@ def kie_extract(
         )
 
     for table in data.get("tables", []) or []:
+        if not isinstance(table, dict):
+            continue
         rows: list[dict[str, TableCell]] = []
         for row in table.get("rows", []) or []:
+            if not isinstance(row, dict):
+                continue
             cells: dict[str, TableCell] = {}
             for col, cell in (row.get("cells", {}) or {}).items():
+                if not isinstance(cell, dict):
+                    continue
                 cells[col] = TableCell(
                     value=(str(cell["value"]) if cell.get("value") is not None else None),
                     span_ids=_valid_span_ids(cell.get("span_ids"), span_map),
