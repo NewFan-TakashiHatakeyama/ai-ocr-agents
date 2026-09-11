@@ -18,6 +18,23 @@ def test_complete_json_extracts_from_prose() -> None:
     assert data == {"a": 2}
 
 
+def test_complete_json_正しい_JSON_の後ろに余計な出力があっても読める() -> None:
+    """第 3 回計測で run が failed になった形（正しいオブジェクトのあとに説明や 2 つ目の
+    オブジェクト）。末尾の括弧まで切ると "Extra data" で落ちる。"""
+    provider = FakeProvider(['{"fields": [{"name": "a"}]}\n補足: {"note": "x"}'])
+    adapter = LLMAdapter(provider)
+    data, _ = adapter.complete_json(system="s", user="u")
+    assert data == {"fields": [{"name": "a"}]}
+    assert len(provider.calls) == 1  # リペアに回っていない
+
+
+def test_complete_json_前置きに括弧が混じっても本体を読める() -> None:
+    provider = FakeProvider(['注意 {重要} の結果:\n{"a": 3}'])
+    adapter = LLMAdapter(provider)
+    data, _ = adapter.complete_json(system="s", user="u")
+    assert data == {"a": 3}
+
+
 def test_complete_json_repairs_once() -> None:
     provider = FakeProvider(["not json at all", '{"ok": true}'])
     adapter = LLMAdapter(provider)
