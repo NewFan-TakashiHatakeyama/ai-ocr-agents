@@ -196,8 +196,19 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
-  // 管理画面（SCR-04/05/06, admin）
-  listSchemas: () => request<{ items: SchemaDto[] }>(`/schemas`),
+  // 管理画面（SCR-04/05/06, admin）。アーカイブ済み（C9-D）は既定で出さない——
+  // 抽出のスキーマ選択・ワークフローの extract ノードはこの一覧を候補にするので、
+  // 隠すだけで「新しく使われる」経路が塞がる。管理画面の表示切替だけが true を渡す
+  listSchemas: (opts?: { includeArchived?: boolean }) =>
+    request<{ items: SchemaDto[] }>(
+      `/schemas${opts?.includeArchived ? "?include_archived=true" : ""}`,
+    ),
+  // アーカイブ / 復元。全版の is_active を切り替えるだけで行は消えない（過去の抽出結果
+  // から定義を辿れる）。有効なワークフローが使っていれば 409(E1005, details.workflows)
+  archiveSchema: (docType: string) =>
+    request<SchemaDto>(`/schemas/${encodeURIComponent(docType)}/archive`, { method: "POST" }),
+  unarchiveSchema: (docType: string) =>
+    request<SchemaDto>(`/schemas/${encodeURIComponent(docType)}/unarchive`, { method: "POST" }),
   // doc_type の**最新版**を取る（領域編集のプリロード起点）。listSchemas でも
   // 最新版は取れるが、run.schema_id は抽出時点の旧版であり得るので id 突合は
   // できない。編集は必ず doc_type 起点で行う。

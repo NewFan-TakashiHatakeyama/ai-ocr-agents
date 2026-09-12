@@ -29,7 +29,12 @@ from newfan_gateway.conntest import (
     check_webhook,
     invalid_url_reason,
 )
-from newfan_gateway.admin import ACTIVATION_BLOCKED_MESSAGE, AdminRepository, can_activate
+from newfan_gateway.admin import (
+    ACTIVATION_BLOCKED_MESSAGE,
+    AdminRepository,
+    SchemaArchivedError,
+    can_activate,
+)
 from newfan_gateway.deps import (
     get_admin,
     get_secret_store,
@@ -1075,6 +1080,7 @@ def _schema_dto(rec: Any) -> dto.SchemaDto:
         # 「取得 → 編集 → 新版として保存」往復で region / exclude が全滅する。
         exclude_regions=list(getattr(rec, "exclude_regions", []) or []),
         source_page_count=getattr(rec, "source_page_count", None),
+        archived=bool(getattr(rec, "archived", False)),
     )
 
 
@@ -1121,22 +1127,98 @@ def list_doc_types(
 
 @router.get("/schemas", response_model=dto.SchemaList)
 def list_schemas(
+    include_archived: bool = Query(default=False),
     principal: Principal = Depends(require_role("admin")),
     admin: AdminRepository = Depends(get_admin),
 ) -> dto.SchemaList:
-    return dto.SchemaList(items=[_schema_dto(s) for s in admin.list_schemas(principal.tenant_id)])
+    """doc_type ごとの最新版。アーカイブ済み（C9-D）は既定で出さない。
+
+    抽出のスキーマ選択・ワークフローの extract ノード・テンプレート化はこの一覧を
+    候補にするので、隠すだけで「新しく使われる」経路が塞がる。管理画面の
+    「アーカイブ済みを表示」だけが include_archived=true で復元候補を引く。
+    """
+    rows = admin.list_schemas(principal.tenant_id, include_archived=include_archived)
+    return dto.SchemaList(items=[_schema_dto(s) for s in rows])
 
 
 @router.get("/schemas/{doc_type}", response_model=dto.SchemaDto)
 def get_schema(
     doc_type: str,
+    include_archived: bool = Query(default=False),
     principal: Principal = Depends(require_role("admin")),
     admin: AdminRepository = Depends(get_admin),
 ) -> dto.SchemaDto:
     rec = admin.get_schema(principal.tenant_id, doc_type)
     if rec is None:
         raise ApiError("E1001", "スキーマが見つかりません", details={"doc_type": doc_type})
+    if rec.archived and not include_archived:
+        # テンプレート化の編集モードはここを起点にプリロードする。アーカイブ済みを
+        # 返すと「編集 → 新版として保存」でアーカイブが黙って解除される側に進む
+        raise ApiError(
+            "E1001",
+            "アーカイブ済みのスキーマです。使うには先に復元してください",
+            details={"doc_type": doc_type, "archived": True},
+        )
     return _schema_dto(rec)
+
+
+def _archive_schema(
+    doc_type: str, archived: bool, principal: Principal, admin: AdminRepository,
+    wf: WorkflowsRepository,
+) -> dto.SchemaDto:
+    rec = admin.get_schema(principal.tenant_id, doc_type)
+    if rec is None:
+        raise ApiError("E1001", "スキーマが見つかりません", details={"doc_type": doc_type})
+    if rec.archived == archived:
+        return _schema_dto(rec)  # 冪等（二重クリック・再送）
+    ids = admin.schema_ids_for_doc_type(principal.tenant_id, doc_type)
+    if archived:
+        # 有効なワークフローの extract.schema_id が（どの版でも）指していれば断る。
+        # 隠すと次に有効化し直せなくなる（L009）のに、走っている実行は続くという
+        # 中途半端な状態を作らない。draft/paused からの参照は止めない（L009 が断る）
+        active = wf.workflows_referencing_schema(principal.tenant_id, ids, statuses=("active",))
+        if active:
+            raise ApiError(
+                "E1005",
+                "有効なワークフローがこのスキーマを使っています。先にワークフローを停止してください",
+                details={"reason": "workflow_active", "workflows": _workflow_refs(active)},
+            )
+    updated = admin.set_schema_archived(principal.tenant_id, doc_type, archived)
+    if updated is None:  # 取得と更新の間で消えた
+        raise ApiError("E1001", "スキーマが見つかりません", details={"doc_type": doc_type})
+    wf.record_audit(
+        principal.tenant_id, actor_id=principal.sub,
+        action="schema.archive" if archived else "schema.unarchive",
+        target_id=updated.id, target_type="schema",
+        detail={"doc_type": doc_type, "versions": len(ids), "latest_version": updated.version},
+    )
+    return _schema_dto(updated)
+
+
+@router.post("/schemas/{doc_type}/archive", response_model=dto.SchemaDto)
+def archive_schema(
+    doc_type: str,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.SchemaDto:
+    """スキーマのアーカイブ（C9-D）。全版の is_active=false。行は消さない。
+
+    extraction_runs.schema_id の FK と過去の抽出結果の定義（項目名・ラベル）を保つ
+    ため、削除ではなくアーカイブにする。一覧・doc-types・分類候補・テンプレート化の
+    編集から消え、新版の作成（PUT /schemas）は E1005 になる。復元で元に戻る。
+    """
+    return _archive_schema(doc_type, True, principal, admin, wf)
+
+
+@router.post("/schemas/{doc_type}/unarchive", response_model=dto.SchemaDto)
+def unarchive_schema(
+    doc_type: str,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.SchemaDto:
+    return _archive_schema(doc_type, False, principal, admin, wf)
 
 
 @router.put("/schemas", response_model=dto.SchemaDto)
@@ -1145,9 +1227,20 @@ def put_schema(
     principal: Principal = Depends(require_role("admin")),
     admin: AdminRepository = Depends(get_admin),
 ) -> dto.SchemaDto:
+    existing = admin.get_schema(principal.tenant_id, body.doc_type)
+    if existing is not None and existing.archived:
+        # アーカイブ済み（C9-D）へは新規作成モードでも編集でも新版を足さない。足すと
+        # その版だけ is_active=true になり、一覧に戻る＝アーカイブが黙って解除される。
+        # 一覧から消えている以上「同名を新規作成」は起こり得る操作なので、復元を案内する
+        raise ApiError(
+            "E1005",
+            f"スキーマ「{body.doc_type}」はアーカイブ済みです。"
+            "使うには先に復元してください（アーカイブ済みを表示 → 復元）",
+            details={"doc_type": body.doc_type, "archived": True},
+        )
     # 新規作成モードはサーバ側で重複を拒否する。クライアントの重複チェックは一覧が
     # 陳腐化していると素通りし、既存スキーマを黙って新版で置換してしまう（レビュー確定）。
-    if body.create and admin.get_schema(principal.tenant_id, body.doc_type) is not None:
+    if body.create and existing is not None:
         raise ApiError(
             "E1005",
             "同名のスキーマが既に存在します。既存スキーマを選んで編集してください",
@@ -1177,13 +1270,19 @@ def put_schema(
     # exclude_regions / source_page_count は None のまま渡す（= 直前版から引き継ぎ）。
     # 旧編集画面・chat 経路はこれらを送らないので、ここで [] に潰すと保存 1 回で
     # 除外設定が消える（設計 §4.4）。
-    rec = admin.put_schema(  # 常に新版
-        principal.tenant_id,
-        body.doc_type,
-        fields,
-        exclude_regions=body.exclude_regions,
-        source_page_count=body.source_page_count,
-    )
+    try:
+        rec = admin.put_schema(  # 常に新版
+            principal.tenant_id,
+            body.doc_type,
+            fields,
+            exclude_regions=body.exclude_regions,
+            source_page_count=body.source_page_count,
+        )
+    except SchemaArchivedError as exc:
+        # 上の事前チェックとは別トランザクション。その間にアーカイブされた場合
+        raise ApiError(
+            "E1005", str(exc), details={"doc_type": body.doc_type, "archived": True}
+        ) from exc
     return _schema_dto(rec)
 
 
@@ -1343,13 +1442,29 @@ def _validate_graph(data: dict[str, Any]) -> "WorkflowGraph":
         raise ApiError("E4001", "graph_json がスキーマに合いません", details={"errors": errors}) from exc
 
 
+def _schema_usable(admin: AdminRepository, tenant_id: str, schema_id: str) -> bool:
+    """L009 のうち「アーカイブ済み」の側（C9-D）。存在判定は wf.schema_exists が担う。
+
+    ここ（ルータ）に置くのは、InMemory の WorkflowsRepository が版も is_active も
+    持たないため。admin repo（InMemory / Pg 両方）が archived を知っている。
+    """
+    rec = admin.get_schema_by_id(tenant_id, schema_id)
+    return rec is None or not rec.archived
+
+
 def _lint_workflow(
-    rec: "WorkflowRecord", graph: "WorkflowGraph", wf: WorkflowsRepository, tenant_id: str
+    rec: "WorkflowRecord",
+    graph: "WorkflowGraph",
+    wf: WorkflowsRepository,
+    tenant_id: str,
+    admin: AdminRepository,
 ) -> tuple[list[Finding], list[str]]:
     findings = lint(
         graph,
         auto_confirm=rec.auto_confirm,
-        schema_exists=lambda sid: wf.schema_exists(tenant_id, sid),
+        schema_exists=lambda sid: (
+            wf.schema_exists(tenant_id, sid) and _schema_usable(admin, tenant_id, sid)
+        ),
         connection_ok=lambda cid: wf.connection_ok(tenant_id, cid),
         schema_is_latest=lambda sid: wf.schema_is_latest(tenant_id, sid),
     )
@@ -1460,13 +1575,14 @@ def lint_workflow(
     body: Optional[dto.WorkflowLintRequest] = None,
     principal: Principal = Depends(require_role("admin")),
     wf: WorkflowsRepository = Depends(get_workflows),
+    admin: AdminRepository = Depends(get_admin),
 ) -> dto.WorkflowLintResponse:
     rec = wf.get_workflow(principal.tenant_id, workflow_id)
     if rec is None:
         raise ApiError("E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id})
     graph_data = body.graph_json if (body and body.graph_json is not None) else rec.graph_json
     graph = _validate_graph(graph_data)
-    findings, unsupported = _lint_workflow(rec, graph, wf, principal.tenant_id)
+    findings, unsupported = _lint_workflow(rec, graph, wf, principal.tenant_id, admin)
     return dto.WorkflowLintResponse(
         findings=[dto.LintFindingDto(**f.__dict__) for f in findings],
         activatable=not has_errors(findings) and not unsupported,
@@ -1526,7 +1642,7 @@ def activate_workflow(
         raise ApiError("E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id})
     graph = _validate_graph(rec.graph_json)
 
-    findings, unsupported = _lint_workflow(rec, graph, wf, principal.tenant_id)
+    findings, unsupported = _lint_workflow(rec, graph, wf, principal.tenant_id, admin)
     if unsupported:
         # 保存と lint は 13 種すべて通すが、実行できないノードの有効化はここで断る。
         # 「エディタに置けるのに動かない」を有効化の境界で明示する（§4.2）。

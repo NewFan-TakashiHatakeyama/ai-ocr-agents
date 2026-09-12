@@ -205,6 +205,8 @@ export interface SchemaDto {
   exclude_regions?: RegionRect[];
   /** テンプレート化時点の帳票ページ数 */
   source_page_count?: number | null;
+  /** アーカイブ済み（C9-D）。listSchemas は既定で出さないので、true は includeArchived のときだけ */
+  archived?: boolean;
 }
 
 /** 取込時の種別指定・分類の候補（GET /doc-types）。fields は含まない軽い一覧。 */

@@ -109,6 +109,16 @@ class WorkflowsRepository(Protocol):
         """
         ...
 
+    # スキーマのアーカイブのガード（C9-D）。extract.schema_id は旧版を固定保持し得る
+    # ので、doc_type の全版の id を渡す
+    def workflows_referencing_schema(
+        self,
+        tenant_id: str,
+        schema_ids: Iterable[str],
+        *,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> list[WorkflowRecord]: ...
+
     # 実行（§16 設計 v0.2 §11 / P3）
     def create_run(self, rec: WorkflowRunRecord) -> WorkflowRunRecord: ...
     def get_run(self, tenant_id: str, run_id: str) -> Optional[WorkflowRunRecord]: ...
@@ -230,12 +240,26 @@ class InMemoryWorkflowsRepository:
         *,
         statuses: Optional[Iterable[str]] = None,
     ) -> list[WorkflowRecord]:
+        return self._referencing(tenant_id, "connection_id", [connection_id], statuses)
+
+    def workflows_referencing_schema(
+        self,
+        tenant_id: str,
+        schema_ids: Iterable[str],
+        *,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> list[WorkflowRecord]:
+        return self._referencing(tenant_id, "schema_id", list(schema_ids), statuses)
+
+    def _referencing(
+        self, tenant_id: str, key: str, values: list[str], statuses: Optional[Iterable[str]]
+    ) -> list[WorkflowRecord]:
         allowed = set(statuses) if statuses is not None else None
         return [
             w
             for w in self.list_workflows(tenant_id)
             if (allowed is None or w.status in allowed)
-            and graph_references(w.graph_json, "connection_id", [connection_id])
+            and graph_references(w.graph_json, key, values)
         ]
 
     def runs_referencing_connection(self, tenant_id: str, connection_id: str) -> int:

@@ -770,9 +770,14 @@ class PgAdminRepository:
             self._rls(c, tenant_id)
             r = c.execute(
                 text(
-                    "SELECT id, tenant_id, doc_type, version, fields,"
-                    " exclude_regions, source_page_count"
-                    " FROM field_schemas WHERE tenant_id=:t AND id=:i"
+                    "SELECT s.id, s.tenant_id, s.doc_type, s.version, s.fields,"
+                    " s.exclude_regions, s.source_page_count,"
+                    # アーカイブ判定は doc_type 単位（全版が is_active=false）。
+                    # seed_schemas.py は旧版だけを false にするので、この行の is_active
+                    # だけ見ると seed 済み環境の旧版 id が全部「アーカイブ済み」になる
+                    " NOT EXISTS (SELECT 1 FROM field_schemas a WHERE a.tenant_id=s.tenant_id"
+                    "   AND a.doc_type=s.doc_type AND a.is_active) AS archived"
+                    " FROM field_schemas s WHERE s.tenant_id=:t AND s.id=:i"
                 ),
                 {"t": tenant_id, "i": schema_id},
             ).mappings().first()
@@ -784,20 +789,25 @@ class PgAdminRepository:
             fields=[SchemaFieldDef(**f) for f in (r["fields"] or [])],
             exclude_regions=list(r["exclude_regions"] or []),
             source_page_count=r["source_page_count"],
+            archived=bool(r["archived"]),
         )
 
-    def list_schemas(self, tenant_id: str):
+    def list_schemas(self, tenant_id: str, *, include_archived: bool = False):
         from newfan_gateway.records import SchemaFieldDef, SchemaRecord
 
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
             rows = c.execute(
                 text(
-                    "SELECT DISTINCT ON (doc_type) id, doc_type, version, fields, "
-                    "exclude_regions, source_page_count "
-                    "FROM field_schemas WHERE tenant_id=:t ORDER BY doc_type, version DESC"
+                    "SELECT * FROM ("
+                    "  SELECT DISTINCT ON (doc_type) id, doc_type, version, fields,"
+                    "    exclude_regions, source_page_count,"
+                    # 窓関数は DISTINCT ON より先に評価されるので、全版にわたる集約になる
+                    "    NOT bool_or(is_active) OVER (PARTITION BY doc_type) AS archived"
+                    "  FROM field_schemas WHERE tenant_id=:t ORDER BY doc_type, version DESC"
+                    ") s WHERE CAST(:inc AS boolean) OR NOT s.archived ORDER BY doc_type"
                 ),
-                {"t": tenant_id},
+                {"t": tenant_id, "inc": include_archived},
             ).all()
         return [
             SchemaRecord(
@@ -808,6 +818,7 @@ class PgAdminRepository:
                 fields=[SchemaFieldDef.model_validate(f) for f in (r.fields or [])],
                 exclude_regions=list(r.exclude_regions or []),
                 source_page_count=r.source_page_count,
+                archived=bool(r.archived),
             )
             for r in rows
         ]
@@ -819,7 +830,8 @@ class PgAdminRepository:
             self._rls(c, tenant_id)
             r = c.execute(
                 text(
-                    "SELECT id, version, fields, exclude_regions, source_page_count "
+                    "SELECT id, version, fields, exclude_regions, source_page_count,"
+                    " NOT bool_or(is_active) OVER () AS archived "
                     "FROM field_schemas "
                     "WHERE tenant_id=:t AND doc_type=:d ORDER BY version DESC LIMIT 1"
                 ),
@@ -835,7 +847,33 @@ class PgAdminRepository:
             fields=[SchemaFieldDef.model_validate(f) for f in (r.fields or [])],
             exclude_regions=list(r.exclude_regions or []),
             source_page_count=r.source_page_count,
+            archived=bool(r.archived),
         )
+
+    def schema_ids_for_doc_type(self, tenant_id: str, doc_type: str):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT id FROM field_schemas WHERE tenant_id=:t AND doc_type=:d"
+                    " ORDER BY version"
+                ),
+                {"t": tenant_id, "d": doc_type},
+            ).all()
+        return [r[0] for r in rows]
+
+    def set_schema_archived(self, tenant_id: str, doc_type: str, archived: bool):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            n = c.execute(
+                text(
+                    "UPDATE field_schemas SET is_active=:a WHERE tenant_id=:t AND doc_type=:d"
+                ),
+                {"a": not archived, "t": tenant_id, "d": doc_type},
+            ).rowcount
+        if n == 0:
+            return None
+        return self.get_schema(tenant_id, doc_type)
 
     def put_schema(
         self, tenant_id: str, doc_type: str, fields, *, exclude_regions=None, source_page_count=None
@@ -843,7 +881,7 @@ class PgAdminRepository:
         import json as _json
         import uuid as _uuid
 
-        from newfan_gateway.admin import reject_reserved_field_names
+        from newfan_gateway.admin import SchemaArchivedError, reject_reserved_field_names
         from newfan_gateway.records import SchemaRecord
 
         reject_reserved_field_names(fields)  # D9: 書き込み側で拒む（読み出しでは拒まない）
@@ -854,13 +892,19 @@ class PgAdminRepository:
             # 版選択（ORDER BY version DESC LIMIT 1）で取る。ORDER BY を落とすと
             # v1 の設定が復活して v2 以降の設定が消えるという、InMemory では
             # 検出できない事故になる（設計 §4.4 / C22）。
+            # archived は全版の集約（窓関数）。アーカイブ済みへの新版は同じ
+            # トランザクション内で拒む（新版が INSERT されると is_active=true の
+            # 既定でアーカイブが黙って解除される。C9-D）
             prev = c.execute(
                 text(
-                    "SELECT exclude_regions, source_page_count FROM field_schemas "
+                    "SELECT exclude_regions, source_page_count,"
+                    " NOT bool_or(is_active) OVER () AS archived FROM field_schemas "
                     "WHERE tenant_id=:t AND doc_type=:d ORDER BY version DESC LIMIT 1"
                 ),
                 {"t": tenant_id, "d": doc_type},
             ).first()
+            if prev is not None and prev[2]:
+                raise SchemaArchivedError(doc_type)
             # None = 引き継ぎ / 明示 [] = クリア（§4.4）
             if exclude_regions is not None:
                 regions = [
@@ -1424,6 +1468,11 @@ class PgWorkflowsRepository:
                                          *, statuses=None):
         return self._workflows_referencing(
             tenant_id, "connection_id", [connection_id], statuses=statuses
+        )
+
+    def workflows_referencing_schema(self, tenant_id: str, schema_ids, *, statuses=None):
+        return self._workflows_referencing(
+            tenant_id, "schema_id", list(schema_ids), statuses=statuses
         )
 
     def _workflows_referencing(self, tenant_id: str, key: str, ids: list[str], *, statuses):

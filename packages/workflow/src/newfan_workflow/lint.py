@@ -200,7 +200,8 @@ def lint(
                         )
                     )
 
-    # L009: schema_id の実在（tenant 内）
+    # L009: schema_id の実在（tenant 内）。アーカイブ済み（C9-D）も「使えない」側に
+    # 倒す（gateway の resolver が false を返す）。文言はその両方を言う
     if schema_exists is not None:
         for node in graph.nodes:
             if isinstance(node, ExtractNode) and not schema_exists(node.config.schema_id):
@@ -208,7 +209,7 @@ def lint(
                     Finding(
                         "L009",
                         "error",
-                        f"スキーマが存在しません: {node.config.schema_id!r}",
+                        f"スキーマが存在しないかアーカイブ済みです: {node.config.schema_id!r}",
                         node_id=node.id,
                     )
                 )

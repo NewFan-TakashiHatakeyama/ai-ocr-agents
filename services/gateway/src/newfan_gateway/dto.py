@@ -268,6 +268,9 @@ class SchemaDto(BaseModel):
     fields: list[SchemaFieldDto]
     exclude_regions: list[RegionRect] = Field(default_factory=list)
     source_page_count: Optional[int] = None
+    # アーカイブ済み（C9-D）。GET /schemas は既定で出さないので、true が返るのは
+    # include_archived=true のときだけ。UI はバッジと「復元」ボタンに使う
+    archived: bool = False
 
 
 class SchemaList(BaseModel):

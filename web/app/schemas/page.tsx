@@ -9,10 +9,26 @@ import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
 import { chatHrefForSchema, schemaAddRequest } from "@/lib/schemaChat";
 import { useToasts } from "@/lib/toast";
-import type { SchemaFieldDto } from "@/lib/types";
+import type { SchemaDto, SchemaFieldDto, WorkflowRefDto } from "@/lib/types";
 
 // SCR-06 スキーマ管理（§5.5）。座標は登場せず、意味定義（名前・型・重要度）だけを版管理。
 const TYPES = ["string", "money_jpy", "date", "number", "jp_invoice_reg_no", "tax_rate_jp", "table"];
+
+/** 409(E1005) の details.workflows を「名前」の並びにする。無ければ空文字 */
+function workflowNames(details?: Record<string, unknown>): string {
+  const rows = (details?.workflows as WorkflowRefDto[] | undefined) ?? [];
+  return rows.map((w) => `「${w.name}」`).join("、");
+}
+
+// アーカイブ / 復元の確認文言。アーカイブは元に戻せる（復元）が、一覧・抽出のスキーマ
+// 選択・ワークフローの候補から消えることは先に言う（C9-D）。
+function confirmArchive(s: SchemaDto): boolean {
+  return window.confirm(
+    `スキーマ「${s.doc_type}」（v${s.version}）をアーカイブします。\n` +
+      "抽出のスキーマ選択・帳票種別の候補・ワークフローの候補から消え、新しい版も作れなくなります。" +
+      "過去の抽出結果はそのまま残り、「復元」で元に戻せます。\n\nよろしいですか？",
+  );
+}
 
 function AdminDenied({ message }: { message: string }) {
   return (
@@ -32,7 +48,13 @@ function AdminDenied({ message }: { message: string }) {
 export default function SchemasPage() {
   const qc = useQueryClient();
   const push = useToasts((s) => s.push);
-  const { data, error, isLoading } = useQuery({ queryKey: ["schemas"], queryFn: () => api.listSchemas() });
+  // 「アーカイブ済みを表示」（C9-D）。既定 off。key の第 2 要素で分けるので、他画面の
+  // ["schemas"]（候補一覧・既定＝隠す）とキャッシュが混ざらない。invalidate は prefix 一致
+  const [showArchived, setShowArchived] = useState(false);
+  const { data, error, isLoading } = useQuery({
+    queryKey: ["schemas", { includeArchived: showArchived }],
+    queryFn: () => api.listSchemas({ includeArchived: showArchived }),
+  });
   const [docType, setDocType] = useState<string | null>(null);
   const [fields, setFields] = useState<SchemaFieldDto[]>([]);
   // 新規スキーマ作成モード（③）: 既存 doc_type の編集ではなく、ゼロから項目を定義する。
@@ -84,7 +106,43 @@ export default function SchemasPage() {
     },
   });
 
+  // アーカイブ / 復元。有効なワークフローが使っていれば 409（先に停止してもらう）
+  const archive = useMutation({
+    mutationFn: (v: { s: SchemaDto; archived: boolean }) =>
+      v.archived ? api.archiveSchema(v.s.doc_type) : api.unarchiveSchema(v.s.doc_type),
+    onSuccess: (rec) => {
+      push({
+        kind: "ok",
+        message: rec.archived
+          ? `「${rec.doc_type}」をアーカイブしました。「アーカイブ済みを表示」から復元できます。`
+          : `「${rec.doc_type}」を復元しました。抽出のスキーマ選択に再び表示されます。`,
+      });
+      qc.invalidateQueries({ queryKey: ["schemas"] });
+      qc.invalidateQueries({ queryKey: ["doc-types"] });
+    },
+    onError: (e, v) => {
+      // instanceof は dev のモジュール重複で false になり得るため status/details を直接見る
+      const err = e as { status?: number; details?: Record<string, unknown> };
+      if (err.status === 409) {
+        push({
+          kind: "warn",
+          message:
+            `「${v.s.doc_type}」は有効なワークフロー ${workflowNames(err.details)} が使っているためアーカイブできません。` +
+            "先にワークフローを停止してください。",
+        });
+        return;
+      }
+      push({
+        kind: "err",
+        message: `${v.archived ? "アーカイブ" : "復元"}できませんでした（${(e as Error).message}）。`,
+      });
+    },
+  });
+
   if (error instanceof ApiError && error.status === 403) return <AdminDenied message="権限がありません" />;
+
+  // アーカイブ済みは読めるだけ。編集（新版）はサーバも E1005 で断るので、押させない
+  const readOnly = !creating && Boolean(current?.archived);
 
   function setField(i: number, patch: Partial<SchemaFieldDto>) {
     setFields((fs) => fs.map((f, j) => (j === i ? { ...f, ...patch } : f)));
@@ -147,8 +205,15 @@ export default function SchemasPage() {
         <span className="ttl">
           スキーマ{creating ? ": 新規作成" : current ? `: ${current.doc_type}` : ""}
         </span>
-        {!creating && current && <StatusChip status="confirmed" />}
-        {!creating && current && <span className="sub">v{current.version} · 有効</span>}
+        {!creating && current && !current.archived && <StatusChip status="confirmed" />}
+        {!creating && current && current.archived && (
+          <span className="chip st-failed">アーカイブ済み</span>
+        )}
+        {!creating && current && (
+          <span className="sub">
+            v{current.version} · {current.archived ? "アーカイブ済み" : "有効"}
+          </span>
+        )}
         {creating && <span className="sub">まだ保存されていません</span>}
         <span className="spacer" />
         {creating && (
@@ -156,32 +221,57 @@ export default function SchemasPage() {
             キャンセル
           </button>
         )}
+        {!creating && current && !current.archived && (
+          <button
+            className="btn sm ghost"
+            disabled={archive.isPending || save.isPending}
+            title="一覧と候補から外す（復元できます）"
+            onClick={() => {
+              if (confirmArchive(current)) archive.mutate({ s: current, archived: true });
+            }}
+          >
+            {archive.isPending ? "処理中…" : "アーカイブ"}
+          </button>
+        )}
+        {!creating && current && current.archived && (
+          <button
+            className="btn sm"
+            disabled={archive.isPending}
+            title="一覧と候補に戻す"
+            onClick={() => archive.mutate({ s: current, archived: false })}
+          >
+            {archive.isPending ? "処理中…" : "復元"}
+          </button>
+        )}
         <button
           className="btn sm primary"
-          disabled={(creating ? false : !current) || save.isPending}
+          disabled={(creating ? false : !current) || save.isPending || readOnly}
+          title={readOnly ? "アーカイブ済みのスキーマは編集できません。先に復元してください" : undefined}
           onClick={onSave}
         >
           {saveLabel}
         </button>
       </div>
 
-      <div style={{ padding: "12px 22px", display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <div style={{ padding: "12px 22px", display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         {data?.items.map((s) => (
           <button
             key={s.doc_type}
             className={`filter${!creating && s.doc_type === current?.doc_type ? " on" : ""}`}
-            style={
-              !creating && s.doc_type === current?.doc_type
+            style={{
+              ...(!creating && s.doc_type === current?.doc_type
                 ? { borderColor: "var(--brand)", color: "var(--brand-deep)" }
-                : undefined
-            }
+                : {}),
+              ...(s.archived ? { opacity: 0.6, textDecoration: "line-through" } : {}),
+            }}
+            title={s.archived ? "アーカイブ済み" : undefined}
             onClick={() => {
               setCreating(false);
               setDocType(s.doc_type);
               setFields(s.fields.map((f) => ({ ...f })));
             }}
           >
-            {s.doc_type}（v{s.version}）
+            {s.doc_type}（v{s.version}）{s.archived ? " 📦" : ""}
           </button>
         ))}
         <button
@@ -191,7 +281,24 @@ export default function SchemasPage() {
         >
           ＋ 新規スキーマ
         </button>
+        <span className="spacer" />
+        <label className="sub" style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={(e) => setShowArchived(e.target.checked)}
+            aria-label="アーカイブ済みを表示"
+          />
+          アーカイブ済みを表示
+        </label>
       </div>
+
+      {readOnly && (
+        <p className="sub" style={{ padding: "0 22px" }}>
+          📦 このスキーマはアーカイブ済みです。抽出のスキーマ選択・ワークフローの候補には出ません。
+          編集するには「復元」してください（過去の抽出結果はそのまま残っています）。
+        </p>
+      )}
 
       <div style={{ padding: "4px 22px 22px" }}>
         {isLoading && <p>読み込み中…</p>}
