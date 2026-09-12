@@ -31,6 +31,11 @@
 set -euo pipefail
 
 TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../deploy/terraform" && pwd)"
+# 環境ごとの値（ARN・サイジング・アプリ設定）は tfvars に置く（雛形: env/production.tfvars.example）。
+# 読取領域ヒントのキルスイッチ（region_kie_hints = "0"）と有効化の時点
+# （region_hints_activated_at）もここ。apply を伴うコマンド（up/resume/vl-*）で反映される。
+# tfvars に書かず一時的に止めるだけなら: TF_VAR_region_kie_hints=0 scripts/aws_env.sh resume
+# （tfvars の値が優先される。次に素の apply をすると on に戻る）
 TFVARS="${TFVARS:-env/production.tfvars}"
 REGION="${AWS_REGION:-ap-northeast-1}"
 ENV_NAME="${ENV_NAME:-production}"

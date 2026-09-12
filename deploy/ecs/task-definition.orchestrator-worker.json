@@ -18,6 +18,7 @@
         { "name": "AWS_REGION", "value": "${AWS_REGION}" },
         { "name": "LLM_MODEL", "value": "${LLM_MODEL}" },
         { "name": "REGION_KIE_HINTS", "value": "${REGION_KIE_HINTS}" },
+        { "name": "REGION_HINTS_ACTIVATED_AT", "value": "${REGION_HINTS_ACTIVATED_AT}" },
         { "name": "STRUCTURE_URL", "value": "http://structure-svc:8080" }
       ],
       "secrets": [

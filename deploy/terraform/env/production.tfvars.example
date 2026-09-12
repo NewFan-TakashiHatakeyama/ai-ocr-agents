@@ -45,6 +45,16 @@ anthropic_secret_arn = "arn:aws:secretsmanager:ap-northeast-1:654654601240:secre
 # 印章認識オプション（+2% 程度。DD-03: 機能は config が正）
 # structure_seal_enabled = true
 
+# --- 読取領域ヒント（orchestrator-worker。設計 region-field-add-and-hint-v2） ---
+# 既定 on。止めるときだけキルスイッチに "0" を渡す（空文字は on）。
+# region_kie_hints = "0"
+# 「有効化前に引かれた領域」注記の境界。コードの定数 2026-09-12T00:00:00Z が既定で、
+# この環境で実際に on にした時点が違うときだけ ISO 8601 で渡す。時刻と tz（Z かオフセット）
+# まで必須で、日付だけは plan で弾く（worker は tz の無い値を UTC とみなすため、JST の
+# 「on にした日」を日付だけで書くと境界が 9 時間ずれる）。JST の時点は
+# "2026-10-01T00:00:00+09:00" のように書く
+# region_hints_activated_at = "2026-09-12T00:00:00Z"
+
 # --- データストア（MVP 既定。本番昇格時に見直す） ---
 # db_instance_class = "db.t4g.medium"
 # db_multi_az       = true

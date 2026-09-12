@@ -6,6 +6,7 @@ DD-10 の適用制約は llm-adapter の llm_correct 側で強制済み。
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from dataclasses import field as dc_field
@@ -37,6 +38,8 @@ from newfan_orchestrator.region_mask import regions_for_page
 
 NodeFn = Callable[[ExtractionState], dict[str, Any]]
 
+logger = logging.getLogger(__name__)
+
 
 def _rule_hints(active_rules: list[dict[str, Any]]) -> str:
     hints = [r.get("rule_json", {}).get("hint_text", "") for r in active_rules]
@@ -46,10 +49,66 @@ def _rule_hints(active_rules: list[dict[str, Any]]) -> str:
 #: 読取領域ヒントを既定 on にした時点（設計 v2 §1.5 / §2.8）。これより前に
 #: 引かれた領域（``created_at`` が無い・これより古い）は、作者がヒントとしての効果を
 #: 確認していないので、検証画面で「有効化前に引かれた領域」として区別して見せる。
+#: 環境ごとに実際に on にした時点が違うときは、環境変数 ``REGION_HINTS_ACTIVATED_AT``
+#: で上書きできる（``region_hints_activated_at``）。
 REGION_HINTS_ACTIVATED_AT = "2026-09-12T00:00:00Z"
 _REGION_HINTS_ACTIVATED_DT = datetime.fromisoformat(
     REGION_HINTS_ACTIVATED_AT.replace("Z", "+00:00")
 )
+
+# ``REGION_HINTS_ACTIVATED_AT`` の値ごとの解釈結果。不正な値の warning を値ごとに 1 回に
+# 抑えるため（run ごと・項目ごとに読むので、毎回出すとログが埋まる）。値はプロセスの
+# 起動時に決まるので実質 1 件。テストは env を monkeypatch し、warning の回数を見るときは
+# この辞書を空にしてから呼ぶ
+_activated_at_cache: dict[str, Optional[datetime]] = {}
+
+
+def _parse_iso_utc(raw: str) -> Optional[datetime]:
+    """ISO 8601 の文字列を tz 付き datetime に読む。解釈できなければ None。
+
+    末尾 ``Z``・オフセット付きのどちらも受け、tz の無い値（日付だけ等）は UTC とみなす。
+    ``created_at``（RegionRect が UTC の Z 付きに正規化して保存する）と環境変数
+    ``REGION_HINTS_ACTIVATED_AT`` の両方をこの 1 つの規則で読む。
+    """
+    probe = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+    try:
+        dt = datetime.fromisoformat(probe)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def region_hints_activated_at() -> datetime:
+    """「有効化前に引かれた領域」の境界となる時点（設計 v2 §1.5 / §2.8）。
+
+    既定は定数 ``REGION_HINTS_ACTIVATED_AT``（コードで既定 on にした時点）。ただし
+    実際に on になった時点は環境ごとにずれ得る（キルスイッチで止めていた期間があった、
+    デプロイした日が違う等）。そのときは環境変数 ``REGION_HINTS_ACTIVATED_AT`` に
+    実際に on にした時点（ISO 8601。末尾 ``Z`` かオフセット付き）を渡すと、注記の境界が
+    それに合う。tz の無い値（日付だけ ``2026-10-01`` 等）は **UTC** とみなす（JST の 0 時
+    ではない。JST の時点は ``2026-10-01T00:00:00+09:00`` のように書く。deploy 側の注記と
+    terraform の validation はこの規則を前提にしている）。
+
+    - 未設定・空文字は定数（compose の ``${REGION_HINTS_ACTIVATED_AT:-}`` が渡す値）
+    - 解釈できない値は**定数に倒す**。黙って倒さず warning を出す（値ごとに 1 回）。
+      境界を勝手に動かすより、既定の境界で注記が出続ける方が安全側
+    - env は呼ぶたびに読む（テストが monkeypatch できる）。解釈の結果だけを値ごとに持つ
+    """
+    raw = os.environ.get("REGION_HINTS_ACTIVATED_AT", "").strip()
+    if not raw:
+        return _REGION_HINTS_ACTIVATED_DT
+    if raw not in _activated_at_cache:
+        parsed = _parse_iso_utc(raw)
+        if parsed is None:
+            logger.warning(
+                "REGION_HINTS_ACTIVATED_AT=%r は ISO 8601 として解釈できないため無視し、"
+                "既定の %s を有効化の時点として使う",
+                raw,
+                REGION_HINTS_ACTIVATED_AT,
+            )
+        _activated_at_cache[raw] = parsed
+    parsed = _activated_at_cache[raw]
+    return parsed if parsed is not None else _REGION_HINTS_ACTIVATED_DT
 
 
 def region_hints_enabled() -> bool:
@@ -111,7 +170,7 @@ def _region_px(region: dict[str, Any], pages: list[dict[str, Any]]) -> Optional[
 
 
 def _is_pre_activation(created_at: Any) -> bool:
-    """領域が ``REGION_HINTS_ACTIVATED_AT`` より前に引かれたものか（設計 v2 §1.5）。
+    """領域が有効化の時点（``region_hints_activated_at``）より前に引かれたものか（設計 v2 §1.5）。
 
     ``created_at`` は RegionRect が tz 付き UTC の ISO 8601（末尾 Z）に正規化して保存
     するが、JSONB は検査導入前のデータや手修正で規則を素通りし得る。**無い・解釈できない
@@ -121,15 +180,10 @@ def _is_pre_activation(created_at: Any) -> bool:
     """
     if not isinstance(created_at, str) or not created_at.strip():
         return True
-    raw = created_at.strip()
-    probe = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
-    try:
-        dt = datetime.fromisoformat(probe)
-    except ValueError:
+    dt = _parse_iso_utc(created_at.strip())
+    if dt is None:
         return True
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt < _REGION_HINTS_ACTIVATED_DT
+    return dt < region_hints_activated_at()
 
 
 @dataclass
@@ -144,7 +198,8 @@ class HintReport:
       「種類が合わない（例示: 株式会社〜 / 候補: 大熊邸）」と**何と何が合わなかったか**を
       出すため。理由の定数だけでは、テンプレートの作者が領域を引き直す判断ができない
     - pre_activation: 評価した（given か dropped に載った）項目のうち、領域の
-      ``created_at`` が無い・``REGION_HINTS_ACTIVATED_AT`` より前のもの（§1.5 / §2.8）。
+      ``created_at`` が無い・有効化の時点（``region_hints_activated_at``。既定は
+      ``REGION_HINTS_ACTIVATED_AT``）より前のもの（§1.5 / §2.8）。
       検証画面の**参考表示だけ**に使う。レビュー件数・確信度には触らない
     """
 

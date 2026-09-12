@@ -119,8 +119,9 @@ export interface RegionStats {
 
 /** ヒントの内訳。given は渡した項目、dropped は渡す前に落とした項目と理由、
  *  outcomes は LLM が従ったか（span_ids と候補の集合演算。モデルの申告ではない）。
- *  pre_activation は評価した項目のうち、領域がヒント有効化（2026-09-12）より前に
- *  引かれたもの（created_at が無い・古い。§1.5）。参考表示にしか使わない。 */
+ *  pre_activation は評価した項目のうち、領域がヒント有効化の時点（既定 2026-09-12。
+ *  サーバの環境変数 REGION_HINTS_ACTIVATED_AT で上書き可）より前に引かれたもの
+ *  （created_at が無い・古い。§1.5）。判定はサーバが行い、参考表示にしか使わない。 */
 export interface RegionHintStats {
   given?: string[];
   dropped?: Record<string, string>;
