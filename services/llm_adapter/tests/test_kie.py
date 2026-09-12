@@ -12,6 +12,9 @@ _SPANS = [
 _SCHEMA = {"doc_type": "invoice", "fields": [{"name": "total_amount", "type": "money_jpy"}]}
 
 
+_NULL_TOTAL = [{"name": "total_amount", "value": None, "span_ids": [], "page": 1}]
+
+
 def _kie_response(fields: list[dict], tables: list[dict] | None = None) -> str:
     return json.dumps(
         {"fields": fields, "tables": tables or [], "unmapped_required": []},
@@ -20,9 +23,7 @@ def _kie_response(fields: list[dict], tables: list[dict] | None = None) -> str:
 
 
 def test_kie_maps_fields_with_valid_spans(bundle: PromptBundle) -> None:
-    resp = _kie_response(
-        [{"name": "total_amount", "value": "128000", "span_ids": [11], "page": 1}]
-    )
+    resp = _kie_response([{"name": "total_amount", "value": "128000", "span_ids": [11], "page": 1}])
     adapter = LLMAdapter(FakeProvider([resp]))
     result = kie_extract(
         adapter, bundle, spans=_SPANS, layout_markdown="# 請求書", schema_json=_SCHEMA
@@ -41,9 +42,7 @@ def test_kie_drops_hallucinated_span_ids(bundle: PromptBundle) -> None:
         [{"name": "total_amount", "value": "999999", "span_ids": [999], "page": 1}]
     )
     adapter = LLMAdapter(FakeProvider([resp]))
-    result = kie_extract(
-        adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA
-    )
+    result = kie_extract(adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA)
     f = result.fields[0]
     assert f.span_ids == []  # 捏造 span を除去
     assert f.source_quote is None  # 根拠なし → 後段で grounding 0 → レビュー
@@ -51,7 +50,7 @@ def test_kie_drops_hallucinated_span_ids(bundle: PromptBundle) -> None:
 
 def test_kie_tables(bundle: PromptBundle) -> None:
     resp = _kie_response(
-        [],
+        _NULL_TOTAL,
         tables=[
             {
                 "name": "line_items",
@@ -60,9 +59,7 @@ def test_kie_tables(bundle: PromptBundle) -> None:
         ],
     )
     adapter = LLMAdapter(FakeProvider([resp]))
-    result = kie_extract(
-        adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA
-    )
+    result = kie_extract(adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA)
     assert result.tables[0].name == "line_items"
     assert result.tables[0].rows[0]["item"].value == "A"
     assert result.tables[0].rows[0]["item"].span_ids == [10]
@@ -73,9 +70,7 @@ def test_kie_fields_の配列だけが返っても読む(bundle: PromptBundle) -
     （第 3 回計測で同じ帳票の介入アームが 2 回続けて failed）。"""
     resp = json.dumps([{"name": "total_amount", "value": "128000", "span_ids": [11], "page": 1}])
     adapter = LLMAdapter(FakeProvider([resp]))
-    result = kie_extract(
-        adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA
-    )
+    result = kie_extract(adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA)
     assert [f.name for f in result.fields] == ["total_amount"]
     assert result.fields[0].span_ids == [11]
 
@@ -87,7 +82,9 @@ def test_kie_スキーマの丸写し_値の無い配列_は_E3002(bundle: Promp
 
     from newfan_llm_adapter.errors import LLMError
 
-    echo = json.dumps([{"name": "total_amount", "type": "money_jpy", "label": "合計", "required": False}])
+    echo = json.dumps(
+        [{"name": "total_amount", "type": "money_jpy", "label": "合計", "required": False}]
+    )
     adapter = LLMAdapter(FakeProvider([echo]))
     with pytest.raises(LLMError) as exc:
         kie_extract(adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA)
@@ -95,9 +92,40 @@ def test_kie_スキーマの丸写し_値の無い配列_は_E3002(bundle: Promp
     # value キーがあれば（null でも）丸写しではなく「読んだが無かった」
     blank = json.dumps([{"name": "total_amount", "value": None, "span_ids": []}])
     result = kie_extract(
-        LLMAdapter(FakeProvider([blank])), bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA
+        LLMAdapter(FakeProvider([blank])),
+        bundle,
+        spans=_SPANS,
+        layout_markdown="",
+        schema_json=_SCHEMA,
     )
     assert [f.name for f in result.fields] == ["total_amount"]
+
+
+def test_kie_スキーマに項目があるのに_fields_が空なら_E3002(bundle: PromptBundle) -> None:
+    """第 4 回計測 S3: 介入アームで fields が空の「成功」が返り、全項目未抽出の run になった。
+    自動発見（スキーマの fields が空）では 0 件も正当なので通す。"""
+    import pytest
+
+    from newfan_llm_adapter.errors import LLMError
+
+    empty = json.dumps({"fields": [], "tables": [], "unmapped_required": []})
+    with pytest.raises(LLMError) as exc:
+        kie_extract(
+            LLMAdapter(FakeProvider([empty, empty])),
+            bundle,
+            spans=_SPANS,
+            layout_markdown="",
+            schema_json=_SCHEMA,
+        )
+    assert exc.value.code == "E3002"
+    discovery = kie_extract(
+        LLMAdapter(FakeProvider([empty])),
+        bundle,
+        spans=_SPANS,
+        layout_markdown="",
+        schema_json={"doc_type": "unknown", "fields": []},
+    )
+    assert discovery.fields == []
 
 
 def test_kie_オブジェクトでも配列でもなければ_E3002(bundle: PromptBundle) -> None:
@@ -123,9 +151,7 @@ def test_kie_要素の_null_で_run_を落とさない(bundle: PromptBundle) -> 
         ],
     )
     adapter = LLMAdapter(FakeProvider([resp]))
-    result = kie_extract(
-        adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA
-    )
+    result = kie_extract(adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA)
     assert [f.name for f in result.fields] == ["total_amount"]
     assert len(result.tables) == 1
     assert list(result.tables[0].rows[0]) == ["qty"]
@@ -206,7 +232,10 @@ def test_kie_discovery_dedupes_duplicate_names(bundle: PromptBundle) -> None:
     )
     adapter = LLMAdapter(FakeProvider([resp]))
     result = kie_extract(
-        adapter, bundle, spans=_SPANS, layout_markdown="",
+        adapter,
+        bundle,
+        spans=_SPANS,
+        layout_markdown="",
         schema_json={"doc_type": "", "fields": []},
     )
     names = [f.name for f in result.fields]
@@ -230,7 +259,10 @@ def test_kie_discovery_sanitizes_label(bundle: PromptBundle) -> None:
     )
     adapter = LLMAdapter(FakeProvider([resp]))
     result = kie_extract(
-        adapter, bundle, spans=_SPANS, layout_markdown="",
+        adapter,
+        bundle,
+        spans=_SPANS,
+        layout_markdown="",
         schema_json={"doc_type": "", "fields": []},
     )
     by = {f.name: f for f in result.fields}
@@ -268,9 +300,9 @@ _BOXED = [
 def test_field_bbox_single_span(bundle: PromptBundle) -> None:
     resp = _kie_response([{"name": "total_amount", "value": "128000", "span_ids": [11]}])
     adapter = LLMAdapter(FakeProvider([resp]))
-    f = kie_extract(
-        adapter, bundle, spans=_BOXED, layout_markdown="", schema_json=_SCHEMA
-    ).fields[0]
+    f = kie_extract(adapter, bundle, spans=_BOXED, layout_markdown="", schema_json=_SCHEMA).fields[
+        0
+    ]
     assert f.bbox == [100, 25, 180, 45]  # span の bbox そのまま
     assert f.page == 1  # span 由来
 
@@ -279,9 +311,9 @@ def test_field_bbox_union_same_page(bundle: PromptBundle) -> None:
     """同一ページの複数 span は外接矩形にまとめる。"""
     resp = _kie_response([{"name": "total_amount", "value": "128000", "span_ids": [10, 11]}])
     adapter = LLMAdapter(FakeProvider([resp]))
-    f = kie_extract(
-        adapter, bundle, spans=_BOXED, layout_markdown="", schema_json=_SCHEMA
-    ).fields[0]
+    f = kie_extract(adapter, bundle, spans=_BOXED, layout_markdown="", schema_json=_SCHEMA).fields[
+        0
+    ]
     assert f.bbox == [10, 20, 180, 45]
 
 
@@ -297,13 +329,9 @@ def test_field_bbox_multipage_dominant_page(bundle: PromptBundle) -> None:
         Span(span_id=2, page=2, text="b", conf=0.9, bbox=[50, 50, 60, 60]),
         Span(span_id=3, page=2, text="c", conf=0.9, bbox=[70, 50, 80, 60]),
     ]
-    resp = _kie_response(
-        [{"name": "total_amount", "value": "x", "span_ids": [1, 2, 3], "page": 1}]
-    )
+    resp = _kie_response([{"name": "total_amount", "value": "x", "span_ids": [1, 2, 3], "page": 1}])
     adapter = LLMAdapter(FakeProvider([resp]))
-    f = kie_extract(
-        adapter, bundle, spans=spans, layout_markdown="", schema_json=_SCHEMA
-    ).fields[0]
+    f = kie_extract(adapter, bundle, spans=spans, layout_markdown="", schema_json=_SCHEMA).fields[0]
     assert f.page == 2  # 申告の 1 ではなく span 数最多のページ
     assert f.bbox == [50, 50, 80, 60]  # 2 ページ目の span のみ
 
@@ -322,22 +350,18 @@ def test_field_bbox_tie_breaks_by_min_page_then_span_id(bundle: PromptBundle) ->
     ]
     resp = _kie_response([{"name": "total_amount", "value": "x", "span_ids": [5, 90]}])
     adapter = LLMAdapter(FakeProvider([resp]))
-    f = kie_extract(
-        adapter, bundle, spans=spans, layout_markdown="", schema_json=_SCHEMA
-    ).fields[0]
+    f = kie_extract(adapter, bundle, spans=spans, layout_markdown="", schema_json=_SCHEMA).fields[0]
     assert f.page == 1  # span_id 優先だと 2 になってしまう
     assert f.bbox == [20, 20, 30, 30]
 
 
 def test_field_bbox_empty_span_ids_keeps_reported_page_no_bbox(bundle: PromptBundle) -> None:
     """根拠 span が無ければ bbox を作らない（原文に無い座標を捏造しない）。"""
-    resp = _kie_response(
-        [{"name": "total_amount", "value": "999", "span_ids": [999], "page": 3}]
-    )
+    resp = _kie_response([{"name": "total_amount", "value": "999", "span_ids": [999], "page": 3}])
     adapter = LLMAdapter(FakeProvider([resp]))
-    f = kie_extract(
-        adapter, bundle, spans=_BOXED, layout_markdown="", schema_json=_SCHEMA
-    ).fields[0]
+    f = kie_extract(adapter, bundle, spans=_BOXED, layout_markdown="", schema_json=_SCHEMA).fields[
+        0
+    ]
     assert f.span_ids == []
     assert f.bbox is None
     assert f.page == 3  # 申告 page は残す（bbox が無いので矛盾しない）
@@ -352,7 +376,10 @@ _HINTED_SCHEMA = {
             "name": "total_amount",
             "type": "money_jpy",
             "region_hint": {
-                "candidates": [{"span_id": 11, "text": "¥128,000"}, {"span_id": 12, "text": "税込"}],
+                "candidates": [
+                    {"span_id": 11, "text": "¥128,000"},
+                    {"span_id": 12, "text": "税込"},
+                ],
                 "example_value": "¥120,000",
                 "example_present": False,
             },
@@ -369,24 +396,33 @@ _HINT_SPANS = _BOXED + [
 def test_region_hint_があっても_span_に_bbox_は載らない(bundle: PromptBundle) -> None:
     """ヒントは候補 span の id と原文で渡す。全 span への座標付与（旧 with_bbox）は廃止。
     座標を載せるとプロンプトが膨らむうえ、矩形注入と座標付与の効果を分離できない。"""
-    provider = FakeProvider([_kie_response([])])
+    provider = FakeProvider([_kie_response(_NULL_TOTAL)])
     kie_extract(
-        LLMAdapter(provider), bundle, spans=_HINT_SPANS, layout_markdown="", schema_json=_HINTED_SCHEMA
+        LLMAdapter(provider),
+        bundle,
+        spans=_HINT_SPANS,
+        layout_markdown="",
+        schema_json=_HINTED_SCHEMA,
     )
     user = provider.calls[0][1]
     assert '"bbox"' not in user
     assert '"region_hint"' in user and '"candidates"' in user
     # ヒントの説明文は region_hint を持つ run にだけ末尾に足す
     assert user.endswith(bundle.kie_region_hint_template)
-    provider2 = FakeProvider([_kie_response([])])
-    kie_extract(LLMAdapter(provider2), bundle, spans=_HINT_SPANS, layout_markdown="", schema_json=_SCHEMA)
+    provider2 = FakeProvider([_kie_response(_NULL_TOTAL)])
+    kie_extract(
+        LLMAdapter(provider2), bundle, spans=_HINT_SPANS, layout_markdown="", schema_json=_SCHEMA
+    )
     assert not provider2.calls[0][1].endswith(bundle.kie_region_hint_template)
 
 
 def _outcome(bundle: PromptBundle, span_ids: list[int]) -> dict[str, str]:
     resp = _kie_response([{"name": "total_amount", "value": "x", "span_ids": span_ids}])
     result = kie_extract(
-        LLMAdapter(FakeProvider([resp])), bundle, spans=_HINT_SPANS, layout_markdown="",
+        LLMAdapter(FakeProvider([resp])),
+        bundle,
+        spans=_HINT_SPANS,
+        layout_markdown="",
         schema_json=_HINTED_SCHEMA,
     )
     return result.hint_outcomes
@@ -410,7 +446,10 @@ def test_hint_outcomes_はヒントを持つ項目にだけ付く(bundle: Prompt
         ]
     )
     result = kie_extract(
-        LLMAdapter(FakeProvider([resp])), bundle, spans=_HINT_SPANS, layout_markdown="",
+        LLMAdapter(FakeProvider([resp])),
+        bundle,
+        spans=_HINT_SPANS,
+        layout_markdown="",
         schema_json=_HINTED_SCHEMA,
     )
     assert result.hint_outcomes == {"total_amount": "followed"}
@@ -418,7 +457,10 @@ def test_hint_outcomes_はヒントを持つ項目にだけ付く(bundle: Prompt
     assert not hasattr(result.fields[0], "hint_outcome")
     # ヒントの無い run では空
     result2 = kie_extract(
-        LLMAdapter(FakeProvider([resp])), bundle, spans=_HINT_SPANS, layout_markdown="",
+        LLMAdapter(FakeProvider([resp])),
+        bundle,
+        spans=_HINT_SPANS,
+        layout_markdown="",
         schema_json=_SCHEMA,
     )
     assert result2.hint_outcomes == {}
@@ -426,7 +468,10 @@ def test_hint_outcomes_はヒントを持つ項目にだけ付く(bundle: Prompt
 
 def test_LLM_が返さなかったヒント項目は_no_evidence(bundle: PromptBundle) -> None:
     result = kie_extract(
-        LLMAdapter(FakeProvider([_kie_response([])])), bundle, spans=_HINT_SPANS,
-        layout_markdown="", schema_json=_HINTED_SCHEMA,
+        LLMAdapter(FakeProvider([_kie_response(_NULL_TOTAL)])),
+        bundle,
+        spans=_HINT_SPANS,
+        layout_markdown="",
+        schema_json=_HINTED_SCHEMA,
     )
     assert result.hint_outcomes == {"total_amount": "no_evidence"}

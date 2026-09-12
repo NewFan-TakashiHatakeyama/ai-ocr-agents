@@ -215,6 +215,18 @@ def kie_extract(
             "E3002", "LLM 出力の JSON 契約違反（オブジェクトではない）", detail=str(data)[:200]
         )
 
+    # スキーマに項目があるのに 1 つも返さない出力は結果ではない（value=null の項目すら無い）。
+    # 実測（第 4 回計測 S3）: 介入アームで 4 回に 1 回、fields が空の "成功" が返り、全項目
+    # 未抽出の run になった。自動発見（fields が空のスキーマ）では 0 件も正当なので対象外。
+    schema_fields = [
+        f for f in (schema_json.get("fields") or []) if isinstance(f, dict) and f.get("name")
+    ]
+    if schema_fields and not (data.get("fields") or []):
+        _log.warning("kie: 項目が 1 つも返らなかった（取り直す）: %s", resp.text[:200])
+        raise LLMError(
+            "E3002", "LLM 出力の JSON 契約違反（項目が 1 つも無い）", detail=resp.text[:200]
+        )
+
     result = KieResult(response=resp)
     seen_names: set[str] = set()
     for item in data.get("fields", []) or []:
