@@ -36,6 +36,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+from newfan_normalizers import NormContext
+from newfan_normalizers.builtin import norm_address_jp
 from newfan_schemas import norm_key
 
 from newfan_golden.dataset import GoldenDoc, load_jsonl
@@ -43,6 +45,19 @@ from newfan_golden.dataset import GoldenDoc, load_jsonl
 
 class RegionAbError(RuntimeError):
     pass
+
+
+def field_type_for(name: str) -> str:
+    """A/B の 2 版に載せる項目の型。
+
+    住所（``_address`` で終わる項目）だけ ``address_jp``、他は ``string``。第 3 回計測で
+    住所の不正解の大半が「郵便番号や『本社』を値に含めるか」という**値の慣例**の食い違い
+    だったので（ADR-0007）、プロダクト側の正規化（郵便番号・見出し語を落とす）を計測でも
+    効かせる。型は対照・介入の両版に同じく載るので、比較の公平さは崩れない。
+    金額や日付を型付きにしないのは従来どおり: 型付き項目は読取領域ヒントの ``type_mismatch``
+    判定の対象になり、第 3 回までの計測条件と変わってしまう。
+    """
+    return "address_jp" if name.endswith("_address") else "string"
 
 
 @dataclass
@@ -241,6 +256,26 @@ def _norm(v: Optional[str]) -> str:
     return norm_key(v)
 
 
+_ADDR_CTX = NormContext()
+
+
+def score_key(name: str, v: Optional[str]) -> str:
+    """項目名を見て比較用のキーを作る。住所は ``norm_address_jp`` を通してから ``_norm``。
+
+    **抽出値と正解の両方**に通す。プロダクトの正規化（郵便番号・見出し語を落とす、
+    ADR-0007）と正解の慣例（郵便番号なし・建物名まで）を同じ土俵に乗せるためで、正解側にも
+    通すのは、正解データの修正漏れで計測が歪まないための保険。``norm_key`` はハイフンを
+    落とすが郵便番号や「本社」は落とさないので、住所の正規化を先に挟まないと第 3 回で見た
+    「981-3205 仙台市泉区紫山3-1-4」が不正解のまま数えられる。
+
+    建物名を落とした値（「東京都品川区北品川5-10-20」）は正規化しても正解と一致しない。
+    それは慣例ではなく取りこぼしなので、不正解のまま残るのが正しい。
+    """
+    if v is not None and field_type_for(name) == "address_jp":
+        v = norm_address_jp(v, _ADDR_CTX).value
+    return _norm(v)
+
+
 def _wait_job(client: httpx.Client, job_id: str, timeout_sec: float) -> str:
     deadline = time.time() + timeout_sec
     status = "?"
@@ -330,13 +365,13 @@ def run(
             image = Path(doc.image_uri)
             if not image.exists():
                 raise RegionAbError(f"画像が見つかりません: {image}")
-            gold = {f.name: _norm(f.value) for f in doc.fields}
+            gold = {f.name: score_key(f.name, f.value) for f in doc.fields}
             positional = set(positional_map.get(doc.doc_type, []))
             base_fields = [
                 {
                     "name": f.name,
                     "label": f.name,
-                    "type": "string",
+                    "type": field_type_for(f.name),
                     "required": False,
                     "critical": bool(f.critical),
                 }
@@ -395,7 +430,9 @@ def run(
                             continue
                         res = _result(client, document_id)
                         got = {
-                            f["name"]: _norm(f.get("value_normalized") or f.get("value_raw"))
+                            f["name"]: score_key(
+                                f["name"], f.get("value_normalized") or f.get("value_raw")
+                            )
                             for f in res.get("fields", [])
                         }
                         hits = 0

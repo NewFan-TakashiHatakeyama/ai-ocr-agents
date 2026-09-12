@@ -74,3 +74,9 @@ uv run python -m newfan_golden.cli \
 `golden/data/schemas.json` の critical は `dev.jsonl` の critical と一致させること。
 片方だけ直すと `critical_exact_match` が実態とずれる。CI の
 `golden/scripts/check_critical.py` が突き合わせる。
+
+`golden/data/samples_ground_truth.json`（読取領域の A/B 実測の正解）の住所は
+ADR-0007 の正規形（郵便番号・見出し語なし、都道府県〜建物名/階、全角英数字は半角、
+空白なし）で持つ。`golden/scripts/check_gold_addresses.py` が `norm_address_jp` の
+不動点かを検査し、`--fix` で揃える。直したら `build_region_fixtures.py` で派生
+フィクスチャ（`region_ab_s*.jsonl` / `*_goldspec.json`）を作り直すこと。
