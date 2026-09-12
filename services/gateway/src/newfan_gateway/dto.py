@@ -647,13 +647,14 @@ class ClassifyCandidateDto(BaseModel):
 
 
 class ClassifyResponse(BaseModel):
-    """帳票自動分類（⑦）。抽出前にファイル名等から最も近いスキーマを提案する。"""
+    """帳票自動分類（⑦）。ファイル名と、抽出済みなら表題部から最も近いスキーマを提案する。"""
 
     suggested_schema_id: Optional[str] = None
     doc_type: Optional[str] = None
     confidence: float = 0.0
     reason: str = ""
-    # 判定の根拠種別: declared(指定済)/content(本文)/filename(ファイル名)/heuristic
+    # 判定の根拠種別: declared(指定済) / filename+title(ファイル名＋表題部の証拠が
+    # 寄与, ADR-0008) / filename(ファイル名) / heuristic(手がかり無し)
     method: str = "heuristic"
     candidates: list[ClassifyCandidateDto] = Field(default_factory=list)
 

@@ -14,7 +14,15 @@ from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
 from newfan_schemas import check_field_name, resolve_regions
-from newfan_workflow import WorkflowGraph, build_candidate, catalog, classify_text, has_errors, lint
+from newfan_workflow import (
+    WorkflowGraph,
+    build_candidate,
+    catalog,
+    classify_text,
+    has_errors,
+    lint,
+    title_zone_text,
+)
 from newfan_workflow.lint import Finding
 from pydantic import BaseModel, ValidationError
 
@@ -366,6 +374,24 @@ def delete_document(
     )
 
 
+def _title_zone_of_latest_run(repo: Repository, tenant_id: str, document_id: str) -> str:
+    """最新 run の 1 ページ目から表題部の文字列を作る（ADR-0008）。無ければ空。
+
+    run が無い（未抽出）・run_spans の行が無い（0008 より前の run、失敗 run、
+    実行中の run）・1 ページ目の寸法が無い、のいずれでも空を返し、呼び出し側は
+    従来どおりファイル名だけで分類する。**エラーにしない**（サジェストは
+    抽出前の画面でも呼ばれる）。
+    """
+    run = repo.get_latest_run(tenant_id, document_id)
+    if run is None:
+        return ""
+    spans = repo.get_run_spans(tenant_id, run.id, 1)
+    if not spans:
+        return ""
+    page1 = next((p for p in repo.get_pages(tenant_id, document_id) if p.page_no == 1), None)
+    return title_zone_text(spans, page_height=page1.height if page1 else None)
+
+
 @router.post("/documents/{document_id}/classify", response_model=dto.ClassifyResponse)
 def classify_document(
     document_id: str,
@@ -375,8 +401,11 @@ def classify_document(
 ) -> dto.ClassifyResponse:
     """帳票種別を推定し、最も近い登録スキーマを提案する（⑦ 抽出UIサジェスト）。
 
-    抽出前はファイル名を信号にした決定論分類（純ロジック newfan_workflow.classify_text）。
-    アップロード時に doc_type が明示されていればそれを最優先する。
+    決定論分類（純ロジック newfan_workflow.classify_text）。信号はファイル名（×3）と、
+    抽出済みなら最新 run の 1 ページ目・上端 25% にある OCR span＝表題部（×1、
+    ADR-0008）。抽出**値**は使わない（請求書の備考が「見積書No…」を引用するなど、
+    値は構造的に他種別へ偏る）。アップロード時に doc_type が明示されていれば
+    それを最優先する。
     """
     doc = _require_document(repo, principal.tenant_id, document_id)
     schemas = admin.list_schemas(principal.tenant_id)
@@ -404,8 +433,12 @@ def classify_document(
         build_candidate(s.doc_type, [f.label or f.name for f in s.fields]) for s in schemas
     ]
     filename = doc.original_name or ""
-    outcome = classify_text(text="", filename=filename, candidates=candidates)
-    method = "filename" if filename else "heuristic"
+    title = _title_zone_of_latest_run(repo, principal.tenant_id, document_id)
+    outcome = classify_text(text=title, filename=filename, candidates=candidates)
+    if outcome.evidence.get("text", 0) > 0:
+        method = "filename+title"
+    else:
+        method = "filename" if filename else "heuristic"
     cand_dtos = sorted(
         (
             dto.ClassifyCandidateDto(schema_id=latest.get(dt, ""), doc_type=dt, score=sc)
