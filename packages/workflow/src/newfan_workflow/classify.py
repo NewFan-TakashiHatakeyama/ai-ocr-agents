@@ -1,8 +1,10 @@
 """帳票種別の内容ベース分類（⑦）。純ロジック（DB も HTTP も LLM も持たない）。
 
-抽出前は「ファイル名」、抽出後は「OCRテキスト」を信号にして、候補 doc_type の中から
+抽出前は「ファイル名」、抽出後は「ファイル名＋表題部の OCR テキスト」（1 ページ目
+上端の span。newfan_workflow.title_zone）を信号にして、候補 doc_type の中から
 最も近い種別を決める決定論スコアリング。gateway は抽出UIのスキーマ自動サジェストに、
-orchestrator は process.classify ゲートの実信号に使う。
+orchestrator は process.classify ゲートの実信号に使う。抽出**値**は信号にしない
+（請求書の備考が「見積書No…」を引用するなど、値は構造的に他種別へ偏る）。
 
 スコアリングの原則（敵対的レビューで確定した3件の修正を含む）:
 - 1出現 = 1証拠。重なり合う語（「見積」⊂「見積書」、"order"⊂"purchase order"）が同一
@@ -55,6 +57,10 @@ class ClassifyOutcome:
     confidence: float  # 0..1
     reason: str
     scores: dict[str, float]
+    # 信号ごとに「候補全体で何領域が一致したか」。呼び出し側が「本文（表題部）の
+    # 証拠が判定に寄与したか」を、再分類せずに判定できるようにする
+    # （gateway の method="filename+title"、orchestrator の観測値）。
+    evidence: dict[str, int] = field(default_factory=lambda: {"filename": 0, "text": 0})
 
 
 def _norm(s: str) -> str:
@@ -169,12 +175,25 @@ def classify_text(
 ) -> ClassifyOutcome:
     """ファイル名＋本文から最も近い doc_type を決める。
 
+    text は「本文全体」ではなく、呼び出し側が切り出した**表題部**を渡す前提
+    （newfan_workflow.title_zone_text。明細・備考は他種別の語を常態的に含むため）。
+
+    重みの帰結（ADR-0008 に記録）: ファイル名 1 語 = 3.0、本文は領域 3 で飽和 = 3.0。
+    したがって本文はファイル名の 1 語を**上回れない**（最大で同点）。ファイル名と
+    表題が食い違うとき、表題の証拠は相手の確信度を下げる（1 領域で 0.75、2 領域で
+    0.6、3 領域で同点 0.5）が、種別を反転させることはない。同点はファイル名に
+    一致した候補を先にする（候補の並び順に依存しない）。
+
     確信度が min_confidence 未満なら doc_type=None を返す（呼び出し側が既定に倒す）。
     """
     fn = _norm(filename)
     tx = _norm(text)
     scores: dict[str, float] = {}
-    matched: dict[str, list[str]] = {}
+    fn_regions_by: dict[str, int] = {}
+    matched_fn: dict[str, list[str]] = {}
+    matched_tx: dict[str, list[str]] = {}
+    total_fn = 0
+    total_tx = 0
     for cand in candidates:
         norm_to_orig: dict[str, str] = {}
         for k in cand.keywords:
@@ -185,17 +204,27 @@ def classify_text(
         fn_regions, fn_hits = _match_regions(kws, fn)
         tx_regions, tx_hits = _match_regions(kws, tx)
         scores[cand.doc_type] = fn_regions * _FILENAME_WEIGHT + tx_regions * _TEXT_WEIGHT
-        hits: list[str] = []
-        for h in fn_hits + tx_hits:
-            orig = norm_to_orig.get(h, h)
-            if orig not in hits:
-                hits.append(orig)
-        matched[cand.doc_type] = hits
+        fn_regions_by[cand.doc_type] = fn_regions
+        total_fn += fn_regions
+        total_tx += tx_regions
+        matched_fn[cand.doc_type] = list(dict.fromkeys(norm_to_orig.get(h, h) for h in fn_hits))
+        matched_tx[cand.doc_type] = list(dict.fromkeys(norm_to_orig.get(h, h) for h in tx_hits))
+    evidence_by_source = {"filename": total_fn, "text": total_tx}
 
     if not scores or max(scores.values()) <= 0:
-        return ClassifyOutcome(doc_type=None, confidence=0.0, reason="手がかりが見つかりませんでした。", scores=scores)
+        return ClassifyOutcome(
+            doc_type=None,
+            confidence=0.0,
+            reason="手がかりが見つかりませんでした。",
+            scores=scores,
+            evidence=evidence_by_source,
+        )
 
-    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    # 同点はファイル名に一致した候補を先にする（人が付けた名前を、OCR の表題より
+    # 優先する）。それでも同点なら候補の並び順（sort は安定）。
+    ranked = sorted(
+        scores.items(), key=lambda kv: (kv[1], fn_regions_by.get(kv[0], 0)), reverse=True
+    )
     top_dt, top_score = ranked[0]
     second_score = ranked[1][1] if len(ranked) > 1 else 0.0
 
@@ -204,9 +233,24 @@ def classify_text(
     confidence = round(margin * (0.5 + 0.5 * evidence), 3)
 
     if confidence < min_confidence:
-        return ClassifyOutcome(doc_type=None, confidence=confidence, reason="確信が持てませんでした。", scores=scores)
+        return ClassifyOutcome(
+            doc_type=None,
+            confidence=confidence,
+            reason="確信が持てませんでした。",
+            scores=scores,
+            evidence=evidence_by_source,
+        )
 
-    hits = matched.get(top_dt, [])
-    where = "ファイル名/本文"
-    reason = f"「{'・'.join(hits[:3])}」が{where}に一致" if hits else "内容が最も近い"
-    return ClassifyOutcome(doc_type=top_dt, confidence=confidence, reason=reason, scores=scores)
+    parts: list[str] = []
+    if matched_fn.get(top_dt):
+        parts.append(f"「{'・'.join(matched_fn[top_dt][:3])}」がファイル名に一致")
+    if matched_tx.get(top_dt):
+        parts.append(f"「{'・'.join(matched_tx[top_dt][:3])}」が表題部に一致")
+    reason = "、".join(parts) if parts else "内容が最も近い"
+    return ClassifyOutcome(
+        doc_type=top_dt,
+        confidence=confidence,
+        reason=reason,
+        scores=scores,
+        evidence=evidence_by_source,
+    )

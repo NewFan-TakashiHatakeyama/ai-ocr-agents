@@ -32,6 +32,13 @@ from newfan_workflow.models import (
     is_sink,
     is_trigger,
 )
+from newfan_workflow.title_zone import (
+    TITLE_ZONE_MAX_CHARS,
+    TITLE_ZONE_MAX_SPANS,
+    TITLE_ZONE_RATIO,
+    title_zone_spans,
+    title_zone_text,
+)
 
 __all__ = [
     "ClassifyCandidate",
@@ -43,6 +50,9 @@ __all__ = [
     "FieldView",
     "Finding",
     "NODE_CONFIG_MODELS",
+    "TITLE_ZONE_MAX_CHARS",
+    "TITLE_ZONE_MAX_SPANS",
+    "TITLE_ZONE_RATIO",
     "build_candidate",
     "canonical_doc_type",
     "classify_text",
@@ -57,4 +67,6 @@ __all__ = [
     "is_trigger",
     "lint",
     "parse_expr",
+    "title_zone_spans",
+    "title_zone_text",
 ]

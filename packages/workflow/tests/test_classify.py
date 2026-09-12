@@ -1,6 +1,12 @@
 """内容ベース分類（⑦, classify_text）の決定論テスト。"""
 
-from newfan_workflow import build_candidate, canonical_doc_type, classify_text, synonyms_for
+from newfan_workflow import (
+    build_candidate,
+    canonical_doc_type,
+    classify_text,
+    synonyms_for,
+    title_zone_text,
+)
 
 
 def _cands():
@@ -104,3 +110,100 @@ def test_synonyms_forは日本語名にも正準語彙一式を与える():
     words = synonyms_for("請求書")
     assert "invoice" in words
     assert "御請求" in words
+
+
+# ---- 表題部の本文信号（ADR-0008, 2026-09-12）。期待値は実スコアから書く ----
+
+_H = 1400  # ページ高さ。上端 25% = 350px
+
+
+def _invoice_with_quote_refs_in_items() -> list[dict]:
+    """請求書。表題部は「請求書」、明細部（350px より下）が見積を 3 箇所で引用する。"""
+    return [
+        {"text": "請求書", "bbox": [400, 60, 600, 110]},
+        {"text": "株式会社ABC 御中", "bbox": [50, 150, 350, 180]},
+        {"text": "請求No. 1234", "bbox": [700, 150, 950, 180]},
+        {"text": "2026年8月31日", "bbox": [700, 190, 950, 220]},
+        {"text": "見積番号 Q-1 に基づく", "bbox": [50, 600, 400, 630]},
+        {"text": "見積金額 ¥100,000", "bbox": [50, 640, 400, 670]},
+        {"text": "見積書 No.2 参照", "bbox": [50, 680, 400, 710]},
+    ]
+
+
+def test_明細部の見積語は表題部の切り出しで信号にならない():
+    # 本文全体を渡すと quotation=3.0 vs invoice=1.0 → quotation 0.75（ゲート閾値に
+    # 達して正当な請求書を halt させる）。表題部だけなら quotation=0 で invoice。
+    spans = _invoice_with_quote_refs_in_items()
+    full = " ".join(s["text"] for s in spans)
+    flipped = classify_text(text=full, filename="scan_001.pdf", candidates=_cands())
+    assert flipped.doc_type == "quotation"
+    assert flipped.confidence == 0.75
+
+    zone = title_zone_text(spans, page_height=_H)
+    assert zone == "請求書 株式会社ABC 御中 請求No. 1234 2026年8月31日"
+    out = classify_text(text=zone, filename="scan_001.pdf", candidates=_cands())
+    assert out.doc_type == "invoice"
+    assert out.scores == {"invoice": 1.0, "quotation": 0.0, "purchase_order": 0.0}
+    assert out.confidence == 0.667  # 本文 1 領域: margin 1.0 × (0.5 + 0.5 × 1/3)
+    assert out.evidence == {"filename": 0, "text": 1}
+    assert out.reason == "「請求書」が表題部に一致"
+
+
+def test_表題が食い違ってもファイル名1語が勝つ_確信度は下がる():
+    # ファイル名は請求書（3.0）、表題は「御見積書」（御見積/見積書/見積 が重なって 1 領域 = 1.0）。
+    # quotation は 0 → 1.0 に上がるが、invoice 3.0 が勝つ。確信度は 1.0 → 0.75。
+    title = title_zone_text([{"text": "御見積書", "bbox": [400, 60, 600, 110]}], page_height=_H)
+    base = classify_text(text="", filename="請求書_ABC商事_2026.pdf", candidates=_cands())
+    assert (base.doc_type, base.confidence) == ("invoice", 1.0)
+    out = classify_text(text=title, filename="請求書_ABC商事_2026.pdf", candidates=_cands())
+    assert out.doc_type == "invoice"
+    assert out.scores == {"invoice": 3.0, "quotation": 1.0, "purchase_order": 0.0}
+    assert out.confidence == 0.75  # margin 3/4 × evidence 飽和
+    assert out.evidence == {"filename": 1, "text": 1}
+    assert out.reason == "「請求書」がファイル名に一致"
+
+
+def test_表題が2領域で食い違えばファイル名の確信度はゲート閾値を割る():
+    # 「御見積書」＋「見積金額」= quotation 2.0 vs invoice 3.0 → margin 0.6。
+    # 種別は反転しない（ファイル名優位）が、0.75 未満なのでゲートはスキーマ種別へ倒れる。
+    title = title_zone_text(
+        [{"text": "御見積書", "bbox": [400, 60, 600, 110]},
+         {"text": "見積金額 ¥1", "bbox": [700, 200, 900, 230]}],
+        page_height=_H,
+    )
+    out = classify_text(text=title, filename="請求書_ABC商事_2026.pdf", candidates=_cands())
+    assert out.doc_type == "invoice"
+    assert out.confidence == 0.6
+    gated = classify_text(
+        text=title, filename="請求書_ABC商事_2026.pdf", candidates=_cands(), min_confidence=0.75
+    )
+    assert gated.doc_type is None
+
+
+def test_表題3領域とファイル名1語は同点_同点はファイル名側_候補順に依らない():
+    # 本文は領域 3 で飽和（3.0）＝ファイル名 1 語（3.0）。本文はファイル名を上回れない。
+    title = title_zone_text(
+        [{"text": "御見積書", "bbox": [400, 60, 600, 110]},
+         {"text": "見積金額 ¥1", "bbox": [700, 200, 900, 230]},
+         {"text": "見積番号 Q-9", "bbox": [700, 240, 900, 270]}],
+        page_height=_H,
+    )
+    for cands in (_cands(), list(reversed(_cands()))):
+        out = classify_text(text=title, filename="請求書_ABC商事_2026.pdf", candidates=cands)
+        assert out.doc_type == "invoice"
+        assert out.scores["invoice"] == 3.0 and out.scores["quotation"] == 3.0
+        assert out.confidence == 0.5
+
+
+def test_ファイル名に手がかりが無くても表題で当てる():
+    title = title_zone_text([{"text": "御請求書", "bbox": [400, 60, 600, 110]}], page_height=_H)
+    out = classify_text(text=title, filename="scan_0001.pdf", candidates=_cands())
+    assert out.doc_type == "invoice"
+    assert out.confidence == 0.667
+    assert out.evidence == {"filename": 0, "text": 1}
+    assert out.reason == "「請求書・御請求」が表題部に一致"
+
+
+def test_手がかりなしのevidenceは0():
+    out = classify_text(text="", filename="a.pdf", candidates=_cands())
+    assert out.evidence == {"filename": 0, "text": 0}
