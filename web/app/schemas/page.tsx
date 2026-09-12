@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { AppShell } from "@/components/AppShell";
@@ -304,9 +305,15 @@ export default function SchemasPage() {
           >
             ＋ 項目を追加
           </button>
-          <button className="btn sm ghost" title="SCR-01 のエージェント経由（update_schema）。準備中" disabled>
+          {/* SCR-01 のエージェント経由（update_schema）。チャットの承認カードを通して
+              新版が作られる経路は実装済みなので、「準備中」で押せなくしたままにしない */}
+          <Link
+            className="btn sm ghost"
+            href="/chat"
+            title="チャットに「スキーマに『支払方法』を追加して」のように頼むと、承認のうえ新版が作られます"
+          >
             💬 チャットで追加を依頼
-          </button>
+          </Link>
         </div>
         <p className="sub" style={{ marginTop: 10 }}>
           型は正規化器レジストリ（§5.6）から選択。並び順は表示順のみ（抽出結果に影響しません）。保存は常に新版作成（§7.2）。

@@ -7,6 +7,7 @@ import { useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { ApiError, api } from "@/lib/api";
 import { useToasts } from "@/lib/toast";
+import { UPLOAD_ACCEPT, UPLOAD_FORMATS_HINT, UPLOAD_FORMATS_LABEL } from "@/lib/uploads";
 
 // SCR-01 チャットホーム（§3.3/§4.5）。生成AIの入口。書込み系は承認カードを挟む。
 interface ToolCall {
@@ -103,9 +104,11 @@ export default function ChatPage() {
         },
       ]);
     } catch (e) {
+      // 対応形式は lib/uploads から出す。以前ここに「Word/Excel に対応」と書いていたが、
+      // ingest は Office を E1003（変換未実装）で必ず拒否するので嘘だった。
       push({
         kind: "warn",
-        message: `アップロードできませんでした（${e instanceof ApiError ? e.code : ""}）。PDF・画像・TIFF・Word/Excel に対応しています。`,
+        message: `アップロードできませんでした（${e instanceof ApiError ? e.code : ""}）。${UPLOAD_FORMATS_HINT}`,
       });
     }
   }
@@ -201,7 +204,7 @@ export default function ChatPage() {
               <input
                 ref={fileRef}
                 type="file"
-                accept=".pdf,.png,.jpg,.jpeg,.tiff,.tif"
+                accept={UPLOAD_ACCEPT}
                 style={{ display: "none" }}
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -210,7 +213,7 @@ export default function ChatPage() {
                 }}
               />
               <span className="tool-pill" onClick={() => fileRef.current?.click()}>
-                📎 ファイル（PDF / 画像 / TIFF）
+                📎 ファイル（{UPLOAD_FORMATS_LABEL}）
               </span>
               <span className="tool-pill">請求書スキーマ v4</span>
               <button className="send" disabled={busy || !input.trim()} onClick={() => send(input)} aria-label="送信">

@@ -135,6 +135,8 @@ export interface RegionHintStats {
 export interface DocumentMeta {
   document_id: string;
   status: string;
+  /** 原本ファイル名。一覧・単体の両方で返る（無い行は null）。画面の表示名に使う */
+  original_name?: string | null;
   doc_type?: string | null;
   external_ref?: string | null;
   page_count?: number | null;

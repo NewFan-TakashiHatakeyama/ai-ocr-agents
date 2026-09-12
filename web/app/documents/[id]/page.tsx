@@ -14,6 +14,7 @@ import { RunWorkflow } from "@/components/RunWorkflow";
 import { StatusChip } from "@/components/StatusChip";
 import { TemplatizeSchema } from "@/components/TemplatizeSchema";
 import { ApiError, api } from "@/lib/api";
+import { documentDisplayName } from "@/lib/documents";
 import { sortFields } from "@/lib/fields";
 import { useReviewStore } from "@/lib/store";
 import { hasRole, usePrincipal } from "@/lib/principal";
@@ -455,7 +456,10 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           ← 一覧
         </Link>
         <div>
-          <b className="rv-title">{data.document_id}</b>
+          {/* 見出しは原本ファイル名（一覧と同じ規則）。ID は title で引ける */}
+          <b className="rv-title" title={data.document_id}>
+            {meta.data ? documentDisplayName(meta.data) : data.document_id}
+          </b>
           <span className="sub"> · run {data.run_id.slice(0, 12)}</span>
         </div>
         <StatusChip status={data.status} />
@@ -572,7 +576,12 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         )}
         <RunWorkflow documentId={data.document_id} />
         {/* 他者が確認中は消させない（サーバ側も 409 で弾くが、押せない方が親切） */}
-        <DeleteDocument documentId={id} disabled={readOnly} onDeleted={afterDelete} />
+        <DeleteDocument
+          documentId={id}
+          label={meta.data?.original_name}
+          disabled={readOnly}
+          onDeleted={afterDelete}
+        />
         <button
           className="btn primary"
           disabled={busy || readOnly || data.status === "confirmed"}
