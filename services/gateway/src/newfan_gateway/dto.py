@@ -78,6 +78,46 @@ class ExtractAccepted(BaseModel):
     run_id: str
 
 
+class ExtractBatchRequest(BaseModel):
+    """POST /documents/extract-batch（設計 bulk-processing §2）。
+
+    対象は ``document_ids``（明示）か ``doc_type``（種別で引く）の**どちらか一方**。
+    ``statuses`` は doc_type 側だけで意味を持ち、省略時は
+    uploaded / needs_review / failed（確定済みは既定で母集合に入れない）。
+    ``schema_id`` を省略すると帳票ごとに「その種別の最新版」を使う。
+    """
+
+    document_ids: Optional[list[str]] = None
+    doc_type: Optional[str] = None
+    statuses: Optional[list[str]] = None
+    schema_id: Optional[str] = None
+    # 単体の /extract と同じ意味論。既定 false（needs_review は競合として skipped）
+    supersede_review: bool = False
+    options: ExtractOptions = Field(default_factory=ExtractOptions)
+
+
+class ExtractBatchAcceptedItem(BaseModel):
+    document_id: str
+    job_id: str
+    run_id: str
+
+
+class ExtractBatchSkippedItem(BaseModel):
+    """投入しなかった帳票と理由。code は単体 /extract の ApiError コード
+    （E1001 不在・E1005 競合/確定済み）か、一括固有の ``no_schema``。"""
+
+    document_id: str
+    code: str
+    message: str
+
+
+class ExtractBatchResponse(BaseModel):
+    accepted: list[ExtractBatchAcceptedItem] = Field(default_factory=list)
+    skipped: list[ExtractBatchSkippedItem] = Field(default_factory=list)
+    # doc_type 指定で母集合が上限（200）を超え、新しい順に切り詰めたとき true
+    truncated: bool = False
+
+
 class JobStatus(BaseModel):
     job_id: str
     kind: str
