@@ -1631,26 +1631,127 @@ def _redact_config(obj: Any) -> Any:
     return obj
 
 
+def _connection_dto(r: Any) -> dto.ConnectionDto:
+    return dto.ConnectionDto(
+        id=r.id, type=r.type, name=r.name,
+        # 旧 webhook 行の config.secret（平文）を API に出さない（再帰マスク）
+        config=_redact_config(r.config or {}),
+        secret_ref=r.secret_ref, allowed_tables=r.allowed_tables,
+        status=r.status, created_at=r.created_at,
+        last_synced_at=r.last_synced_at,
+        last_sync_status=r.last_sync_status,
+        last_sync_error=r.last_sync_error,
+    )
+
+
+def _workflow_refs(rows: list[Any]) -> list[dict[str, Any]]:
+    """E1005 の details に載せる「参照しているワークフロー」。UI が名前で示せる分だけ。"""
+    return [{"id": w.id, "name": w.name, "status": w.status, "version": w.version} for w in rows]
+
+
 @router.get("/connections", response_model=dto.ConnectionList)
 def list_connections(
     principal: Principal = Depends(require_role("admin")),
     admin: AdminRepository = Depends(get_admin),
 ) -> dto.ConnectionList:
     rows = admin.list_connections(principal.tenant_id)
-    return dto.ConnectionList(
-        items=[
-            dto.ConnectionDto(
-                id=r.id, type=r.type, name=r.name,
-                # 旧 webhook 行の config.secret（平文）を API に出さない（再帰マスク）
-                config=_redact_config(r.config or {}),
-                secret_ref=r.secret_ref, allowed_tables=r.allowed_tables,
-                status=r.status, created_at=r.created_at,
-                last_synced_at=r.last_synced_at,
-                last_sync_status=r.last_sync_status,
-                last_sync_error=r.last_sync_error,
+    return dto.ConnectionList(items=[_connection_dto(r) for r in rows])
+
+
+@router.patch("/connections/{connection_id}", response_model=dto.ConnectionDto)
+def patch_connection_status(
+    connection_id: str,
+    body: dto.ConnectionStatusRequest,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.ConnectionDto:
+    """接続の無効化 / 再有効化（C9-D）。
+
+    disabled にすると sink・トリガー・「今すぐ同期」のいずれも使わなくなる
+    （orchestrator は status IN ('active','tested') / <> 'disabled' で引く）。
+    **有効（active）なワークフローが使っている接続は無効化しない。** 黙って止めると
+    そのワークフローの実行が「接続が無い」で失敗し始め、利用者は接続画面の操作と
+    結び付けられない。先にワークフローを停止させる（E1005 に一覧を載せる）。
+    draft/paused からの参照は止めない——有効化時に L010 が「疎通未確認/無効」で断る。
+    """
+    rec = admin.get_connection(principal.tenant_id, connection_id)
+    if rec is None:
+        raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
+    if rec.status == body.status:
+        return _connection_dto(rec)
+    if body.status == "disabled":
+        active = wf.workflows_referencing_connection(
+            principal.tenant_id, connection_id, statuses=("active",)
+        )
+        if active:
+            raise ApiError(
+                "E1005",
+                "有効なワークフローがこの接続を使っています。先にワークフローを停止してください",
+                details={"reason": "workflow_active", "workflows": _workflow_refs(active)},
             )
-            for r in rows
-        ]
+    updated = admin.set_connection_status(principal.tenant_id, connection_id, body.status)
+    if updated is None:  # 取得と更新の間で消えた
+        raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
+    wf.record_audit(
+        principal.tenant_id, actor_id=principal.sub,
+        action="connection.disable" if body.status == "disabled" else "connection.enable",
+        target_id=connection_id, target_type="connection",
+        detail={"type": rec.type, "from": rec.status, "to": body.status},
+    )
+    return _connection_dto(updated)
+
+
+@router.delete("/connections/{connection_id}", response_model=dto.ConnectionDeleted)
+def delete_connection(
+    connection_id: str,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.ConnectionDeleted:
+    """接続の削除（C9-D）。**どのワークフロー版からも参照されていない接続だけ**消せる。
+
+    「版」には現在の定義（status を問わない）と、run が持つスナップショット
+    （§11.1 版固定。retry の再開先・履歴の再現に要る）の両方を含める。参照が
+    残っている接続は削除ではなく無効化（PATCH status=disabled）で止める。
+    """
+    rec = admin.get_connection(principal.tenant_id, connection_id)
+    if rec is None:
+        raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
+    refs = wf.workflows_referencing_connection(principal.tenant_id, connection_id)
+    run_refs = wf.runs_referencing_connection(principal.tenant_id, connection_id)
+    if refs or run_refs:
+        raise ApiError(
+            "E1005",
+            "ワークフローから参照されている接続は削除できません。"
+            "使わなくするには無効化してください",
+            details={
+                "reason": "referenced",
+                "workflows": _workflow_refs(refs),
+                "run_count": run_refs,
+            },
+        )
+    counts = admin.delete_connection(principal.tenant_id, connection_id)
+    if counts is None:
+        # 事前チェックの後に参照が付いた（別トランザクション）。Pg 実装は DELETE 文で
+        # 再検査するので、ここに来るのは「参照あり」か「同時削除で先を越された」
+        if admin.get_connection(principal.tenant_id, connection_id) is None:
+            raise ApiError(
+                "E1001", "接続が見つかりません", details={"connection_id": connection_id}
+            )
+        raise ApiError(
+            "E1005",
+            "ワークフローから参照されている接続は削除できません。"
+            "使わなくするには無効化してください",
+            details={"reason": "referenced"},
+        )
+    wf.record_audit(
+        principal.tenant_id, actor_id=principal.sub, action="connection.delete",
+        target_id=connection_id, target_type="connection",
+        detail={"type": rec.type, "name": rec.name, "status": rec.status, **counts},
+    )
+    return dto.ConnectionDeleted(
+        connection_id=connection_id, cursors_deleted=counts.get("cursors_deleted", 0)
     )
 
 

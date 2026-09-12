@@ -305,3 +305,103 @@ def test_dry_runはdb_write直前のmapが複数だと拒否する(env) -> None:
     body = client.post(f"/v1/workflows/{wf_id}/dry-run", headers=_auth()).json()
     assert body["ok"] is False
     assert "1 つにして" in body["sinks"][0]["error"]
+
+
+# ---------- 無効化 / 削除（C9-D） ----------
+
+
+def test_接続を無効化して再有効化できる(env) -> None:
+    client, admin, workflows, _ = env
+    c = _create_conn(client)
+    r = client.patch(f"/v1/connections/{c['id']}", json={"status": "disabled"}, headers=_auth())
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "disabled"
+    assert admin.get_connection("ten_1", c["id"]).status == "disabled"
+    assert workflows.audits[-1]["action"] == "connection.disable"
+    assert workflows.audits[-1]["target_type"] == "connection"
+
+    r = client.patch(f"/v1/connections/{c['id']}", json={"status": "active"}, headers=_auth())
+    assert r.status_code == 200
+    assert r.json()["status"] == "active"
+    assert workflows.audits[-1]["action"] == "connection.enable"
+
+    # tested/untested は手で付けられない（worker/疎通テストが付ける値）
+    r = client.patch(f"/v1/connections/{c['id']}", json={"status": "tested"}, headers=_auth())
+    assert r.status_code == 422
+
+
+def test_有効なワークフローが使う接続は無効化できない(env) -> None:
+    client, admin, workflows, _ = env
+    _seed_tested_conn(admin, workflows)
+    wf_id = _create_wf(client, GRAPH_DB)
+    # draft からの参照は止めない（有効化時に L010 が断る）
+    r = client.patch("/v1/connections/con_erp", json={"status": "disabled"}, headers=_auth())
+    assert r.status_code == 200, r.text
+    client.patch("/v1/connections/con_erp", json={"status": "active"}, headers=_auth())
+
+    assert client.post(f"/v1/workflows/{wf_id}/activate", headers=_auth()).status_code == 200
+    r = client.patch("/v1/connections/con_erp", json={"status": "disabled"}, headers=_auth())
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["code"] == "E1005"
+    assert err["details"]["reason"] == "workflow_active"
+    assert [w["id"] for w in err["details"]["workflows"]] == [wf_id]
+    assert admin.get_connection("ten_1", "con_erp").status == "active"  # 変わっていない
+
+    # 停止すれば無効化できる
+    client.post(f"/v1/workflows/{wf_id}/pause", headers=_auth())
+    r = client.patch("/v1/connections/con_erp", json={"status": "disabled"}, headers=_auth())
+    assert r.status_code == 200
+
+
+def test_参照の無い接続は削除でき参照があれば断る(env) -> None:
+    client, admin, workflows, _ = env
+    c = _create_conn(client)
+    r = client.delete(f"/v1/connections/{c['id']}", headers=_auth())
+    assert r.status_code == 200, r.text
+    assert r.json() == {"connection_id": c["id"], "deleted": True, "cursors_deleted": 0}
+    assert client.get("/v1/connections", headers=_auth()).json()["items"] == []
+    assert workflows.audits[-1]["action"] == "connection.delete"
+    assert client.delete(f"/v1/connections/{c['id']}", headers=_auth()).status_code == 400
+
+    # draft のワークフローが定義で参照している → 削除不可（無効化は可）
+    _seed_tested_conn(admin, workflows)
+    wf_id = _create_wf(client, GRAPH_DB)
+    r = client.delete("/v1/connections/con_erp", headers=_auth())
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["details"]["reason"] == "referenced"
+    assert [w["id"] for w in err["details"]["workflows"]] == [wf_id]
+    assert admin.get_connection("ten_1", "con_erp") is not None
+
+
+def test_runのスナップショットが参照する接続も削除できない(env) -> None:
+    # 定義から外しても、run の trigger.graph_json（§11.1 版固定）が残っていれば
+    # retry の再開先・履歴の再現に要る。削除ではなく無効化で止める
+    from newfan_gateway.records import WorkflowRunRecord
+
+    client, admin, workflows, _ = env
+    _seed_tested_conn(admin, workflows)
+    workflows.create_run(
+        WorkflowRunRecord(
+            id="wfrun_1", tenant_id="ten_1", workflow_id="workflow_x",
+            trigger={"type": "manual", "graph_json": GRAPH_DB}, status="succeeded",
+        )
+    )
+    r = client.delete("/v1/connections/con_erp", headers=_auth())
+    assert r.status_code == 409
+    assert r.json()["error"]["details"] == {"reason": "referenced", "workflows": [], "run_count": 1}
+    # 無効化は通る
+    r = client.patch("/v1/connections/con_erp", json={"status": "disabled"}, headers=_auth())
+    assert r.status_code == 200
+
+
+def test_無効化と削除はadmin限定(env) -> None:
+    client, _, _, _ = env
+    c = _create_conn(client)
+    r = client.patch(
+        f"/v1/connections/{c['id']}", json={"status": "disabled"}, headers=_auth("reviewer")
+    )
+    assert r.status_code == 403
+    r = client.delete(f"/v1/connections/{c['id']}", headers=_auth("reviewer"))
+    assert r.status_code == 403

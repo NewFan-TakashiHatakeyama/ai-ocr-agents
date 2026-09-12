@@ -292,6 +292,21 @@ export interface ConnectionTestResult {
   message?: string | null;
 }
 
+/** DELETE /connections/{id} の受領書（C9-D） */
+export interface ConnectionDeleted {
+  connection_id: string;
+  deleted: boolean;
+  cursors_deleted: number;
+}
+
+/** 409(E1005) の details.workflows に載る「参照しているワークフロー」 */
+export interface WorkflowRefDto {
+  id: string;
+  name: string;
+  status: string;
+  version: number;
+}
+
 export interface RuleDto {
   id: string;
   doc_type?: string | null;

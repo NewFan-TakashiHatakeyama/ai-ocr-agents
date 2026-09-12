@@ -460,6 +460,24 @@ class ConnectionList(BaseModel):
     items: list[ConnectionDto]
 
 
+class ConnectionStatusRequest(BaseModel):
+    """PATCH /connections/{id}（C9-D）。無効化（disabled）と再有効化（active）だけ。
+
+    tested/untested は疎通テスト・同期の結果として worker/gateway が付けるもので、
+    人が手で付ける値ではない。
+    """
+
+    status: Literal["active", "disabled"]
+
+
+class ConnectionDeleted(BaseModel):
+    """DELETE /connections/{id} の受領書。204 にしない理由は DocumentDeleted と同じ。"""
+
+    connection_id: str
+    deleted: bool = True
+    cursors_deleted: int = 0
+
+
 class ConnectionTestResult(BaseModel):
     ok: bool
     status: str

@@ -12,10 +12,31 @@ Protocol + InMemory 実装。本番の PostgreSQL 実装は db.PgWorkflowsReposi
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol
+from typing import Any, Iterable, Optional, Protocol
 
 from newfan_gateway.ids import new_id
 from newfan_gateway.records import WorkflowNodeRunRecord, WorkflowRecord, WorkflowRunRecord
+
+
+def graph_references(graph_json: Any, key: str, values: Iterable[str]) -> bool:
+    """graph_json のいずれかのノードの config.<key> が values のどれかを指すか。
+
+    接続の無効化/削除・スキーマのアーカイブが「参照しているワークフローがあるか」を
+    見るための共通判定。ノードの config は種別ごとに形が違うが、参照は
+    `config.connection_id` / `config.schema_id` の 2 種しか無い（models.py）ので
+    キー名の一致で足りる。Pg 実装は同じ判定を jsonb で行う（db.py の _GRAPH_REF_SQL）。
+    """
+    wanted = set(values)
+    if not wanted:
+        return False
+    nodes = (graph_json or {}).get("nodes") if isinstance(graph_json, dict) else None
+    if not isinstance(nodes, list):
+        return False
+    for n in nodes:
+        cfg = n.get("config") if isinstance(n, dict) else None
+        if isinstance(cfg, dict) and cfg.get(key) in wanted:
+            return True
+    return False
 
 # activate を許すノード種別（実装済み Phase のもののみ）。
 # 保存と lint は 13 種すべて通すが、実行できない種別を含むワークフローの有効化は
@@ -65,6 +86,29 @@ class WorkflowsRepository(Protocol):
     def schema_is_latest(self, tenant_id: str, schema_id: str) -> bool: ...
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool: ...
 
+    # 接続の無効化/削除のガード（C9-D）。「誰が使っているか」を先に見せて断る
+    def workflows_referencing_connection(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> list[WorkflowRecord]:
+        """現在の定義（workflows.graph_json）が当該接続を指すワークフロー。
+
+        statuses を渡すとその status のものだけ（無効化のガードは active のみ、
+        削除のガードは全 status）。
+        """
+        ...
+
+    def runs_referencing_connection(self, tenant_id: str, connection_id: str) -> int:
+        """trigger.graph_json スナップショット（§11.1 版固定）が当該接続を指す run の数。
+
+        定義から外された旧版でも run が残っていれば参照は生きている（retry の再開先、
+        履歴の再現）。削除のガードはこれも見る（無効化なら通す）。
+        """
+        ...
+
     # 実行（§16 設計 v0.2 §11 / P3）
     def create_run(self, rec: WorkflowRunRecord) -> WorkflowRunRecord: ...
     def get_run(self, tenant_id: str, run_id: str) -> Optional[WorkflowRunRecord]: ...
@@ -85,7 +129,8 @@ class WorkflowsRepository(Protocol):
         """
         ...
 
-    # §16.8: config 変更・有効化/停止は audit_logs へ（actor=human/agent）
+    # §16.8: config 変更・有効化/停止は audit_logs へ（actor=human/agent）。
+    # target_type は既定 'workflow'（従来どおり）。接続/スキーマの操作は明示して渡す
     def record_audit(
         self,
         tenant_id: str,
@@ -94,6 +139,7 @@ class WorkflowsRepository(Protocol):
         action: str,
         target_id: str,
         detail: dict[str, Any],
+        target_type: str = "workflow",
     ) -> None: ...
 
 
@@ -177,6 +223,31 @@ class InMemoryWorkflowsRepository:
         rec = self._admin.get_connection(tenant_id, connection_id)
         return rec is not None and rec.status in ("active", "tested")
 
+    def workflows_referencing_connection(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> list[WorkflowRecord]:
+        allowed = set(statuses) if statuses is not None else None
+        return [
+            w
+            for w in self.list_workflows(tenant_id)
+            if (allowed is None or w.status in allowed)
+            and graph_references(w.graph_json, "connection_id", [connection_id])
+        ]
+
+    def runs_referencing_connection(self, tenant_id: str, connection_id: str) -> int:
+        return sum(
+            1
+            for r in self._runs.values()
+            if r.tenant_id == tenant_id
+            and graph_references(
+                (r.trigger or {}).get("graph_json"), "connection_id", [connection_id]
+            )
+        )
+
     # --- 実行（P3） ---
     def create_run(self, rec: WorkflowRunRecord) -> WorkflowRunRecord:
         self._runs[rec.id] = rec
@@ -222,6 +293,7 @@ class InMemoryWorkflowsRepository:
         action: str,
         target_id: str,
         detail: dict[str, Any],
+        target_type: str = "workflow",
     ) -> None:
         self.audits.append(
             {
@@ -229,6 +301,7 @@ class InMemoryWorkflowsRepository:
                 "tenant_id": tenant_id,
                 "actor_id": actor_id,
                 "action": action,
+                "target_type": target_type,
                 "target_id": target_id,
                 "detail": detail,
             }

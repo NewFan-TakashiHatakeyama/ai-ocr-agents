@@ -48,6 +48,23 @@ class Base(DeclarativeBase):
     pass
 
 
+def _graph_ref_sql(graph_col: str, key: str, param: str) -> str:
+    """`graph_col`（jsonb のグラフ）のいずれかのノードが config.<key> = ANY(:param) を
+    持つかを返す EXISTS 句（C9-D。workflows_repo.graph_references の jsonb 版）。
+
+    nodes が配列でない行（壊れた graph_json）で jsonb_array_elements が落ちると
+    削除 API 全体が 500 になるため、配列でなければ空配列として扱う。
+    """
+    nodes = (
+        f"CASE WHEN jsonb_typeof({graph_col}->'nodes')='array'"
+        f" THEN {graph_col}->'nodes' ELSE '[]'::jsonb END"
+    )
+    return (
+        f"EXISTS (SELECT 1 FROM jsonb_array_elements({nodes}) AS n"
+        f" WHERE n->'config'->>'{key}' = ANY(:{param}))"
+    )
+
+
 class Document(Base):
     __tablename__ = "documents"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1116,6 +1133,35 @@ class PgAdminRepository:
             )
         return self.get_connection(tenant_id, connection_id)
 
+    def delete_connection(self, tenant_id, connection_id):
+        """接続の削除（C9-D）。参照ガードを DELETE 文に含めて 1 トランザクションで行う。
+
+        ルータの事前チェック（誰が使っているかを返す）とは別トランザクションなので、
+        その間に有効化・実行された参照をここでもう一度見る。参照があれば rowcount=0
+        で何も消えない（None を返す。ルータは「参照あり」として E1005 に翻訳する）。
+        """
+        wf_ref = _graph_ref_sql("w.graph_json", "connection_id", "ids")
+        run_ref = _graph_ref_sql("r.trigger->'graph_json'", "connection_id", "ids")
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            deleted = c.execute(
+                text(
+                    "DELETE FROM connections WHERE tenant_id=:t AND id=:i"
+                    " AND NOT EXISTS (SELECT 1 FROM workflows w"
+                    f"   WHERE w.tenant_id=:t AND {wf_ref})"
+                    " AND NOT EXISTS (SELECT 1 FROM workflow_runs r"
+                    f"   WHERE r.tenant_id=:t AND {run_ref})"
+                ),
+                {"t": tenant_id, "i": connection_id, "ids": [connection_id]},
+            ).rowcount
+            if deleted != 1:
+                return None
+            cursors = c.execute(
+                text("DELETE FROM source_cursors WHERE tenant_id=:t AND connection_id=:i"),
+                {"t": tenant_id, "i": connection_id},
+            ).rowcount
+        return {"cursors_deleted": cursors}
+
     def list_webhook_endpoints(self, tenant_id: str):
         from newfan_gateway.records import ConnectionRecord
 
@@ -1374,21 +1420,62 @@ class PgWorkflowsRepository:
             ).first()
         return r is not None
 
+    def workflows_referencing_connection(self, tenant_id: str, connection_id: str,
+                                         *, statuses=None):
+        return self._workflows_referencing(
+            tenant_id, "connection_id", [connection_id], statuses=statuses
+        )
+
+    def _workflows_referencing(self, tenant_id: str, key: str, ids: list[str], *, statuses):
+        """config.<key> が ids のいずれかを指す（現在の定義の）ワークフロー。"""
+        if not ids:
+            return []
+        ref = _graph_ref_sql("w.graph_json", key, "ids")
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT id, tenant_id, name, status, version, graph_json, auto_confirm,"
+                    " created_by, updated_at FROM workflows w WHERE w.tenant_id=:t"
+                    " AND (CAST(:st AS text[]) IS NULL OR w.status = ANY(CAST(:st AS text[])))"
+                    f" AND {ref} ORDER BY updated_at DESC"
+                ),
+                {
+                    "t": tenant_id,
+                    "ids": list(ids),
+                    "st": list(statuses) if statuses is not None else None,
+                },
+            ).mappings().all()
+        return [self._row_to_record(r) for r in rows]
+
+    def runs_referencing_connection(self, tenant_id: str, connection_id: str) -> int:
+        # trigger.graph_json は版固定のスナップショット（§11.1）。索引は無いが、
+        # 接続の削除は稀な管理操作なので全走査で足りる
+        ref = _graph_ref_sql("r.trigger->'graph_json'", "connection_id", "ids")
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            n = c.execute(
+                text(f"SELECT count(*) FROM workflow_runs r WHERE r.tenant_id=:t AND {ref}"),
+                {"t": tenant_id, "ids": [connection_id]},
+            ).scalar_one()
+        return int(n)
+
     def record_audit(self, tenant_id: str, *, actor_id: str, action: str,
-                     target_id: str, detail) -> None:
+                     target_id: str, detail, target_type: str = "workflow") -> None:
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
             c.execute(
                 text(
                     "INSERT INTO audit_logs (id, tenant_id, actor_type, actor_id, action,"
                     " target_type, target_id, detail)"
-                    " VALUES (:i,:t,'human',:a,:ac,'workflow',:tg, CAST(:d AS jsonb))"
+                    " VALUES (:i,:t,'human',:a,:ac,:tt,:tg, CAST(:d AS jsonb))"
                 ),
                 {
                     "i": new_id("audit"),
                     "t": tenant_id,
                     "a": actor_id,
                     "ac": action,
+                    "tt": target_type,
                     "tg": target_id,
                     "d": json.dumps(detail, ensure_ascii=False),
                 },

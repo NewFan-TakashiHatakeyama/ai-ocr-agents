@@ -137,6 +137,19 @@ class AdminRepository(Protocol):
     def set_connection_status(
         self, tenant_id: str, connection_id: str, status: str
     ) -> Optional[ConnectionRecord]: ...
+    def delete_connection(
+        self, tenant_id: str, connection_id: str
+    ) -> Optional[dict[str, int]]:
+        """接続を消す（C9-D）。消したら件数の dict、無い/参照されていて消せなければ None。
+
+        ワークフロー（現在の定義と run のスナップショット）から参照されている接続は
+        消さない。ルータが先にガードして「誰が使っているか」を返すが、Pg 実装は
+        DELETE 文自体にも同じ条件を含める（ガードと削除が別トランザクションのため、
+        その間に有効化された参照を黙って壊さない）。
+        source_cursors（フォルダ監視の重複排除台帳）は接続と一緒に消える。接続が
+        無くなれば台帳は引かれず、残すと孤児になるだけ。件数は監査へ載せる。
+        """
+        ...
 
     # KPI（§12.1）
     def metrics_summary(self, tenant_id: str) -> MetricsSummary: ...
@@ -327,6 +340,17 @@ class InMemoryAdminRepository:
         updated = rec.model_copy(update={"status": status})
         self._connections[self._connections.index(rec)] = updated
         return updated
+
+    def delete_connection(
+        self, tenant_id: str, connection_id: str
+    ) -> Optional[dict[str, int]]:
+        # InMemory はワークフロー表を持たないので参照ガードはルータ側に任せる
+        # （Pg 実装は DELETE 文に NOT EXISTS で同条件を含める）。
+        rec = self.get_connection(tenant_id, connection_id)
+        if rec is None:
+            return None
+        self._connections.remove(rec)
+        return {"cursors_deleted": 0}
 
     def list_webhook_endpoints(self, tenant_id: str) -> list[ConnectionRecord]:
         return [c for c in self._connections if c.tenant_id == tenant_id and c.type == "webhook"]

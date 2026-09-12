@@ -12,6 +12,7 @@ import { useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { ApiError, api } from "@/lib/api";
 import { useToasts } from "@/lib/toast";
+import type { ConnectionDto, WorkflowRefDto } from "@/lib/types";
 
 const TYPE_LABEL: Record<string, string> = {
   gdrive: "Google Drive",
@@ -48,6 +49,31 @@ const STATUS_LABEL: Record<string, { cls: string; label: string }> = {
   active: { cls: "st-confirmed", label: "有効" },
   disabled: { cls: "st-failed", label: "無効" },
 };
+
+/** 409(E1005) の details.workflows を「名前（状態）」の並びにする。無ければ空文字 */
+function workflowNames(details?: Record<string, unknown>): string {
+  const rows = (details?.workflows as WorkflowRefDto[] | undefined) ?? [];
+  return rows.map((w) => `「${w.name}」`).join("、");
+}
+
+// 無効化・削除の確認とエラー文言。どちらも「何が起きるか」と「次の一手」を必ず入れる。
+// 無効化は元に戻せる（再有効化）が、削除は元に戻せない。
+function confirmDisable(c: ConnectionDto): boolean {
+  return window.confirm(
+    `接続「${c.name}」を無効化します。\n` +
+      "この接続を使う出力（Webhook / DB 書込み / ファイル）とフォルダ監視・同期は止まります。" +
+      "再有効化すれば元に戻ります。\n\nよろしいですか？",
+  );
+}
+
+function confirmDelete(c: ConnectionDto): boolean {
+  return window.confirm(
+    `接続「${c.name}」を削除します。\n` +
+      "接続の設定（フォルダ・宛先・secret_ref）は消え、元に戻せません。" +
+      "ワークフローから参照されている接続は削除できません（代わりに無効化してください）。\n\n" +
+      "よろしいですか？",
+  );
+}
 
 function AdminDenied() {
   return (
@@ -215,6 +241,66 @@ export default function ConnectionsPage() {
   });
   const testingId = test.isPending ? (test.variables as string) : null;
 
+  // 無効化 / 再有効化（C9-D）。有効なワークフローが使っていれば 409 で断られる
+  const setStatus = useMutation({
+    mutationFn: (v: { c: ConnectionDto; status: "active" | "disabled" }) =>
+      api.patchConnectionStatus(v.c.id, v.status),
+    onSuccess: (r) => {
+      push({
+        kind: "ok",
+        message:
+          r.status === "disabled"
+            ? `「${r.name}」を無効化しました。再有効化すれば元に戻ります。`
+            : `「${r.name}」を再有効化しました。`,
+      });
+      qc.invalidateQueries({ queryKey: ["connections"] });
+    },
+    onError: (e, v) => {
+      // instanceof は dev のモジュール重複で false になり得るため status/details を直接見る
+      const err = e as { status?: number; details?: Record<string, unknown> };
+      if (err.status === 409) {
+        push({
+          kind: "warn",
+          message:
+            `「${v.c.name}」は有効なワークフロー ${workflowNames(err.details)} が使っているため無効化できません。` +
+            "先にワークフローを停止してください。",
+        });
+        return;
+      }
+      push({ kind: "err", message: `変更できませんでした（${(e as Error).message}）。` });
+    },
+  });
+
+  // 削除。参照が残っていれば 409（無効化を案内する）
+  const del = useMutation({
+    mutationFn: (c: ConnectionDto) => api.deleteConnection(c.id),
+    onSuccess: (_r, c) => {
+      push({ kind: "ok", message: `「${c.name}」を削除しました。` });
+      qc.invalidateQueries({ queryKey: ["connections"] });
+    },
+    onError: (e, c) => {
+      const err = e as { status?: number; details?: Record<string, unknown> };
+      if (err.status === 409) {
+        const names = workflowNames(err.details);
+        const runs = Number(err.details?.run_count ?? 0);
+        push({
+          kind: "warn",
+          message:
+            `「${c.name}」はワークフロー${names ? ` ${names}` : ""}` +
+            `${runs > 0 ? `${names ? "と" : ""}過去の実行 ${runs} 件` : ""}から参照されているため削除できません。` +
+            "使わなくするには「無効化」してください。",
+        });
+        return;
+      }
+      push({ kind: "err", message: `削除できませんでした（${(e as Error).message}）。` });
+    },
+  });
+  const busyId = setStatus.isPending
+    ? setStatus.variables?.c.id
+    : del.isPending
+      ? del.variables?.id
+      : null;
+
   if (error instanceof ApiError && error.status === 403) return <AdminDenied />;
 
   const items = data?.items ?? [];
@@ -285,51 +371,85 @@ export default function ConnectionsPage() {
                       )}
                     </td>
                     <td>
-                      {(FOLDER_TYPES as readonly string[]).includes(c.type) ? (
-                        // フォルダ監視系は「今すぐ同期」の成功が疎通テストを兼ねる
-                        <button
-                          className="btn sm"
-                          disabled={syncingId === c.id}
-                          onClick={() => sync.mutate(c.id)}
-                        >
-                          {syncingId === c.id ? "同期中…" : "今すぐ同期"}
-                        </button>
-                      ) : (
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", flexWrap: "wrap" }}>
+                        {(FOLDER_TYPES as readonly string[]).includes(c.type) ? (
+                          // フォルダ監視系は「今すぐ同期」の成功が疎通テストを兼ねる
                           <button
                             className="btn sm"
-                            // 無効（disabled）は運用側が止めた印。API も 409 で断る
-                            // （テストの成功で tested に戻し配信を再開させない）
-                            disabled={testingId === c.id || c.status === "disabled"}
-                            onClick={() => test.mutate(c.id)}
-                            title={
-                              c.status === "disabled"
-                                ? "無効化された接続は疎通テストできません"
-                                : c.type === "webhook"
-                                  ? "本配信と同じ署名で {\"event\":\"test\",\"text\":…} を 1 回送ります（2xx で成功。Slack 互換の通知先にはテスト投稿として届きます）"
-                                  : c.type === "s3"
-                                    ? "バケットの存在と権限（HeadBucket）を確かめます"
-                                    : "SELECT 1 で接続を確かめます"
-                            }
+                            disabled={syncingId === c.id || c.status === "disabled"}
+                            title={c.status === "disabled" ? "無効化された接続は同期できません" : undefined}
+                            onClick={() => sync.mutate(c.id)}
                           >
-                            {testingId === c.id ? "テスト中…" : "疎通テスト"}
+                            {syncingId === c.id ? "同期中…" : "今すぐ同期"}
                           </button>
-                          {testResults[c.id] &&
-                            (testResults[c.id].ok ? (
-                              <span className="sub" style={{ color: "var(--green, #2e9e6b)" }}>
-                                ✓ {testResults[c.id].message}
-                              </span>
-                            ) : (
-                              <span
-                                className="sub"
-                                style={{ color: "var(--red, #c0392b)", maxWidth: 320 }}
-                                title={testResults[c.id].message}
-                              >
-                                ✗ {testResults[c.id].message}
-                              </span>
-                            ))}
-                        </div>
-                      )}
+                        ) : (
+                          <>
+                            <button
+                              className="btn sm"
+                              // 無効（disabled）は運用側が止めた印。API も 409 で断る
+                              // （テストの成功で tested に戻し配信を再開させない）
+                              disabled={testingId === c.id || c.status === "disabled"}
+                              onClick={() => test.mutate(c.id)}
+                              title={
+                                c.status === "disabled"
+                                  ? "無効化された接続は疎通テストできません"
+                                  : c.type === "webhook"
+                                    ? "本配信と同じ署名で {\"event\":\"test\",\"text\":…} を 1 回送ります（2xx で成功。Slack 互換の通知先にはテスト投稿として届きます）"
+                                    : c.type === "s3"
+                                      ? "バケットの存在と権限（HeadBucket）を確かめます"
+                                      : "SELECT 1 で接続を確かめます"
+                              }
+                            >
+                              {testingId === c.id ? "テスト中…" : "疎通テスト"}
+                            </button>
+                            {testResults[c.id] &&
+                              (testResults[c.id].ok ? (
+                                <span className="sub" style={{ color: "var(--green, #2e9e6b)" }}>
+                                  ✓ {testResults[c.id].message}
+                                </span>
+                              ) : (
+                                <span
+                                  className="sub"
+                                  style={{ color: "var(--red, #c0392b)", maxWidth: 320 }}
+                                  title={testResults[c.id].message}
+                                >
+                                  ✗ {testResults[c.id].message}
+                                </span>
+                              ))}
+                          </>
+                        )}
+                        {c.status === "disabled" ? (
+                          <button
+                            className="btn sm"
+                            disabled={busyId === c.id}
+                            title="この接続を再び使えるようにする"
+                            onClick={() => setStatus.mutate({ c, status: "active" })}
+                          >
+                            再有効化
+                          </button>
+                        ) : (
+                          <button
+                            className="btn sm ghost"
+                            disabled={busyId === c.id}
+                            title="出力・フォルダ監視を止める（再有効化で戻せます）"
+                            onClick={() => {
+                              if (confirmDisable(c)) setStatus.mutate({ c, status: "disabled" });
+                            }}
+                          >
+                            無効化
+                          </button>
+                        )}
+                        <button
+                          className="btn sm danger"
+                          disabled={busyId === c.id}
+                          title="この接続を削除する（元に戻せません。参照中は削除できません）"
+                          onClick={() => {
+                            if (confirmDelete(c)) del.mutate(c);
+                          }}
+                        >
+                          {del.isPending && del.variables?.id === c.id ? "削除中…" : "削除"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );

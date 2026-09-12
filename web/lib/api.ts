@@ -3,6 +3,7 @@
 import type {
   CatalogDto,
   ClassifyResult,
+  ConnectionDeleted,
   ConnectionDto,
   ConnectionTestResult,
   DryRunResultDto,
@@ -247,6 +248,17 @@ export const api = {
   // 200 + ok=false、webhook/s3 の失敗は 422（ApiError）で理由が返る
   testConnection: (connectionId: string) =>
     request<ConnectionTestResult>(`/connections/${connectionId}/test`, { method: "POST" }),
+  // 接続の無効化 / 再有効化（C9-D）。有効なワークフローが使っている接続の無効化は
+  // 409(E1005, details.workflows) で断られる（先にワークフローを停止する）。
+  patchConnectionStatus: (connectionId: string, status: "active" | "disabled") =>
+    request<ConnectionDto>(`/connections/${connectionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
+  // 接続の削除。どのワークフロー版（定義・実行のスナップショット）からも参照されて
+  // いない接続だけ消せる。参照があれば 409(E1005, details.reason="referenced")。
+  deleteConnection: (connectionId: string) =>
+    request<ConnectionDeleted>(`/connections/${connectionId}`, { method: "DELETE" }),
   listRules: (status?: string) =>
     request<{ items: RuleDto[] }>(`/rules${status ? `?status=${status}` : ""}`),
   patchRule: (ruleId: string, status: string) =>
