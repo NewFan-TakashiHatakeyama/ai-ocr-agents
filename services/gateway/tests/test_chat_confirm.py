@@ -48,9 +48,19 @@ def _seed_document(
         )
 
 
-def _confirm(ctx: SimpleNamespace, role: str, action: str, params: dict[str, Any]) -> Any:
+def _confirm(
+    ctx: SimpleNamespace,
+    role: str,
+    action: str,
+    params: dict[str, Any],
+    *,
+    idempotency_key: str | None = None,
+) -> Any:
+    headers = auth(role)
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
     return ctx.client.post(
-        "/v1/chat/confirm", headers=auth(role), json={"action": action, "params": params}
+        "/v1/chat/confirm", headers=headers, json={"action": action, "params": params}
     )
 
 
@@ -247,6 +257,64 @@ def test_unknown_action_is_e1003(ctx: SimpleNamespace) -> None:
 def test_confirm_requires_auth(ctx: SimpleNamespace) -> None:
     r = ctx.client.post("/v1/chat/confirm", json={"action": "rerun_extract", "params": {"document_id": "x"}})
     assert r.status_code == 403
+
+
+# ---- Idempotency-Key（承認カードの連打・再送） ----
+
+
+def test_rerun_extract_same_idempotency_key_returns_first_result(ctx: SimpleNamespace) -> None:
+    """同キーの 2 通目は 1 通目の応答（ok=True + 同じ run）を返し、Run を増やさない。
+
+    鍵無しだと 2 通目は ok=False「現在処理中」になり、UI では 1 通目の成功
+    （ドキュメントを開くリンク付き）を上書きしてしまう。POST /documents/{id}/extract
+    と同じ扱い。
+    """
+    _seed_document(ctx, run_status="needs_review")
+    params = {"document_id": "doc_1"}
+    r1 = _confirm(ctx, "uploader", "rerun_extract", params, idempotency_key="k-1")
+    r2 = _confirm(ctx, "uploader", "rerun_extract", params, idempotency_key="k-1")
+    assert r1.status_code == 200 and r1.json()["ok"] is True
+    assert r2.status_code == 200 and r2.json() == r1.json()
+    assert len(ctx.queue.messages) == 1
+    assert sum(1 for r in _runs(ctx).values() if r.status == "processing") == 1
+
+
+def test_rerun_extract_without_key_second_send_is_processing(ctx: SimpleNamespace) -> None:
+    """鍵を付けない再送は従来どおり（1 通目成功、2 通目は「処理中」で ok=False）。"""
+    _seed_document(ctx, run_status="needs_review")
+    r1 = _confirm(ctx, "uploader", "rerun_extract", {"document_id": "doc_1"})
+    r2 = _confirm(ctx, "uploader", "rerun_extract", {"document_id": "doc_1"})
+    assert r1.json()["ok"] is True
+    assert r2.json()["ok"] is False and "処理中" in r2.json()["message"]
+    assert len(ctx.queue.messages) == 1
+
+
+def test_update_schema_same_idempotency_key_does_not_bump_version_twice(ctx: SimpleNamespace) -> None:
+    """update_schema の再送は「同名の項目が既に存在」で成功を上書きしない。"""
+    params = {"doc_type": "invoice", "field": {"name": "note", "label": "備考"}}
+    r1 = _confirm(ctx, "admin", "update_schema", params, idempotency_key="k-2")
+    r2 = _confirm(ctx, "admin", "update_schema", params, idempotency_key="k-2")
+    assert r1.json()["ok"] is True and r1.json()["detail"]["version"] == 5
+    assert r2.json() == r1.json()
+    assert ctx.admin.get_schema("ten_1", "invoice").version == 5
+
+
+def test_different_idempotency_keys_are_separate_requests(ctx: SimpleNamespace) -> None:
+    """別キーは別の要求として実行される（キャッシュが誤って当たらない）。"""
+    _seed_document(ctx, run_status="needs_review")
+    r1 = _confirm(ctx, "uploader", "rerun_extract", {"document_id": "doc_1"}, idempotency_key="k-a")
+    r2 = _confirm(ctx, "uploader", "rerun_extract", {"document_id": "doc_1"}, idempotency_key="k-b")
+    assert r1.json()["ok"] is True
+    assert r2.json()["ok"] is False and "処理中" in r2.json()["message"]
+
+
+def test_idempotency_cache_does_not_bypass_role_check(ctx: SimpleNamespace) -> None:
+    """キャッシュ応答は権限チェックの後（同キーでも viewer には 403）。"""
+    _seed_document(ctx, run_status="needs_review")
+    r1 = _confirm(ctx, "uploader", "rerun_extract", {"document_id": "doc_1"}, idempotency_key="k-3")
+    assert r1.json()["ok"] is True
+    r2 = _confirm(ctx, "viewer", "rerun_extract", {"document_id": "doc_1"}, idempotency_key="k-3")
+    assert r2.status_code == 403
 
 
 def test_every_write_tool_has_a_role_and_params_model() -> None:

@@ -6,10 +6,11 @@ import { Suspense, useRef, useState } from "react";
 
 import { AppShell } from "@/components/AppShell";
 import { ApiError, api } from "@/lib/api";
-import { type Confirm, deniedMessage, describeConfirm, resultLink, splitConfirm } from "@/lib/chatConfirm";
+import { type Confirm, confirmFailure, describeConfirm, resultLink, splitConfirm } from "@/lib/chatConfirm";
 import { CHAT_DOC_TYPE_PARAM, schemaAddRequest } from "@/lib/schemaChat";
 import { useToasts } from "@/lib/toast";
 import { UPLOAD_ACCEPT, UPLOAD_FORMATS_HINT, UPLOAD_FORMATS_LABEL } from "@/lib/uploads";
+import { newUuid } from "@/lib/uuid";
 
 // SCR-01 チャットホーム（§3.3/§4.5）。生成AIの入口。書込み系は承認カードを挟む。
 interface ToolCall {
@@ -30,6 +31,9 @@ interface Msg {
   text: string;
   tools: ToolCall[];
   confirm?: Confirm;
+  // カードごとの Idempotency-Key。confirm_request を受けた時に 1 つ作り、そのカードの
+  // 承認（再試行を含む）で使い回す。連打・ネットワーク断後の再送で二重実行しない
+  confirmKey?: string;
   result?: ConfirmResult;
   streaming?: boolean;
 }
@@ -51,6 +55,10 @@ function ChatInner() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState(() => (fromSchema ? schemaAddRequest(fromSchema) : ""));
   const [busy, setBusy] = useState(false);
+  // 承認実行中のカード（メッセージ id）。ボタンの無効化は state、二重送信の判定は ref で
+  // 行う（連打の 2 回目は再描画前に届き得るので、state だけでは防げない）
+  const [approving, setApproving] = useState<number | null>(null);
+  const approvingRef = useRef<number | null>(null);
   const push = useToasts((s) => s.push);
   const fileRef = useRef<HTMLInputElement>(null);
   const idRef = useRef(0);
@@ -75,7 +83,8 @@ function ChatInner() {
       await api.chatStream(t, (type, data) => {
         if (type === "token") patch(aiId, (m) => ({ ...m, text: m.text + ((data.text as string) ?? "") }));
         else if (type === "tool_call") patch(aiId, (m) => ({ ...m, tools: [...m.tools, data as unknown as ToolCall] }));
-        else if (type === "confirm_request") patch(aiId, (m) => ({ ...m, confirm: data as unknown as Confirm }));
+        else if (type === "confirm_request")
+          patch(aiId, (m) => ({ ...m, confirm: data as unknown as Confirm, confirmKey: newUuid() }));
       });
     } catch (e) {
       push({ kind: "err", message: `応答に失敗しました（${(e as Error).message}）。` });
@@ -85,13 +94,18 @@ function ChatInner() {
     }
   }
 
-  async function approve(id: number, c: Confirm) {
+  async function approve(id: number, c: Confirm, key: string | undefined) {
+    // 実行中は受け付けない（連打で 2 通目が送られると、2 通目の ok=false「現在処理中」が
+    // 1 通目の成功とリンクを上書きしてしまう）。鍵はサーバ側の保険（同キーはキャッシュ応答）
+    if (approvingRef.current !== null) return;
+    approvingRef.current = id;
+    setApproving(id);
     // confirm_request の残り（action / prompt 以外）をそのまま返す。update_schema だけ
     // でなく rerun_extract（document_id / schema_id）・manage_rules（rule_id / status）も
     // 同じ経路（サーバ側の dto.Chat*Params が名前を検証する）。
     const { action, params } = splitConfirm(c);
     try {
-      const r = await api.chatConfirm(action, params);
+      const r = await api.chatConfirm(action, params, { idempotencyKey: key });
       push({ kind: r.ok ? "ok" : "warn", message: r.message });
       // 結果はカードの位置に残す（承認した内容と結果を会話の中で読めるように）
       patch(id, (m) => ({
@@ -100,14 +114,17 @@ function ChatInner() {
         result: { ok: r.ok, message: r.message, link: r.ok ? resultLink(action, r.detail ?? {}) : null },
       }));
     } catch (e) {
-      if (e instanceof ApiError && e.status === 403) {
-        const message = deniedMessage(action);
-        push({ kind: "warn", message });
-        patch(id, (m) => ({ ...m, confirm: undefined, result: { ok: false, message, link: null } }));
-        return;
+      // 403 / 422（E1003: 未対応の action・params 不正）は何度送っても同じなので、
+      // カードを消してサーバの理由をその場に残す。ネットワーク断・5xx・429 だけ
+      // カードを残して再試行できるようにする（同じ鍵で送るので二重実行にならない）
+      const f = confirmFailure(action, e);
+      push({ kind: "warn", message: f.message });
+      if (!f.retryable) {
+        patch(id, (m) => ({ ...m, confirm: undefined, result: { ok: false, message: f.message, link: null } }));
       }
-      // 一時的な失敗はカードを残して再試行できるようにする
-      push({ kind: "warn", message: "実行に失敗しました。時間をおいて再試行してください。" });
+    } finally {
+      approvingRef.current = null;
+      setApproving(null);
     }
   }
 
@@ -197,17 +214,24 @@ function ChatInner() {
                         )}
                         <button
                           className="btn sm primary"
-                          disabled={msg.confirm.action === "update_schema" && !targetDocType(msg.confirm)}
+                          disabled={
+                            approving !== null ||
+                            (msg.confirm.action === "update_schema" && !targetDocType(msg.confirm))
+                          }
                           title={
                             msg.confirm.action === "update_schema" && !targetDocType(msg.confirm)
                               ? "対象のスキーマが特定できません。「<スキーマ名> のスキーマに…」のように言い直してください"
                               : undefined
                           }
-                          onClick={() => approve(msg.id, msg.confirm!)}
+                          onClick={() => approve(msg.id, msg.confirm!, msg.confirmKey)}
                         >
-                          承認して実行
+                          {approving === msg.id ? "実行中…" : "承認して実行"}
                         </button>
-                        <button className="btn sm ghost" onClick={() => patch(msg.id, (m) => ({ ...m, confirm: undefined }))}>
+                        <button
+                          className="btn sm ghost"
+                          disabled={approving === msg.id}
+                          onClick={() => patch(msg.id, (m) => ({ ...m, confirm: undefined }))}
+                        >
                           今回はしない
                         </button>
                       </div>

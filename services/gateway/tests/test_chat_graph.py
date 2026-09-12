@@ -180,6 +180,38 @@ def test_manage_rules_requires_confirmation() -> None:
     assert admin.get_rule("ten_1", "rul_1").status == "draft"  # 未変更
 
 
+def test_confirm_action_is_always_the_tool_name() -> None:
+    """LLM が args に "action" を添えてもツール名を上書きしない。
+
+    supervisor は LLM の args を検証せずに通す。以前は ``{"action": tool, **args}`` の
+    dict 展開で LLM の "action": "activate" が勝ち、UI は要約行の無いカードを出し、
+    承認は 422（未対応のアクション: activate）で必ず失敗していた。
+    """
+    tools, *_ = _tools()
+    g = _graph(
+        [
+            {
+                "tool": "manage_rules",
+                "args": {
+                    "rule_id": "rul_1",
+                    "status": "active",
+                    "action": "activate",
+                    "prompt": "有効化しますか？",
+                },
+                "text": "承認をお願いします。",
+            }
+        ],
+        tools,
+    )
+    out = g.invoke({"tenant_id": "ten_1", "message": "rul_1 を有効化して"})
+    assert out["confirm"] == {
+        "action": "manage_rules",
+        "rule_id": "rul_1",
+        "status": "active",
+        "prompt": "有効化しますか？",
+    }
+
+
 def test_rerun_extract_runs_after_confirmation() -> None:
     """承認後（chat/confirm 経路）はツールが実際に Run を発行する。
 

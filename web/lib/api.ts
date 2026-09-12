@@ -292,9 +292,13 @@ export const api = {
     }
   },
 
-  chatConfirm: (action: string, params: Record<string, unknown>) =>
+  // 承認カードの実行。Idempotency-Key は extract と同じ扱い（gateway が同キーを
+  // キャッシュ応答する）。カードごとに 1 つ鍵を作って再送でも使い回すと、連打や
+  // ネットワーク断後の再試行で rerun_extract が二重に Run を発行しない。
+  chatConfirm: (action: string, params: Record<string, unknown>, opts?: { idempotencyKey?: string }) =>
     request<ChatConfirmResult>(`/chat/confirm`, {
       method: "POST",
+      headers: opts?.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : undefined,
       body: JSON.stringify({ action, params }),
     }),
 

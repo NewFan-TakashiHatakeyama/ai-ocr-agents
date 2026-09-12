@@ -67,6 +67,57 @@ export function deniedMessage(action: string): string {
   return label ? `この操作には${label}が必要です。` : "この操作を行う権限がありません。";
 }
 
+/** 承認実行が例外で終わったときの扱い。 */
+export interface ConfirmFailure {
+  /**
+   * true: 一時的な失敗（ネットワーク断・5xx・429・408）。カードを残して再試行できる。
+   * false: 何度送っても同じ結果になる失敗（403 / 422 など）。カードを消して理由を残す。
+   */
+  retryable: boolean;
+  message: string;
+}
+
+const RETRY_MESSAGE = "実行に失敗しました。時間をおいて再試行してください。";
+
+/**
+ * approve() の catch で使う分類。
+ *
+ * 以前は 403 以外を全部「時間をおいて再試行」にしていたが、/chat/confirm の 422
+ * （E1003: 未対応の action / params 不正）は決定的で、LLM が旧語彙（status: rejected）や
+ * 必須引数の欠落した提案を出したときに、何度再試行しても同じ 422 が返る。サーバの
+ * message と details.errors（loc / msg）を捨てて「再試行してください」と言うのは嘘になる。
+ *
+ * ApiError の判定は instanceof ではなく形（status: number）で行う。fetch のネットワーク
+ * 断は TypeError で status を持たないので retryable 側に落ちる。
+ */
+export function confirmFailure(action: string, e: unknown): ConfirmFailure {
+  const err = e as { status?: unknown; message?: unknown; details?: unknown } | null;
+  const status = typeof err?.status === "number" ? err.status : undefined;
+  if (status === undefined) return { retryable: true, message: RETRY_MESSAGE };
+  if (status === 403) return { retryable: false, message: deniedMessage(action) };
+  if (status === 408 || status === 429 || status >= 500) return { retryable: true, message: RETRY_MESSAGE };
+  // それ以外の 4xx（422 E1003 など）: サーバが言った理由をそのまま出す
+  const reason = str(err?.message) ?? "サーバに拒否されました";
+  const errors = validationErrors(err?.details);
+  const where = errors.length > 0 ? `: ${errors.join("、")}` : "";
+  return {
+    retryable: false,
+    message: `この提案は実行できません（${reason}${where}）。チャットで言い直して、提案を出し直してください。`,
+  };
+}
+
+/** gateway の E1003 details.errors（[{loc, msg}]）を「loc: msg」の行にする。 */
+function validationErrors(details: unknown): string[] {
+  const errors = (details as { errors?: unknown } | null)?.errors;
+  if (!Array.isArray(errors)) return [];
+  return errors.flatMap((e) => {
+    const loc = str((e as { loc?: unknown })?.loc);
+    const msg = str((e as { msg?: unknown })?.msg);
+    if (!loc && !msg) return [];
+    return [loc && msg ? `${loc}: ${msg}` : (loc ?? msg ?? "")];
+  });
+}
+
 /** 実行成功後に開ける画面（detail はサーバの ChatConfirmResult.detail）。 */
 export function resultLink(action: string, detail: Record<string, unknown>): { href: string; label: string } | null {
   switch (action) {

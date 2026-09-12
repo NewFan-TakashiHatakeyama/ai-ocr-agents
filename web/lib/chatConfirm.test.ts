@@ -6,7 +6,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { deniedMessage, describeConfirm, resultLink, splitConfirm } from "@/lib/chatConfirm";
+import { ApiError } from "@/lib/api";
+import { confirmFailure, deniedMessage, describeConfirm, resultLink, splitConfirm } from "@/lib/chatConfirm";
 
 describe("splitConfirm", () => {
   it("action / prompt を除いた残りを params として返す（rerun_extract）", () => {
@@ -88,5 +89,69 @@ describe("deniedMessage / resultLink", () => {
     });
     expect(resultLink("rerun_extract", {})).toBeNull();
     expect(resultLink("nope", {})).toBeNull();
+  });
+});
+
+describe("confirmFailure", () => {
+  // gateway routers._confirm_params が返す 422 E1003 の形
+  const e1003 = (errors: { loc: string; msg: string }[]) =>
+    new ApiError(422, "E1003", "承認内容（params）が不正です", { errors });
+
+  it("422 E1003（決定的）はカードを消し、サーバの理由と details.errors を出す", () => {
+    // LLM が旧語彙 status: rejected を出したケース。再試行しても同じ 422 になる
+    const f = confirmFailure("manage_rules", e1003([{ loc: "status", msg: "Input should be 'active' or 'retired'" }]));
+    expect(f.retryable).toBe(false);
+    expect(f.message).toBe(
+      "この提案は実行できません（承認内容（params）が不正です: status: Input should be 'active' or 'retired'）。チャットで言い直して、提案を出し直してください。",
+    );
+    expect(f.message).not.toContain("再試行");
+  });
+
+  it("errors が複数なら「、」で並べる。loc だけ / msg だけでも落とさない", () => {
+    const f = confirmFailure(
+      "rerun_extract",
+      e1003([
+        { loc: "document_id", msg: "Field required" },
+        { loc: "", msg: "extra" },
+        { loc: "x", msg: "" },
+      ]),
+    );
+    expect(f.message).toContain("document_id: Field required、extra、x");
+  });
+
+  it("未対応の action（details 無しの E1003）は message だけ", () => {
+    const f = confirmFailure("activate", new ApiError(422, "E1003", "未対応のアクションです: activate"));
+    expect(f).toEqual({
+      retryable: false,
+      message: "この提案は実行できません（未対応のアクションです: activate）。チャットで言い直して、提案を出し直してください。",
+    });
+  });
+
+  it("403 は action ごとの権限文言（従来どおり）", () => {
+    expect(confirmFailure("rerun_extract", new ApiError(403, "E5001", "権限不足"))).toEqual({
+      retryable: false,
+      message: "この操作にはアップロード以上の権限が必要です。",
+    });
+  });
+
+  it("5xx / 429 / 408 は一時的（カードを残して再試行）", () => {
+    for (const status of [500, 502, 504, 429, 408]) {
+      const f = confirmFailure("update_schema", new ApiError(status, String(status), "x"));
+      expect(f.retryable, String(status)).toBe(true);
+      expect(f.message).toBe("実行に失敗しました。時間をおいて再試行してください。");
+    }
+  });
+
+  it("ネットワーク断（status を持たない TypeError）も一時的", () => {
+    const f = confirmFailure("update_schema", new TypeError("Failed to fetch"));
+    expect(f).toEqual({ retryable: true, message: "実行に失敗しました。時間をおいて再試行してください。" });
+    expect(confirmFailure("update_schema", undefined).retryable).toBe(true);
+  });
+
+  it("message の無い 4xx でも空にならない", () => {
+    const f = confirmFailure("update_schema", new ApiError(400, "400"));
+    expect(f.retryable).toBe(false);
+    // ApiError は message 未指定でも既定文を持つ
+    expect(f.message).toContain("API error 400 (400)");
   });
 });

@@ -2149,6 +2149,8 @@ def _confirm_params(model: type[_ParamsT], params: dict[str, Any]) -> _ParamsT:
 @router.post("/chat/confirm", response_model=dto.ChatConfirmResult)
 def chat_confirm(
     body: dto.ChatConfirmRequest,
+    request: Request,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     principal: Principal = Depends(get_principal),
     tools: ChatTools = Depends(get_chat_tools),
 ) -> dto.ChatConfirmResult:
@@ -2158,6 +2160,11 @@ def chat_confirm(
     **同じ ChatTools** で実行する。必要ロールは同じ操作の非チャット API と揃える
     （WRITE_TOOL_MIN_ROLE: rerun_extract=uploader、他は admin）。以前は update_schema しか
     受けず、rerun_extract / manage_rules の承認カードは必ず E1003 で失敗していた。
+
+    Idempotency-Key は POST /documents/{id}/extract と同じ扱い（同キーはキャッシュ応答）。
+    承認カードの連打・再送で rerun_extract が二重に Run を発行したり、2 回目の
+    ok=False（現在処理中 / 同名の項目が既に存在）が 1 回目の成功を UI 上で上書きしたり
+    しないための保険。UI はカード生成時に 1 つ鍵を作り、そのカードの承認では使い回す。
     """
     min_role = WRITE_TOOL_MIN_ROLE.get(body.action)
     if min_role is None:
@@ -2165,6 +2172,18 @@ def chat_confirm(
     check_min_role(principal, min_role)
     tenant_id = principal.tenant_id
 
+    cached = _idempotency_hit(request, idempotency_key, tenant_id)
+    if cached is not None:
+        return dto.ChatConfirmResult(**cached)
+    result = _run_chat_confirm(body, tenant_id, tools)
+    _idempotency_store(request, idempotency_key, tenant_id, result.model_dump())
+    return result
+
+
+def _run_chat_confirm(
+    body: dto.ChatConfirmRequest, tenant_id: str, tools: ChatTools
+) -> dto.ChatConfirmResult:
+    """action ごとに params を検証して ChatTools を実行する（権限・冪等鍵は呼び出し側）。"""
     if body.action == "update_schema":
         us = _confirm_params(dto.ChatUpdateSchemaParams, body.params)
         res = tools.update_schema(tenant_id, us.doc_type, us.field)

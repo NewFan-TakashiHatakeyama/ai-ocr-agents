@@ -204,9 +204,15 @@ def build_chat_graph(*, supervisor: SupervisorFn, tools: ChatTools, max_steps: i
         UI は action / prompt を除いた残りを **そのまま** ``params`` として /chat/confirm に
         返す。したがってツール引数の名前は dto.Chat*Params と一致していなければならない
         （test_chat_confirm の end-to-end テストが両者のずれを検出する）。
+
+        "action" はツール名で **必ず** 上書きする。TOOL_SPECS に "action" 引数は無いが、
+        supervisor は LLM の args を検証せずに通すので、LLM が manage_rules に
+        {"action": "activate"} を添えると（dict 展開の順序次第で）ツール名が消え、
+        UI は要約行の無いカードを出し、承認は 422（未対応のアクション）で必ず失敗する。
         """
         args = dict(state.get("tool_args") or {})
         prompt = args.pop("prompt", None)
+        args.pop("action", None)
         return {
             "confirm": {"action": state.get("tool_name"), **args, "prompt": prompt},
             "tool_name": None,
