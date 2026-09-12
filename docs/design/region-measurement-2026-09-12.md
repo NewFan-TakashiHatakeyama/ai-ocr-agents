@@ -364,7 +364,8 @@ sample6 ← sample の issuer_address は依然 **0/5**。実機で対照と介�
 - (b) 以降は対照アームを (a) の行から再利用した（`--resume`）。設計の手順は 2 アームを
   交互に回して時間帯の揺れを散らす前提だったので、(b) の S3 / S2 と S1 の試行 0〜1 は
   対照と介入の時刻が離れている（S1 の試行 2〜4 は両アームを交互に回した）。実機で同じ
-  帳票を交互に回すと対照も 1/3 で外す（sample6）程度には揺れる。
+  帳票を交互に回すと対照も 1/3 で外す（sample6）程度には揺れる。第 4 回からは
+  `region_ab` がこの使い方（片方のアームの丸ごと再利用）を止める（「再実行の手順」）。
 - S1 の 5 試行への延長は結果を見てから決めた（2 試行で p = 0.21）。1 回だけ・5 試行固定と
   先に決めて回し、それ以上は足していない。
 - G4 の閾値「0 以上」は効果が無くても半分の確率で落ちる設計だった（設計 §3 に注記）。
@@ -376,29 +377,42 @@ sample6 ← sample の issuer_address は依然 **0/5**。実機で対照と介�
 
 ## 再実行の手順
 
+第 3 回は手順をその場のシェルで組んで回した（(a)〜(d) と延長で 5 本）。第 4 回からは
+`golden/scripts/run_region_arms.sh` で **3 アームを同じ手順で** 回す。手順の要点は
+スクリプトの頭に書いてある: アームごとに「領域を起こす（出力があれば飛ばす）→ 位置依存
+項目と合わせる（S1 は例示値を落とす）→ `region_ab` で対照と介入を**同じ試行で交互に**回す」。
+交互に回すのが手順そのもの（時間帯の揺れを両条件へ散らす）。
+
 ```bash
 # 1. 正解データからフィクスチャを組み立てる（S1 / S2 / S3、例示値つき）
 uv run python golden/scripts/build_region_fixtures.py
 
-# 2. 正解値の位置から領域を起こす（人が矩形を引く操作の再現。例示値も一緒に出る）
-PYTHONPATH=golden/src python -m newfan_golden.region_from_gold \
-  --api http://localhost:8000/v1 --token "$JWT" \
-  --spec golden/data/region_ab_s3_goldspec.json --out out/s3_regions.json
-# （S1 は例示値を落としてから使う: reg.pop("example_value")）
+# 2. worker のヒントが有効なことを確認する（既定 on。REGION_KIE_HINTS を off にしていないこと。
+#    対照アームはフラグの影響を受けない）
+docker compose --env-file .env -f deploy/compose.yaml up -d --no-deps orchestrator-worker
 
-# 3. worker のヒントを有効にして A/B を回す（対照アームはフラグの影響を受けない）
-REGION_KIE_HINTS=1 docker compose --env-file .env -f deploy/compose.yaml \
-  up -d --no-deps orchestrator-worker
-PYTHONPATH=golden/src python -m newfan_golden.region_ab \
-  --gold golden/data/region_ab_s3.jsonl --regions out/s3_regions_full.json \
-  --api http://localhost:8000/v1 --token "$JWT" --trials 5 --out out/s3_ab.json
+# 3. 3 アームを回す（S3 → S2 → S1。S3 / S2 は 5 試行、S1 は --trials-s1、既定 5）
+golden/scripts/run_region_arms.sh --api http://localhost:8000/v1 --token "$JWT" \
+  --out out/phase4 [--trials-s1 5] [--structure http://localhost:8081]
 
 # 4. ゲートを判定する
 uv run python golden/scripts/eval_gates_v2.py \
-  --s1 out/s1_ab.json --s2 out/s2_ab.json --s3 out/s3_ab.json
+  --s1 out/phase4/s1_ab.json --s2 out/phase4/s2_ab.json --s3 out/phase4/s3_ab.json \
+  --md out/phase4/gates.md
 ```
 
 **今回（第 3 回）の出力は次回の `--resume` に渡せない。** ADR-0007 で住所の採点規則が
 変わり（郵便番号・見出し語を落としてから比べる）、出力 JSON に採点規則の印 `scoring` が
 入るようになった。印が無い今回の出力から欠けた対だけ埋めると 1 つの McNemar 表に 2 つの
 規則が混ざるので、`region_ab` は拒む。次回は全件を回し直す。
+**対が欠けたとき（LLM 側の失敗で捨てた試行）** は、同じ `--out` でスクリプトをもう一度
+回す。`<arm>_ab.json` があれば `region_ab --resume` に渡して**欠けた (帳票, 試行, アーム)
+だけ**を埋める（元は `<arm>_ab_prefill.json` に残る）。
+
+**片方のアームを丸ごと再利用してはいけない。** 第 3 回の (b) は対照アームを (a) から
+再利用して介入だけ回し直した（上記「計測の限界」）。これは対照と介入の時刻が離れ、
+時間帯の交絡が入る。第 4 回からは `region_ab` が、`--resume` の出力にある帳票の片方の
+アームが 1 行も無いとき**止める**（`--allow-arm-reuse` を付けたときだけ通し、出力に
+`resume_arm_reuse: true` が残って `eval_gates_v2` が先頭に
+「⚠ 対照アームを再利用した計測（時間帯の交絡あり）」を出す）。プロンプトを変えて
+介入だけ見直したいときも、**両アームを回し直す**（別の `--out` にする）。

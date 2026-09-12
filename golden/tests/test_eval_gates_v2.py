@@ -216,6 +216,28 @@ class TestG4:
         assert eg.gate_g4(None) == (None, "S3 の結果が無い")
 
 
+def test_片方のアームを再利用した計測は先頭で警告する(tmp_path: Path, capsys: Any) -> None:
+    """region_ab --allow-arm-reuse の出力（resume_arm_reuse: true）が 1 つでも入力にあれば、
+    表の先頭（stdout と Markdown の両方）に警告行を出す。無ければ出さない。"""
+    plain = _report([_run("s2_d", 0, {"a": True})], [_run("s2_d", 0, {"a": True})], 1)
+    reused = _report([_run("s3_d", 0, {"a": True})], [_run("s3_d", 0, {"a": True})], 1,
+                     resume_arm_reuse=True, resume_arm_reuse_docs={"s3_d": "control"})
+    p2, p3, md = tmp_path / "s2.json", tmp_path / "s3.json", tmp_path / "g.md"
+    p2.write_text(json.dumps(plain, ensure_ascii=False), encoding="utf-8")
+    p3.write_text(json.dumps(reused, ensure_ascii=False), encoding="utf-8")
+
+    eg.main(["--s2", str(p2), "--s3", str(p3), "--md", str(md)])
+    text = md.read_text(encoding="utf-8")
+    first = text.splitlines()[0]
+    assert first.startswith("⚠ 対照アームを再利用した計測（時間帯の交絡あり）")
+    assert ": S3" in first and "S2" not in first
+    assert capsys.readouterr().out.splitlines()[0] == first
+
+    eg.main(["--s2", str(p2), "--md", str(md)])
+    assert "⚠" not in md.read_text(encoding="utf-8")
+    assert "⚠" not in capsys.readouterr().out
+
+
 def test_率が_None_でも表を出せる(tmp_path: Path) -> None:
     rep = _report([_run("s1_d", 0, {"a": True})], [], 1)
     rep["treat_exact_match"] = None

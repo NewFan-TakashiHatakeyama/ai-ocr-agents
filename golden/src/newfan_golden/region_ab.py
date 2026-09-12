@@ -20,6 +20,9 @@
   薄められて効果が見えなくなる。
 - **悪化の検出**も同じ重みで見る。ヒントが領域外の正しい値を捨てさせていないか
   （設計が最も恐れる失敗）を、項目ごとの勝敗で数える。
+- ``--resume`` は**欠けた (帳票, 試行, アーム) の対を埋める**ためのもの。片方のアームを
+  丸ごと再利用する（対照は前回のまま、介入だけ回し直す）と交互実行が崩れて時間帯の
+  交絡が入るので、既定では止める（``--allow-arm-reuse`` で通すと出力に印が残る）。
 
 出力は JSON。判定は人が読んで決める（このスクリプトは出荷可否を自動で決めない）。
 """
@@ -353,6 +356,37 @@ def _done_rows(resume: Optional[dict[str, Any]]) -> dict[tuple[str, int, str], d
     return out
 
 
+def arm_reuse_docs(done: dict[tuple[str, int, str], dict[str, Any]]) -> dict[str, str]:
+    """--resume で**片方のアームを丸ごと**再利用することになる帳票（帳票 → 残っているアーム）。
+
+    ある帳票について、前回の出力に一方のアームの行があり、もう一方のアームの行が
+    **全試行で 1 つも無い**なら、その帳票は「欠けた対を埋める」のではなく、片方の
+    アームだけを回し直すことになる。対照と介入を同じ試行で交互に回して時間帯の揺れを
+    両条件へ均等に散らす、という手順が崩れる（時間帯の交絡）。第 3 回の (b) で対照アームを
+    (a) から再利用してこれを踏んだ（実測記録「計測の限界」）。
+
+    両アームの行が 1 つでもある帳票は、試行が欠けていても対を埋めるだけなので対象にしない。
+    """
+    arms_by_doc: dict[str, set[str]] = {}
+    for doc_id, _trial, arm in done:
+        arms_by_doc.setdefault(doc_id, set()).add(arm)
+    return {
+        doc: next(iter(arms)) for doc, arms in sorted(arms_by_doc.items()) if len(arms) == 1
+    }
+
+
+def _arm_reuse_message(reuse: dict[str, str]) -> str:
+    return (
+        "--resume の出力は、次の帳票で片方のアームだけを再利用しようとしています"
+        f"（帳票 → 残っているアーム）: {reuse}。\n"
+        "対照と介入は同じ試行で交互に回して時間帯の揺れを両条件へ散らす手順なので、"
+        "片方のアームを丸ごと再利用すると対照と介入の時刻が離れ、時間帯の交絡が入ります"
+        "（第 3 回 (b) の限界）。--resume は欠けた (帳票, 試行, アーム) の対を埋めるための"
+        "ものです。承知の上で回すなら --allow-arm-reuse を付けてください"
+        "（出力に resume_arm_reuse: true が残り、eval_gates_v2 が警告を出します）。"
+    )
+
+
 def run(
     docs: list[GoldenDoc],
     regions: dict[str, Any],
@@ -361,6 +395,7 @@ def run(
     trials: int,
     timeout_sec: float,
     resume: Optional[dict[str, Any]] = None,
+    allow_arm_reuse: bool = False,
 ) -> dict[str, Any]:
     """対照（領域なし）と介入（領域あり）を交互に trials 回ずつ回す。
 
@@ -372,9 +407,17 @@ def run(
     失敗で対が欠けたとき、全部を回し直さずに対を埋めるため（第 3 回計測で、対照アームの
     3 試行が LLM 出力の欠陥で failed になった）。前回の出力の ``scoring`` が今と違えば
     RegionAbError（採点規則の混在を防ぐ）。
+    3 試行が LLM 出力の欠陥で failed になった）。
+
+    ``resume`` に、ある帳票の片方のアームしか無いときは **止める**（``arm_reuse_docs``）。
+    片方のアームを丸ごと再利用すると交互実行の手順が崩れる。``allow_arm_reuse`` で
+    通した場合は出力に ``resume_arm_reuse: true`` を残し、eval_gates_v2 が警告を出す。
     """
     positional_map = regions.get("_positional", {})
     done = _done_rows(resume)
+    reuse = arm_reuse_docs(done)
+    if reuse and not allow_arm_reuse:
+        raise RegionAbError(_arm_reuse_message(reuse))
     # 位置でしか区別できない項目名の集合（doc_type をまたいで合算する）
     positional_names = {n for names in positional_map.values() for n in names}
     tally = Tally()
@@ -513,6 +556,10 @@ def run(
         # 帳票ごとの純増減（G2）と、ヒントの内訳（G3・G4）
         "per_doc_net": per_doc_net(tally.control_runs, tally.treat_runs),
         "hint_summary": hint_summary(tally.control_runs, tally.treat_runs),
+        # --resume で片方のアームを丸ごと再利用した計測か（時間帯の交絡あり。
+        # eval_gates_v2 が先頭に警告を出す）。どの帳票かも残す
+        "resume_arm_reuse": bool(reuse),
+        "resume_arm_reuse_docs": reuse,
     }
 
 
@@ -529,6 +576,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--resume", type=Path, default=None,
         help="前回の出力 JSON。結果がある (帳票, 試行, アーム) は回さず、欠けた対だけ回す",
     )
+    ap.add_argument(
+        "--allow-arm-reuse", action="store_true",
+        help="--resume に片方のアームしか無い帳票があっても止めない（交互実行の手順が崩れ、"
+             "時間帯の交絡が入る。出力に resume_arm_reuse: true が残る）",
+    )
     args = ap.parse_args(argv)
 
     docs = load_jsonl(args.gold)
@@ -538,7 +590,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.resume is not None and args.resume.exists()
         else None
     )
-    report = run(docs, regions, args.api, args.token, args.trials, args.timeout_sec, resume=resume)
+    try:
+        report = run(
+            docs, regions, args.api, args.token, args.trials, args.timeout_sec,
+            resume=resume, allow_arm_reuse=args.allow_arm_reuse,
+        )
+    except RegionAbError as exc:
+        print(f"[region_ab] 中止: {exc}", file=sys.stderr, flush=True)
+        return 2
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({k: report[k] for k in

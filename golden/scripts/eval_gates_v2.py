@@ -30,6 +30,9 @@ G2_MIN_DOC_NET = -2
 G3_MIN_DEFENDED = 4
 G3_DOC = "s2_sample8"
 G3_FIELD = "customer_name"
+# 入力のどれかが region_ab --allow-arm-reuse で回した出力（resume_arm_reuse: true）なら、
+# 表の先頭にこの行を出す
+ARM_REUSE_WARNING = "⚠ 対照アームを再利用した計測（時間帯の交絡あり）"
 
 
 def _load(p: Path | None) -> dict[str, Any] | None:
@@ -313,6 +316,18 @@ def main(argv: list[str] | None = None) -> int:
     }
     all_ok = all(v[0] is True for v in gates.values())
     out: list[str] = []
+    # region_ab --allow-arm-reuse で片方のアームを丸ごと再利用した計測は、対照と介入の
+    # 時刻が離れている（交互実行の手順が崩れている）。表の先頭で目立つように断る
+    reused = [
+        arm for arm, rep in (("S1", s1), ("S2", s2), ("S3", s3))
+        if rep is not None and rep.get("resume_arm_reuse")
+    ]
+    if reused:
+        out.append(
+            f"{ARM_REUSE_WARNING}: {', '.join(reused)}"
+            "（region_ab --allow-arm-reuse。対照と介入を同じ試行で交互に回した計測ではない）"
+        )
+        out.append("")
     out.append("| ゲート | 判定 | 根拠 |")
     out.append("|---|---|---|")
     for g, (ok, why) in gates.items():
