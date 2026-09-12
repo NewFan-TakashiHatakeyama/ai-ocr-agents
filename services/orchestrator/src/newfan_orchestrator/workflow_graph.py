@@ -31,6 +31,7 @@ from newfan_workflow.classify import (
     canonical_doc_type,
     classify_text,
 )
+from newfan_workflow.title_zone import title_zone_text
 from newfan_workflow.dbsink import (
     LEDGER_COLUMN,
     build_db_write_sql,
@@ -78,6 +79,9 @@ class WorkflowState(TypedDict, total=False):
     run_status: str
     doc_type: Optional[str]
     original_name: Optional[str]  # 元ファイル名（classify ゲートの内容信号）
+    # 1 ページ目の表題部（上端 25% の OCR span を連結した ≤600 文字, ADR-0008）。
+    # classify ゲートの本文信号。span そのものは state に持たない（checkpoint の肥大）
+    title_text: Optional[str]
     fired_trigger: Optional[str]  # 発火したトリガーノード id（複数トリガー時の経路選択）
     run_confidence: Optional[float]
     fields: dict[str, Any]  # field名 → {"value": str|None, "confidence": float}
@@ -148,6 +152,11 @@ def _make_extract(node: ExtractNode, deps: RunnerDeps) -> Callable:
             "run_status": event.get("status", ""),
             "doc_type": event.get("doc_type"),
             "original_name": event.get("original_name"),
+            # 表題部は gateway の classify と同じ純関数で切り出す（ADR-0008）。
+            # 寸法不明・span 無しなら空 → classify ゲートはファイル名だけで判定する
+            "title_text": title_zone_text(
+                event.get("page1_spans") or [], page_height=event.get("page1_height")
+            ),
             "run_confidence": event.get("run_confidence"),
             "fields": event.get("fields", {}),
             "node_outputs": {node.id: {"run_id": run_id, "status": event.get("status")}},
@@ -314,14 +323,18 @@ _CLASSIFY_MIN_CONFIDENCE = 0.75
 def _make_classify(node: ClassifyNode) -> Callable:
     """process.classify（P8）。帳票種別を許可リストと照合する。
 
-    まずスキーマ由来の doc_type（抽出が返す）を使うが、ファイル名の内容分類が
-    確信をもって別種別を示す場合はそれを採用してゲートする（⑦）。これで
+    まずスキーマ由来の doc_type（抽出が返す）を使うが、内容分類が確信をもって
+    別種別を示す場合はそれを採用してゲートする（⑦）。これで
     「請求ワークフローに発注書が紛れ込む」ような取り違えを検知できる。
 
-    信号はファイル名のみ。抽出フィールドの値は使わない — 請求書の備考が
-    「見積書No…」を引用するのは常態で、自種別の語は値にほぼ現れないため、
-    値は構造的に他種別へ偏った信号になり正当な run を halt させる
-    （敵対的レビューで実測確定した誤検知）。
+    信号はファイル名（×3）と、1 ページ目の表題部（上端 25% の OCR span, ×1。
+    ADR-0008。state の title_text、extract ノードが同じ純関数で切り出す）。
+    抽出フィールドの値は使わない — 請求書の備考が「見積書No…」を引用するのは
+    常態で、自種別の語は値にほぼ現れないため、値は構造的に他種別へ偏った信号に
+    なり正当な run を halt させる（敵対的レビューで実測確定した誤検知）。
+    表題部はその偏りが無い場所（明細・備考より上）だけを切り出したもので、
+    重みの帰結として表題部はファイル名の 1 語を上回れない（最大で同点、
+    食い違いは確信度を閾値未満へ下げてスキーマ種別へ倒す）。
 
     許可リスト照合は正準名（canonical_doc_type）で行う。doc_types に日本語名
     （例「請求書」）が入っていても、内容分類が返す英語正準キー（invoice）と
@@ -345,11 +358,12 @@ def _make_classify(node: ClassifyNode) -> Callable:
     def run(state: WorkflowState) -> dict[str, Any]:
         schema_dt = state.get("doc_type")
         filename = state.get("original_name") or ""
+        title = state.get("title_text") or ""
 
         content = None
-        if filename:
+        if filename or title:
             out = classify_text(
-                text="",
+                text=title,
                 filename=filename,
                 candidates=candidates,
                 min_confidence=_CLASSIFY_MIN_CONFIDENCE,
@@ -370,6 +384,10 @@ def _make_classify(node: ClassifyNode) -> Callable:
             output["schema_doc_type"] = schema_dt
             output["content_doc_type"] = content.doc_type
             output["confidence"] = content.confidence
+            # gateway の classify と同じ語彙（表題部の証拠が寄与したか）
+            output["method"] = (
+                "filename+title" if content.evidence.get("text", 0) > 0 else "filename"
+            )
         return {"node_outputs": {node.id: output}}
 
     return run

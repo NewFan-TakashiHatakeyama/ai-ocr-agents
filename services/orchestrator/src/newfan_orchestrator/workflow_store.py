@@ -96,7 +96,16 @@ class WorkflowRunStore(Protocol):
         idem_key: str,
         notify: dict[str, Any],
     ) -> str: ...
-    def load_extract_result(self, tenant_id: str, run_id: str) -> dict[str, Any]: ...
+    def load_extract_result(self, tenant_id: str, run_id: str) -> dict[str, Any]:
+        """抽出完了 notify を enrich する（runner が resume の event に merge する）。
+
+        キー: doc_type / original_name / fields / run_confidence に加えて、
+        classify ゲートの表題部信号（ADR-0008）の材料 ``page1_spans``
+        （run_spans の 1 ページ目。行が無ければ空）と ``page1_height``
+        （pages.height。無ければ None → 表題部は使わない）。
+        """
+        ...
+
     def get_webhook_connection(
         self, tenant_id: str, connection_id: str
     ) -> Optional[tuple[str, str]]: ...
@@ -427,8 +436,10 @@ class PgWorkflowRunStore:
             self._rls(c, tenant_id)
             head = c.execute(
                 text(
-                    "SELECT d.doc_type, d.original_name FROM extraction_runs r JOIN documents d"
-                    " ON d.id = r.document_id WHERE r.tenant_id=:t AND r.id=:r"
+                    "SELECT d.doc_type, d.original_name, p.height"
+                    " FROM extraction_runs r JOIN documents d ON d.id = r.document_id"
+                    " LEFT JOIN pages p ON p.document_id = d.id AND p.page_no = 1"
+                    " WHERE r.tenant_id=:t AND r.id=:r"
                 ),
                 {"t": tenant_id, "r": run_id},
             ).first()
@@ -439,6 +450,15 @@ class PgWorkflowRunStore:
                 ),
                 {"t": tenant_id, "r": run_id},
             ).all()
+            # 1 ページ目の OCR span（run_spans, 0008）。classify ゲートの表題部信号
+            # （ADR-0008）。行が無ければ空（0008 より前の run・失敗 run）。
+            page1_spans = c.execute(
+                text(
+                    "SELECT spans FROM run_spans"
+                    " WHERE tenant_id=:t AND run_id=:r AND page_no=1"
+                ),
+                {"t": tenant_id, "r": run_id},
+            ).scalar()
         fields = {r[0]: {"value": r[1], "confidence": float(r[2] or 0.0)} for r in rows}
         confs = [f["confidence"] for f in fields.values()]
         return {
@@ -447,6 +467,8 @@ class PgWorkflowRunStore:
             "fields": fields,
             # run 全体の確度は最弱フィールドで代表する（保守的。値が無ければ None → 条件 False）
             "run_confidence": min(confs) if confs else None,
+            "page1_spans": list(page1_spans or []),
+            "page1_height": head[2] if head else None,
         }
 
     def get_webhook_connection(self, tenant_id, connection_id):

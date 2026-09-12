@@ -50,7 +50,9 @@ class Sinks:
 
 def _run(graph: dict[str, Any], *, fields: Optional[dict[str, Any]] = None,
          doc_type: str = "invoice",
-         original_name: Optional[str] = None) -> tuple[str, InMemoryWorkflowRunStore, Sinks]:
+         original_name: Optional[str] = None,
+         page1_spans: Optional[list[dict[str, Any]]] = None,
+         page1_height: Optional[int] = 1400) -> tuple[str, InMemoryWorkflowRunStore, Sinks]:
     store = InMemoryWorkflowRunStore()
     store.seed_run("wfrun_p8", tenant_id=TENANT, workflow_id="workflow_p8", graph_json=graph)
     store.seed_webhook(TENANT, "con_slack", "https://hooks.example/slack", "")
@@ -73,6 +75,9 @@ def _run(graph: dict[str, Any], *, fields: Optional[dict[str, Any]] = None,
     }
     if original_name is not None:
         result["original_name"] = original_name
+    if page1_spans is not None:
+        result["page1_spans"] = page1_spans
+        result["page1_height"] = page1_height
     store.seed_extract_result("run_wf_1", result)
     status = runner.process({
         "type": "resume", "tenant_id": TENANT, "workflow_run_id": "wfrun_p8",
@@ -200,6 +205,99 @@ def test_classifyは語境界のない埋没ヒットで止めない() -> None:
     status, store, _ = _run(g, doc_type="invoice", original_name="Border_Inc_2026.pdf")
     assert status == "succeeded"
     assert store.node_runs[("wfrun_p8", "c1")]["output"]["known"] is True
+
+
+# ---- 表題部の本文信号（ADR-0008, 2026-09-12）。ページ高さ 1400 → 上端 25% = 350px ----
+
+
+def _invoice_only_halt() -> dict[str, Any]:
+    return _graph(
+        [*_extract_nodes(),
+         {"id": "c1", "type": "process.classify",
+          "config": {"doc_types": ["invoice"], "on_unknown": "halt"}}],
+        [{"from": "t1", "to": "x1"}, {"from": "x1", "to": "c1"}],
+    )
+
+
+def _sp(text: str, y0: int, y1: int, x0: int = 100, x1: int = 400) -> dict[str, Any]:
+    return {"span_id": 0, "text": text, "bbox": [x0, y0, x1, y1], "conf": 0.9}
+
+
+def test_classifyは明細部の見積語では請求書を止めない() -> None:
+    # 請求書の明細（350px より下）が見積を 3 箇所で引用する。本文全体を信号にすると
+    # quotation 3.0 vs invoice 1.0 → 0.75 で閾値に達し halt する（packages/workflow の
+    # テストで固定）。表題部だけなので invoice 1 領域 = 0.667 < 0.75 → 上書きせず、
+    # スキーマ種別（invoice）で通す。output は従来の最小形（content 無し）。
+    status, store, _ = _run(
+        _invoice_only_halt(),
+        doc_type="invoice",
+        original_name="scan_001.pdf",
+        page1_spans=[
+            _sp("請求書", 60, 110), _sp("株式会社ABC 御中", 150, 180),
+            _sp("見積番号 Q-1 に基づく", 600, 630), _sp("見積金額 ¥100,000", 640, 670),
+            _sp("見積書 No.2 参照", 680, 710),
+        ],
+    )
+    assert status == "succeeded"
+    assert store.node_runs[("wfrun_p8", "c1")]["output"] == {"doc_type": "invoice", "known": True}
+
+
+def test_classifyは表題部だけで確信があれば内容種別を採用する() -> None:
+    # ファイル名に手がかり無し。表題部「御請求書」＋「請求金額」= invoice 2 領域 → 0.833。
+    status, store, _ = _run(
+        _invoice_only_halt(),
+        doc_type="invoice",
+        original_name="scan_001.pdf",
+        page1_spans=[_sp("御請求書", 60, 110), _sp("請求金額 ¥136,998", 200, 230, x0=600, x1=900)],
+    )
+    assert status == "succeeded"
+    out = store.node_runs[("wfrun_p8", "c1")]["output"]
+    assert out["known"] is True
+    assert out["content_doc_type"] == "invoice"
+    assert out["confidence"] == 0.833
+    assert out["method"] == "filename+title"
+
+
+def test_classifyは表題部が別種別を確信すれば取り違えを止める() -> None:
+    # 請求ワークフローに見積書が紛れ込んだ（ファイル名は無情報、スキーマは invoice）。
+    # 表題部の見積語 3 領域（飽和）→ quotation 1.0 → 対象外で halt。
+    status, store, _ = _run(
+        _invoice_only_halt(),
+        doc_type="invoice",
+        original_name="scan_001.pdf",
+        page1_spans=[
+            _sp("御見積書", 60, 110), _sp("見積番号 Q-1", 200, 230, x0=600, x1=900),
+            _sp("御見積合計金額 ¥100,000", 300, 330),
+        ],
+    )
+    assert status == "failed"
+    assert "分類対象外" in store.runs["wfrun_p8"]["error"]["message"]
+
+
+def test_classifyは表題と食い違うファイル名1語を優先する() -> None:
+    # ファイル名は発注書（3.0）、表題は「御見積書」（1.0）→ purchase_order 0.75。
+    # 対象は invoice のみなので halt（従来どおりファイル名で検知。表題は反転させない）。
+    status, store, _ = _run(
+        _invoice_only_halt(),
+        doc_type="invoice",
+        original_name="発注書_ABC商事_0001.pdf",
+        page1_spans=[_sp("御見積書", 60, 110)],
+    )
+    assert status == "failed"
+    assert "分類対象外" in store.runs["wfrun_p8"]["error"]["message"]
+
+
+def test_classifyはページ寸法が無ければ表題部を使わない() -> None:
+    # pages.height が無い → 表題部は空 → ファイル名にも手がかりが無いので内容分類なし
+    status, store, _ = _run(
+        _invoice_only_halt(),
+        doc_type="invoice",
+        original_name="scan_001.pdf",
+        page1_spans=[_sp("御見積書", 60, 110), _sp("見積番号 Q-1", 200, 230), _sp("見積金額", 300, 330)],
+        page1_height=None,
+    )
+    assert status == "succeeded"
+    assert store.node_runs[("wfrun_p8", "c1")]["output"] == {"doc_type": "invoice", "known": True}
 
 
 # ---------- sink.file ----------
