@@ -128,7 +128,7 @@ def test_未対応typeと不正なallowed_tablesは拒否(env) -> None:
     assert r.status_code == 422
 
 
-def test_疎通テストはpostgresのみで失敗理由を返す(env) -> None:
+def test_疎通テストはpostgresの失敗理由を200で返す(env) -> None:
     client, _, _, store = env
     c = _create_conn(client)
     # FakeSecretStore に接続不能な DSN を入れる → ok=false（status は untested のまま）
@@ -138,9 +138,11 @@ def test_疎通テストはpostgresのみで失敗理由を返す(env) -> None:
     assert r.json()["ok"] is False
     assert client.get("/v1/connections", headers=_auth()).json()["items"][0]["status"] == "untested"
 
-    w = _create_conn(client, type="webhook", config={}, allowed_tables=[])
+    # webhook / s3 は test_connection_test_webhook_s3.py（失敗は 422 で理由）。
+    # フォルダ監視系は「今すぐ同期」が疎通テストを兼ねるため E1005
+    w = _create_conn(client, type="gdrive", config={"folder_id": "f1"}, allowed_tables=[])
     r = client.post(f"/v1/connections/{w['id']}/test", headers=_auth())
-    assert r.status_code == 409  # E1005: DB のみ対応
+    assert r.status_code == 409  # E1005
 
 
 # ---------- dry-run ----------
@@ -303,3 +305,240 @@ def test_dry_runはdb_write直前のmapが複数だと拒否する(env) -> None:
     body = client.post(f"/v1/workflows/{wf_id}/dry-run", headers=_auth()).json()
     assert body["ok"] is False
     assert "1 つにして" in body["sinks"][0]["error"]
+
+
+# ---------- 無効化 / 削除（C9-D） ----------
+
+
+def test_接続を無効化して再有効化できる(env) -> None:
+    client, admin, workflows, _ = env
+    # フォルダ監視系は gateway に疎通テスト経路が無く（「今すぐ同期」の成功で worker が
+    # tested に上げる）、active が有効化そのもの
+    c = _create_conn(
+        client, type="gdrive", config={"folder_id": "f1"}, secret_ref="env:GDRIVE_SA",
+        allowed_tables=[],
+    )
+    r = client.patch(f"/v1/connections/{c['id']}", json={"status": "disabled"}, headers=_auth())
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "disabled"
+    assert admin.get_connection("ten_1", c["id"]).status == "disabled"
+    assert workflows.audits[-1]["action"] == "connection.disable"
+    assert workflows.audits[-1]["target_type"] == "connection"
+
+    r = client.patch(f"/v1/connections/{c['id']}", json={"status": "active"}, headers=_auth())
+    assert r.status_code == 200
+    assert r.json()["status"] == "active"
+    assert workflows.audits[-1]["action"] == "connection.enable"
+    assert workflows.audits[-1]["detail"]["to"] == "active"
+
+    # tested/untested は手で付けられない（worker/疎通テストが付ける値）
+    r = client.patch(f"/v1/connections/{c['id']}", json={"status": "tested"}, headers=_auth())
+    assert r.status_code == 422
+
+
+def test_postgresの再有効化は疎通確認済みに格上げしない(env) -> None:
+    # L010（connection_ok）・dry-run・sink は active/tested を「疎通確認済み」として扱う。
+    # untested → 無効化 → 再有効化（UI の通常操作）で active になると、一度もテストして
+    # いない DSN が有効化を通る（レビュー確定）。postgres の再有効化は untested に戻す
+    client, admin, workflows, _ = env
+    c = _create_conn(client)  # postgres, untested
+    # untested のまま active を求めても格上げしない（既に有効なので no-op）
+    r = client.patch(f"/v1/connections/{c['id']}", json={"status": "active"}, headers=_auth())
+    assert r.status_code == 200 and r.json()["status"] == "untested"
+    n_audits = len(workflows.audits)
+
+    client.patch(f"/v1/connections/{c['id']}", json={"status": "disabled"}, headers=_auth())
+    r = client.patch(f"/v1/connections/{c['id']}", json={"status": "active"}, headers=_auth())
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "untested"
+    assert admin.get_connection("ten_1", c["id"]).status == "untested"
+    assert workflows.audits[-1]["action"] == "connection.enable"
+    assert workflows.audits[-1]["detail"] == {"type": "postgres", "from": "disabled", "to": "untested"}
+    assert len(workflows.audits) == n_audits + 2  # no-op は監査を残さない
+
+    # 再有効化しただけでは dry-run（疎通未確認）を通らない
+    admin._connections[-1] = admin._connections[-1].model_copy(update={"id": "con_erp"})
+    workflows.seed_connection("ten_1", "con_erp")
+    wf_id = _create_wf(client, GRAPH_DB)
+    body = client.post(f"/v1/workflows/{wf_id}/dry-run", headers=_auth()).json()
+    assert body["ok"] is False and "疎通未確認" in body["sinks"][0]["error"]
+
+
+def test_webhookとs3の再有効化も疎通テストを踏み直す(env) -> None:
+    # C9-A で webhook（署名付き test イベント）と s3（HeadBucket）にも疎通テスト経路が
+    # できたので、postgres と同じく再有効化は untested に戻す（テストを踏むまで L010 が断る）
+    client, admin, workflows, _ = env
+    rows = [
+        _create_conn(
+            client, type="webhook", config={"url": "https://example.com/hook"},
+            allowed_tables=[],
+        ),
+        _create_conn(client, type="s3", config={"bucket": "b"}, allowed_tables=[]),
+    ]
+    for c in rows:
+        r = client.patch(f"/v1/connections/{c['id']}", json={"status": "disabled"}, headers=_auth())
+        assert r.status_code == 200, r.text
+        r = client.patch(f"/v1/connections/{c['id']}", json={"status": "active"}, headers=_auth())
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "untested"
+        assert admin.get_connection("ten_1", c["id"]).status == "untested"
+        assert workflows.audits[-1]["detail"] == {
+            "type": c["type"], "from": "disabled", "to": "untested",
+        }
+
+
+def test_tested済みpostgresも再有効化後は疎通テストを踏み直す(env) -> None:
+    # 無効化前の状態は持っていない（列が無い）ので、tested だった接続も untested に戻る。
+    # tested のまま active を求めても巻き戻さない（no-op）
+    client, admin, workflows, _ = env
+    _seed_tested_conn(admin, workflows)
+    r = client.patch("/v1/connections/con_erp", json={"status": "active"}, headers=_auth())
+    assert r.status_code == 200 and r.json()["status"] == "tested"
+
+    client.patch("/v1/connections/con_erp", json={"status": "disabled"}, headers=_auth())
+    r = client.patch("/v1/connections/con_erp", json={"status": "active"}, headers=_auth())
+    assert r.status_code == 200 and r.json()["status"] == "untested"
+
+
+def test_無効化した接続は疎通テストで復活しない(env) -> None:
+    # 成功で tested にすると、再有効化を踏まずに無効化が黙って解ける
+    client, admin, workflows, store = env
+    c = _create_conn(client)
+    store.values["arn:fake:ai-ocr/test/conn/ten_1/erp"] = "postgresql://u:p@127.0.0.1:1/nx"
+    client.patch(f"/v1/connections/{c['id']}", json={"status": "disabled"}, headers=_auth())
+    r = client.post(f"/v1/connections/{c['id']}/test", headers=_auth())
+    assert r.status_code == 409, r.text
+    assert "再有効化" in r.json()["error"]["message"]
+    assert admin.get_connection("ten_1", c["id"]).status == "disabled"
+
+
+def test_有効なワークフローが使う接続は無効化できない(env) -> None:
+    client, admin, workflows, _ = env
+    _seed_tested_conn(admin, workflows)
+    wf_id = _create_wf(client, GRAPH_DB)
+    # draft からの参照は止めない（有効化時に L010 が断る）
+    r = client.patch("/v1/connections/con_erp", json={"status": "disabled"}, headers=_auth())
+    assert r.status_code == 200, r.text
+    r = client.patch("/v1/connections/con_erp", json={"status": "active"}, headers=_auth())
+    assert r.json()["status"] == "untested"  # postgres は再有効化で疎通テストを踏み直す
+    # 疎通テスト成功相当（実 DB が無いので直接 tested にする）
+    admin.set_connection_status("ten_1", "con_erp", "tested")
+
+    assert client.post(f"/v1/workflows/{wf_id}/activate", headers=_auth()).status_code == 200
+    r = client.patch("/v1/connections/con_erp", json={"status": "disabled"}, headers=_auth())
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["code"] == "E1005"
+    assert err["details"]["reason"] == "workflow_active"
+    assert [w["id"] for w in err["details"]["workflows"]] == [wf_id]
+    assert admin.get_connection("ten_1", "con_erp").status == "tested"  # 変わっていない
+
+    # 停止すれば無効化できる
+    client.post(f"/v1/workflows/{wf_id}/pause", headers=_auth())
+    r = client.patch("/v1/connections/con_erp", json={"status": "disabled"}, headers=_auth())
+    assert r.status_code == 200
+
+
+def test_参照の無い接続は削除でき参照があれば断る(env) -> None:
+    client, admin, workflows, _ = env
+    c = _create_conn(client)
+    r = client.delete(f"/v1/connections/{c['id']}", headers=_auth())
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "connection_id": c["id"], "deleted": True, "cursors_deleted": 0, "secret_deleted": None,
+    }
+    assert client.get("/v1/connections", headers=_auth()).json()["items"] == []
+    assert workflows.audits[-1]["action"] == "connection.delete"
+    # 利用者が登録した秘密（postgres の secret_ref）は消さない。参照だけ監査に残す
+    assert workflows.audits[-1]["detail"]["secret_ref"] == "arn:fake:ai-ocr/test/conn/ten_1/erp"
+    assert workflows.audits[-1]["detail"]["secret_deleted"] is None
+    assert client.delete(f"/v1/connections/{c['id']}", headers=_auth()).status_code == 400
+
+    # draft のワークフローが定義で参照している → 削除不可（無効化は可）
+    _seed_tested_conn(admin, workflows)
+    wf_id = _create_wf(client, GRAPH_DB)
+    r = client.delete("/v1/connections/con_erp", headers=_auth())
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["details"]["reason"] == "referenced"
+    assert [w["id"] for w in err["details"]["workflows"]] == [wf_id]
+    assert admin.get_connection("ten_1", "con_erp") is not None
+
+
+def test_runのスナップショットが参照する接続も削除できない(env) -> None:
+    # 定義から外しても、run の trigger.graph_json（§11.1 版固定）が残っていれば
+    # retry の再開先・履歴の再現に要る。削除ではなく無効化で止める
+    from newfan_gateway.records import WorkflowRunRecord
+
+    client, admin, workflows, _ = env
+    _seed_tested_conn(admin, workflows)
+    workflows.create_run(
+        WorkflowRunRecord(
+            id="wfrun_1", tenant_id="ten_1", workflow_id="workflow_x",
+            trigger={"type": "manual", "graph_json": GRAPH_DB}, status="succeeded",
+        )
+    )
+    r = client.delete("/v1/connections/con_erp", headers=_auth())
+    assert r.status_code == 409
+    assert r.json()["error"]["details"] == {"reason": "referenced", "workflows": [], "run_count": 1}
+    # 無効化は通る
+    r = client.patch("/v1/connections/con_erp", json={"status": "disabled"}, headers=_auth())
+    assert r.status_code == 200
+
+
+def test_webhookの削除はgatewayが作った署名鍵も保管先から消す(env) -> None:
+    # 行だけ消すと Secrets Manager に鍵が生きたまま残り、参照する物も監査も無い
+    # （レビュー確定）。削除の後に消し、secret_ref と結果を監査に残す
+    client, admin, workflows, store = env
+    r = client.post(
+        "/v1/webhooks/endpoints",
+        json={"url": "https://example.com/hook", "name": "hook"},
+        headers=_auth(),
+    )
+    assert r.status_code == 201, r.text
+    rec = admin.list_webhook_endpoints("ten_1")[0]
+    assert rec.secret_ref in store.values
+
+    r = client.delete(f"/v1/connections/{rec.id}", headers=_auth())
+    assert r.status_code == 200, r.text
+    assert r.json()["secret_deleted"] is True
+    assert rec.secret_ref not in store.values and store.deleted == [rec.secret_ref]
+    detail = workflows.audits[-1]["detail"]
+    assert workflows.audits[-1]["action"] == "connection.delete"
+    assert (detail["type"], detail["secret_ref"], detail["secret_deleted"]) == (
+        "webhook", rec.secret_ref, True,
+    )
+
+
+def test_署名鍵を消せなくても行の削除は成立し監査に残る(env) -> None:
+    # 秘密の削除は行を消した後（逆順だと参照の競合で行が残ったとき鍵だけ壊れる）。
+    # 失敗しても 500 にせず secret_deleted=false を返し、監査の secret_ref で突き合わせる
+    client, admin, workflows, store = env
+    client.post(
+        "/v1/webhooks/endpoints",
+        json={"url": "https://example.com/hook", "name": "hook"},
+        headers=_auth(),
+    )
+    rec = admin.list_webhook_endpoints("ten_1")[0]
+
+    def _boom(ref: str) -> None:
+        raise RuntimeError("secretsmanager down")
+
+    store.delete = _boom  # type: ignore[method-assign]
+    r = client.delete(f"/v1/connections/{rec.id}", headers=_auth())
+    assert r.status_code == 200, r.text
+    assert r.json()["secret_deleted"] is False
+    assert admin.get_connection("ten_1", rec.id) is None
+    detail = workflows.audits[-1]["detail"]
+    assert (detail["secret_ref"], detail["secret_deleted"]) == (rec.secret_ref, False)
+
+
+def test_無効化と削除はadmin限定(env) -> None:
+    client, _, _, _ = env
+    c = _create_conn(client)
+    r = client.patch(
+        f"/v1/connections/{c['id']}", json={"status": "disabled"}, headers=_auth("reviewer")
+    )
+    assert r.status_code == 403
+    r = client.delete(f"/v1/connections/{c['id']}", headers=_auth("reviewer"))
+    assert r.status_code == 403

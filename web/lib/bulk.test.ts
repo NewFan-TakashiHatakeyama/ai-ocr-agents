@@ -169,6 +169,18 @@ describe("classifySkip", () => {
     expect(classifySkip({ ...BUSY, reason: null })).toBe("busy");
     expect(classifySkip({ ...IN_REVIEW, reason: undefined })).toBe("busy");
   });
+  it("アーカイブ済みスキーマ（C9-D）は reason=archived で見分ける（処理中に数えない）", () => {
+    const archived = {
+      document_id: "doc_a",
+      code: "E1005",
+      message: "スキーマ「invoice」はアーカイブ済みです。使うには先に復元してください",
+      reason: "archived",
+    };
+    expect(classifySkip(archived)).toBe("archived");
+    expect(summarizeBatch({ accepted: [], skipped: [archived], truncated: false }).message).toContain(
+      "スキーマがアーカイブ済み 1",
+    );
+  });
   it("no_schema / E1001 / その他", () => {
     expect(classifySkip(NO_SCHEMA)).toBe("no_schema");
     expect(classifySkip(MISSING)).toBe("not_found");

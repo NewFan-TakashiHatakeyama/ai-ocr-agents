@@ -27,6 +27,7 @@ from newfan_metrics import sink_write_rows_total, workflow_node_duration_seconds
 from newfan_workflow import EvalContext, FieldView, WorkflowGraph, evaluate, is_trigger, parse_expr
 from newfan_workflow.classify import (
     DOC_TYPE_SYNONYMS,
+    ClassifyOutcome,
     build_candidate,
     canonical_doc_type,
     classify_text,
@@ -78,6 +79,10 @@ class WorkflowState(TypedDict, total=False):
     run_status: str
     doc_type: Optional[str]
     original_name: Optional[str]  # 元ファイル名（classify ゲートの内容信号）
+    # 1 ページ目の表題部（上端 25% の OCR span を連結した ≤600 文字, ADR-0008）。
+    # classify ゲートの本文信号。span そのものは state にも resume の event にも
+    # 載せない（load_extract_result が文字列にしてから返す。checkpoint の肥大）
+    title_text: Optional[str]
     fired_trigger: Optional[str]  # 発火したトリガーノード id（複数トリガー時の経路選択）
     run_confidence: Optional[float]
     fields: dict[str, Any]  # field名 → {"value": str|None, "confidence": float}
@@ -148,6 +153,10 @@ def _make_extract(node: ExtractNode, deps: RunnerDeps) -> Callable:
             "run_status": event.get("status", ""),
             "doc_type": event.get("doc_type"),
             "original_name": event.get("original_name"),
+            # 表題部（ADR-0008）。load_extract_result が gateway の classify と同じ
+            # 純関数で切り出し済みの文字列。寸法不明・span 無しなら空 → classify
+            # ゲートはファイル名だけで判定する
+            "title_text": event.get("title_text") or "",
             "run_confidence": event.get("run_confidence"),
             "fields": event.get("fields", {}),
             "node_outputs": {node.id: {"run_id": run_id, "status": event.get("status")}},
@@ -311,17 +320,50 @@ def _make_db_write(node: DbWriteNode, deps: RunnerDeps, map_preds: list[str]) ->
 _CLASSIFY_MIN_CONFIDENCE = 0.75
 
 
+def _title_only_against_corroborated(out: ClassifyOutcome, schema_canon: str) -> bool:
+    """表題部**だけ**の証拠が、表題部にも語が出ている宣言種別を反転させようとしているか。
+
+    ファイル名に手がかりが無いとき、表題部の行ごとの参照（「請求No.」「請求日」に
+    並ぶ「納品日」「納品先」「納品No.」）は競合種別を 3 領域で飽和させ、自種別
+    1 領域に対して 3.0 vs 1.0 ＝ ちょうど 0.75 でゲートに達する（レビューで実測:
+    卸の請求書ヘッダが delivery_note に、発注書の見積参照 3 行が quotation になり、
+    正当な run が halt した）。DOC_TYPE_SYNONYMS に裸の「見積」「納品」「領収」は
+    あるが裸の「請求」「発注」は無いので、請求書・発注書で系統的に起きる。
+
+    ADR-0008 の運用（反転させたいなら人がファイル名か**取込時の種別**で言う）の
+    「取込時の種別」側をここで守る: 宣言種別（documents.doc_type）の語が表題部に
+    1 つでもあれば、表題部だけの証拠では上書きしない。ファイル名に証拠があるとき
+    （人が付けた名前）と、宣言種別の語が表題部に無いとき（「御見積書」しか無い帳票が
+    請求ワークフローに紛れた）は従来どおり上書きする。
+    """
+    if not schema_canon or canonical_doc_type(out.doc_type) == schema_canon:
+        return False
+    if out.evidence.get("filename", 0) > 0:
+        return False
+    return out.scores.get(schema_canon, 0.0) > 0
+
+
 def _make_classify(node: ClassifyNode) -> Callable:
     """process.classify（P8）。帳票種別を許可リストと照合する。
 
-    まずスキーマ由来の doc_type（抽出が返す）を使うが、ファイル名の内容分類が
-    確信をもって別種別を示す場合はそれを採用してゲートする（⑦）。これで
-    「請求ワークフローに発注書が紛れ込む」ような取り違えを検知できる。
+    まず宣言種別（documents.doc_type。取込時・PATCH で人が言った種別。抽出完了
+    notify の enrich が返す）を使うが、内容分類が確信をもって別種別を示す場合は
+    それを採用してゲートする（⑦）。これで「請求ワークフローに発注書が紛れ込む」
+    ような取り違えを検知できる。
 
-    信号はファイル名のみ。抽出フィールドの値は使わない — 請求書の備考が
-    「見積書No…」を引用するのは常態で、自種別の語は値にほぼ現れないため、
-    値は構造的に他種別へ偏った信号になり正当な run を halt させる
-    （敵対的レビューで実測確定した誤検知）。
+    信号はファイル名（×3）と、1 ページ目の表題部（上端 25% の OCR span, ×1。
+    ADR-0008。state の title_text、load_extract_result が gateway と同じ純関数で
+    切り出す）。抽出フィールドの値は使わない — 請求書の備考が「見積書No…」を
+    引用するのは常態で、自種別の語は値にほぼ現れないため、値は構造的に他種別へ
+    偏った信号になり正当な run を halt させる（敵対的レビューで実測確定した誤検知）。
+    表題部はその偏りが無い場所（明細・備考より上）だけを切り出したもので、
+    重みの帰結として表題部はファイル名の 1 語を上回れない（最大で同点）。
+    ファイル名と表題が食い違うとき、表題 1 領域ではファイル名の種別が 0.75 のまま
+    残り**上書きは起きる**（ADR-0008 の表）。2 領域以上で 0.6 まで下がり、閾値を
+    割って宣言種別へ倒れる。
+
+    表題部だけの証拠（ファイル名に手がかり無し）は、宣言種別の語が表題部に無い
+    ときだけ上書きできる（_title_only_against_corroborated）。
 
     許可リスト照合は正準名（canonical_doc_type）で行う。doc_types に日本語名
     （例「請求書」）が入っていても、内容分類が返す英語正準キー（invoice）と
@@ -344,18 +386,28 @@ def _make_classify(node: ClassifyNode) -> Callable:
 
     def run(state: WorkflowState) -> dict[str, Any]:
         schema_dt = state.get("doc_type")
+        schema_canon = canonical_doc_type(schema_dt)
         filename = state.get("original_name") or ""
+        title = state.get("title_text") or ""
 
         content = None
-        if filename:
+        if filename or title:
             out = classify_text(
-                text="",
+                text=title,
                 filename=filename,
                 candidates=candidates,
                 min_confidence=_CLASSIFY_MIN_CONFIDENCE,
             )
             if out.doc_type is not None:
-                content = out
+                if _title_only_against_corroborated(out, schema_canon):
+                    # 確信なしと同じ扱い（宣言種別で通す。output は最小形）
+                    logger.info(
+                        "[workflow] classify: 表題部だけの証拠 %s(%.3f) は表題部に語がある"
+                        "宣言種別 %s を上書きしない: run=%s",
+                        out.doc_type, out.confidence, schema_dt, state["workflow_run_id"],
+                    )
+                else:
+                    content = out
 
         effective_dt = content.doc_type if content else schema_dt
         known = bool(effective_dt) and canonical_doc_type(effective_dt) in allowed_canon
@@ -370,6 +422,10 @@ def _make_classify(node: ClassifyNode) -> Callable:
             output["schema_doc_type"] = schema_dt
             output["content_doc_type"] = content.doc_type
             output["confidence"] = content.confidence
+            # gateway の classify と同じ語彙（表題部の証拠が寄与したか）
+            output["method"] = (
+                "filename+title" if content.evidence.get("text", 0) > 0 else "filename"
+            )
         return {"node_outputs": {node.id: output}}
 
     return run

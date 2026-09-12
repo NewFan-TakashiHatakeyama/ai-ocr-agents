@@ -140,6 +140,51 @@ def test_review_queue(ctx: SimpleNamespace) -> None:
     assert r.status_code == 200
     items = r.json()["items"]
     assert items and items[0]["pending"] == 2
+    # 行に原本ファイル名を載せる。web は一覧 API（既定 50 件）から名前を引かず、
+    # ここから出す（引く方式だと先頭ページ外の古い帳票だけ ID 表示になる）
+    assert items[0]["original_name"] == "invoice.pdf"
+
+
+def test_review_queue_original_name_is_null_when_unknown(ctx: SimpleNamespace) -> None:
+    """名前を持たない帳票（旧データ・外部投入）の run も null で返し、キューを落とさない。"""
+    from newfan_gateway.records import DocumentRecord
+
+    ctx.repo.create_document(
+        DocumentRecord(
+            id="doc_noname",
+            tenant_id="ten_1",
+            storage_uri="file:///x",
+            mime_type="application/pdf",
+            page_count=1,
+        ),
+        [],
+    )
+    _seed_needs_review_run(ctx, "doc_noname")
+    r = ctx.client.get("/v1/review/queue", headers=auth("reviewer"))
+    assert r.status_code == 200
+    items = {i["document_id"]: i for i in r.json()["items"]}
+    assert items["doc_noname"]["original_name"] is None
+
+
+def test_review_queue_does_not_leak_other_tenant_name(ctx: SimpleNamespace) -> None:
+    """run が他テナントの帳票を指していても、その原本ファイル名は出さない。"""
+    from newfan_gateway.records import DocumentRecord
+
+    ctx.repo.create_document(
+        DocumentRecord(
+            id="doc_other",
+            tenant_id="ten_2",
+            storage_uri="file:///y",
+            original_name="他社の機密.pdf",
+            mime_type="application/pdf",
+            page_count=1,
+        ),
+        [],
+    )
+    _seed_needs_review_run(ctx, "doc_other")  # tenant は ten_1 の run
+    r = ctx.client.get("/v1/review/queue", headers=auth("reviewer"))
+    items = {i["document_id"]: i for i in r.json()["items"]}
+    assert items["doc_other"]["original_name"] is None
 
 
 def test_confirm_relays_workflow_notify(ctx: SimpleNamespace) -> None:

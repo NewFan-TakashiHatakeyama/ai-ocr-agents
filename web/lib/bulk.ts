@@ -5,13 +5,17 @@
 // 片方だけ確定済みの件数を落とす、といった食い違いがすぐ起きる。DOM には触らない。
 
 import type { ExtractBatchResponse, ExtractBatchSkipped } from "./types";
+import { ACCEPTED_UPLOAD_EXTENSIONS, ACCEPTED_UPLOAD_TYPES, UPLOAD_FORMATS_LABEL } from "./uploads";
 
 // ---- アップロードするファイルの選別 ----
+//
+// 形式の定義は lib/uploads.ts が唯一の置き場（accept 属性と文言もそこから）。ここは
+// 複数ファイルを投げる前の選別にだけ使う。別のリテラルを持つと片方だけ直して食い違う。
 
-/** ingest が受ける MIME（documents/page.tsx の accept 属性と対） */
-export const ACCEPTED_MIME = ["application/pdf", "image/png", "image/jpeg", "image/tiff"] as const;
+/** ingest が受ける MIME（lib/uploads.ts の定義から） */
+export const ACCEPTED_MIME: readonly string[] = ACCEPTED_UPLOAD_TYPES.map((t) => t.mime);
 /** ブラウザが MIME を空で返すことがある（拡張子の紐付けが無い環境）ので拡張子でも見る */
-export const ACCEPTED_EXT = [".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"] as const;
+export const ACCEPTED_EXT: readonly string[] = ACCEPTED_UPLOAD_EXTENSIONS;
 
 export interface FileLike {
   name: string;
@@ -19,7 +23,7 @@ export interface FileLike {
 }
 
 export function isAcceptedFile(f: FileLike): boolean {
-  if ((ACCEPTED_MIME as readonly string[]).includes(f.type)) return true;
+  if (ACCEPTED_MIME.includes(f.type)) return true;
   const lower = f.name.toLowerCase();
   return ACCEPTED_EXT.some((ext) => lower.endsWith(ext));
 }
@@ -87,7 +91,7 @@ export function summarizeUploads(t: UploadTally): { kind: "ok" | "warn"; message
   }
   if (t.ok > 0 && t.failed > 0) parts.push(`${t.failed} 件は失敗しました${why ? `（${why}）` : ""}。`);
   if (t.rejected > 0) {
-    parts.push(`${t.rejected} 件は取り込めない形式（PDF / PNG / JPEG / TIFF 以外）のため除外しました。`);
+    parts.push(`${t.rejected} 件は取り込めない形式（${UPLOAD_FORMATS_LABEL} 以外）のため除外しました。`);
   }
   const clean = t.failed === 0 && t.extractFailed === 0 && t.rejected === 0;
   return { kind: clean ? "ok" : "warn", message: parts.join("") };
@@ -95,20 +99,29 @@ export function summarizeUploads(t: UploadTally): { kind: "ok" | "warn"; message
 
 // ---- 一括再抽出の要約 ----
 
-export type SkipReason = "confirmed" | "busy" | "locked" | "no_schema" | "not_found" | "other";
+export type SkipReason =
+  | "confirmed"
+  | "busy"
+  | "locked"
+  | "no_schema"
+  | "archived"
+  | "not_found"
+  | "other";
 
 const SKIP_LABEL: Record<SkipReason, string> = {
   confirmed: "確定済み",
   busy: "処理中",
   locked: "他の利用者が確認中",
   no_schema: "スキーマなし",
+  archived: "スキーマがアーカイブ済み",
   not_found: "見つからない",
   other: "その他",
 };
 
 /**
- * skipped の理由を分類する。E1005 は確定済み・処理中（競合）・確定処理中・他者ロックの
- * 全部に使われるので、サーバが付ける reason で見分ける（文言は変わり得る）。
+ * skipped の理由を分類する。E1005 は確定済み・処理中（競合）・確定処理中・他者ロック・
+ * スキーマがアーカイブ済み（C9-D）の全部に使われるので、サーバが付ける reason で見分ける
+ *（文言は変わり得る）。
  * reason の無い応答（旧 gateway）だけ、従来どおり文言で確定済みか否かを見る。
  */
 export function classifySkip(s: ExtractBatchSkipped): SkipReason {
@@ -120,6 +133,8 @@ export function classifySkip(s: ExtractBatchSkipped): SkipReason {
         return "confirmed";
       case "locked":
         return "locked";
+      case "archived":
+        return "archived";
       case "in_review":
       case "processing":
       case "active_run":

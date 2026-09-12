@@ -342,6 +342,35 @@ def test_batch_uses_latest_schema_version_per_doc_type(ctx: SimpleNamespace) -> 
     assert ctx.repo.get_run("ten_1", run_id).schema_id == "sch_1_v5"
 
 
+def test_batch_skips_archived_schema_with_reason(ctx: SimpleNamespace) -> None:
+    """種別の最新版がアーカイブ済み（C9-D）の帳票は skipped（E1005, reason=archived）。
+    get_schema はアーカイブ済みも返すので、_start_extract の入口（_require_usable_schema）で
+    断る。reason が無いと web の要約が「処理中」に数える。"""
+    doc = _upload(ctx, "invoice")
+    r = ctx.client.post("/v1/schemas/invoice/archive", headers=auth("admin"))
+    assert r.status_code == 200, r.text
+
+    r = _batch(ctx, {"document_ids": [doc]})
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["accepted"] == []
+    [s] = body["skipped"]
+    assert (s["document_id"], s["code"], s["reason"]) == (doc, "E1005", "archived")
+    assert "復元" in s["message"]
+    assert ctx.queue.messages == []
+    assert ctx.repo.get_document("ten_1", doc).status != "queued"
+
+    # 明示の schema_id でも同じ理由で skipped
+    r = _batch(ctx, {"document_ids": [doc], "schema_id": "sch_1"})
+    assert r.status_code == 202, r.text
+    assert [(s["code"], s["reason"]) for s in r.json()["skipped"]] == [("E1005", "archived")]
+
+    # 復元すれば通る
+    ctx.client.post("/v1/schemas/invoice/unarchive", headers=auth("admin"))
+    r = _batch(ctx, {"document_ids": [doc]})
+    assert [a["document_id"] for a in r.json()["accepted"]] == [doc]
+
+
 def test_batch_requires_uploader(ctx: SimpleNamespace) -> None:
     doc = _upload(ctx, "invoice")
     r = _batch(ctx, {"document_ids": [doc]}, auth("viewer"))

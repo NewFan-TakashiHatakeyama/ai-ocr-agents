@@ -406,6 +406,27 @@ resume → finalize）が完了したとき、ワーカーの完了 notify が `
 - 既存 `POST /webhooks/endpoints` は connections(type=webhook) へ書いており、§16 の
   接続管理と**既に同一テーブル**。残作業は `config.secret` → `secret_ref` への移行のみ
   （P6。旧 Q5 はこれで実質解消）
+- 疎通テスト `POST /connections/{id}/test`。sink/トリガーと lint L010 は
+  status が tested/active の接続しか使わないため、登録直後（untested）の接続は
+  これを通すまでワークフローを有効化できない。種別ごとの実体:
+
+  | type | 実体 | 失敗時 |
+  |---|---|---|
+  | postgres | `SELECT 1`（secret_ref → DSN。§P6） | 200 + `ok=false` + 理由（従来どおり） |
+  | webhook | 本配信と**同じ署名・同じヘッダ**（`newfan_netguard.signed_headers`）で `{"event":"test","connection_id":…,"text":"[NewFan AI-OCR] 接続テスト…"}` を 1 回 POST。SSRF ガード（`is_blocked_url`）経由・5 秒。2xx で成功。`text` は Slack incoming webhook 互換の通知先（sink.notify も type=webhook の接続を使う）向け ── 無いと Slack が 400 `no_text` を返し、その URL は永久に tested になれない。署名検証する受信側は本文全体の HMAC を見るだけなので余分なキーは無害 | 422（E4001）+ 理由（HTTP ステータス／接続不可／タイムアウト／URL 拒否／URL 不正）。内部例外の文言は出さない |
+  | s3 | sink（`S3FileWriter`）と同じ `boto3.client("s3")` で `HeadBucket(config.bucket)`。ただし同期 API の中で待つので接続・読取 5 秒・再試行なし（botocore 既定の 60 秒 × 5 回だと到達不能で 1 クリックが数分スレッドを掴む） | 422（E4001）+ 理由（バケット不在／権限不足 s3:ListBucket／認証情報なし） |
+  | gdrive / m365 / box | 対象外（409 E1005）。「今すぐ同期」が兼ね、同期成功で worker が tested に上げる | — |
+
+  受信側は本配信と同じ検証コードでテスト署名を検証できる（署名の実装は gateway と
+  export で `newfan_netguard.webhook_sig` を共有し、ずれない）。UI（接続管理）は
+  各行の「疎通テスト」ボタンから叩き、結果を行内に出す。
+  `status='disabled'`（運用側が API 外で止めた接続）は種別を問わず 409（E1005）で断る
+  ──「今すぐ同期」と同じ。成功で無条件に tested へ書き戻すと、テナント管理者の
+  1 クリックで sink の配信が再開してしまう。
+  webhook の `config.url` は `POST /connections` でも `/webhooks/endpoints` と同じ一段目
+  （SSRF 拒否・httpx が受け付けない形の拒否）を通す。`is_blocked_url` の `urllib.parse`
+  は `:abc` のようなポートや改行入りの URL を通してしまい、送信時の `httpx.InvalidURL`
+  （`HTTPError` の派生ではない）を拾わないと 500 になるため、両方で同じ判定を使う。
 
 ---
 

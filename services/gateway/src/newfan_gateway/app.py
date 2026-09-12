@@ -61,7 +61,10 @@ def create_app(
     app.state.orchestrator = orchestrator or FakeOrchestratorClient()
     app.state.admin = admin or InMemoryAdminRepository()
     app.state.chat_agent = chat_agent or RuleBasedChatAgent()
-    app.state.workflows = workflows or InMemoryWorkflowsRepository()
+    # dev（DATABASE_URL 無し）でも connection_ok が接続の実体（status）を見られるよう
+    # admin を渡す。渡さないと疎通テストで「テスト済」になった接続を lint が
+    # L010（疎通未実施）と言い続け、UI の表示と矛盾する
+    app.state.workflows = workflows or InMemoryWorkflowsRepository(admin=app.state.admin)
     # 秘密の保管先（Secrets Manager, P6）。未注入なら旧方式（config.secret）に fallback
     app.state.secret_store = secret_store
     app.state.api_keys = api_keys or InMemoryApiKeyStore({})

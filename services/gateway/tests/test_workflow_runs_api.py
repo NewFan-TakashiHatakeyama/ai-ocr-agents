@@ -1,7 +1,7 @@
 """ワークフロー実行 API（§16 設計 v0.2 §11 / P3）。
 
 - 手動実行は active なワークフローだけ。run は graph_json スナップショットで版を固定する
-- retry は failed のみ
+- retry は failed のみ。帳票の削除で切り離された run（state.document_deleted）は failed でも不可
 """
 
 from __future__ import annotations
@@ -109,6 +109,10 @@ def test_run一覧と詳細(ctx) -> None:
     r = client.get(f"/v1/workflows/{meta['wid']}/runs", headers=_auth(role="viewer"))
     assert r.status_code == 200
     assert [i["id"] for i in r.json()["items"]] == [run_id]
+    # 一覧には発火の出所と発火ノードだけ出す（実行履歴 UI の「トリガー」列）
+    assert r.json()["items"][0]["trigger_type"] == "manual"
+    assert r.json()["items"][0]["trigger_node_id"] == "t1"
+    assert r.json()["items"][0]["document_deleted"] is False
 
     r = client.get(f"/v1/workflow-runs/{run_id}", headers=_auth(role="viewer"))
     body = r.json()
@@ -134,6 +138,56 @@ def test_retryはfailedのみ(ctx) -> None:
     stream, msg = meta["queue"].messages[-1]
     assert (stream, msg["type"]) == ("q.workflow", "retry")
     assert any(a["action"] == "workflow.retry" for a in wf.audits)
+
+
+def test_帳票が削除されたrunはfailedでもretryできない(ctx) -> None:
+    """帳票の削除（db.delete_document）は waiting_hitl / running の run を failed に
+    終端化し、document_id を切って state.document_deleted を立てる。それを retry すると
+    interrupt が再び立って帳票の無い waiting_hitl が蘇る（止める手段が無い）。
+    一覧・詳細には旗を出し、UI が再実行を塞げるようにする。"""
+    client, wf, meta = ctx
+    run_id = client.post(
+        f"/v1/workflows/{meta['wid']}/runs", json={"document_id": "doc_1"}, headers=_auth()
+    ).json()["workflow_run_id"]
+    rec = wf.get_run("ten_1", run_id)
+    assert rec is not None
+    # 削除後の行を模す
+    rec.status = "failed"
+    rec.document_id = None
+    rec.state = {"document_deleted": True, "waiting": {"kind": "await_hitl", "node_id": "x1"}}
+    rec.error = {"code": "E1001", "message": "document deleted"}
+
+    r = client.post(f"/v1/workflow-runs/{run_id}/retry", headers=_auth())
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "E1005"
+    assert r.json()["error"]["details"]["document_deleted"] is True
+    assert not any(m["type"] == "retry" for _, m in meta["queue"].messages)
+    assert not any(a["action"] == "workflow.retry" for a in wf.audits)
+
+    r = client.get(f"/v1/workflows/{meta['wid']}/runs", headers=_auth(role="viewer"))
+    assert r.json()["items"][0]["document_deleted"] is True
+    assert r.json()["items"][0]["document_id"] is None
+    r = client.get(f"/v1/workflow-runs/{run_id}", headers=_auth(role="viewer"))
+    assert r.json()["document_deleted"] is True
+
+
+def test_帳票を持たないrunでも削除されたのでなければretryできる(ctx) -> None:
+    """schedule 発火の run は最初から document_id が NULL。「帳票が無い」だけで塞ぐと
+    スケジュール実行の失敗が二度と再実行できなくなるので、旗（document_deleted）で判別する。"""
+    client, wf, meta = ctx
+    run_id = client.post(
+        f"/v1/workflows/{meta['wid']}/runs", json={"document_id": "doc_1"}, headers=_auth()
+    ).json()["workflow_run_id"]
+    rec = wf.get_run("ten_1", run_id)
+    assert rec is not None
+    rec.status = "failed"
+    rec.document_id = None
+    rec.trigger = {**rec.trigger, "type": "schedule"}
+    rec.error = {"message": "sink.webhook: 503"}
+
+    r = client.post(f"/v1/workflow-runs/{run_id}/retry", headers=_auth())
+    assert r.status_code == 202, r.text
+    assert meta["queue"].messages[-1][1]["type"] == "retry"
 
 
 def test_他テナントのrunは見えない(ctx) -> None:

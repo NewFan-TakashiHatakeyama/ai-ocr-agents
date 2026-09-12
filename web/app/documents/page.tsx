@@ -7,7 +7,7 @@ import { Suspense, useMemo, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { DeleteDocument } from "@/components/DeleteDocument";
 import { StatusChip } from "@/components/StatusChip";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import {
   countRunning,
   partitionFiles,
@@ -16,12 +16,11 @@ import {
   summarizeUploads,
   type UploadTally,
 } from "@/lib/bulk";
+import { documentDisplayName, matchesDocumentQuery } from "@/lib/documents";
 import { hasRole, usePrincipal } from "@/lib/principal";
 import { useToasts } from "@/lib/toast";
+import { UPLOAD_ACCEPT, UPLOAD_FORMATS_HINT, UPLOAD_FORMATS_LABEL } from "@/lib/uploads";
 import { newUuid } from "@/lib/uuid";
-
-// 取り込める帳票の種類（ingest が受ける MIME に合わせる。lib/bulk.ts の選別と対）
-const ACCEPT = "application/pdf,image/png,image/jpeg,image/tiff,.pdf,.png,.jpg,.jpeg,.tif,.tiff";
 
 // 抽出が動いている帳票が一覧にある間の再取得間隔（設計 bulk-processing D8）
 const RUNNING_REFETCH_MS = 5000;
@@ -81,7 +80,7 @@ function DocumentsInner() {
     if (accepted.length === 0) {
       push({
         kind: "warn",
-        message: "取り込める形式のファイルがありません（PDF / PNG / JPEG / TIFF）。",
+        message: `取り込める形式のファイルがありません（${UPLOAD_FORMATS_LABEL}）。`,
       });
       return;
     }
@@ -129,9 +128,14 @@ function DocumentsInner() {
           }
         } catch (e) {
           // サーバの理由（E1002 サイズ上限・E1001 非対応形式・403 権限）を要約に残す。
-          // 件数だけだと同じファイルを何度も投げ直すことになる
+          // 件数だけだと同じファイルを何度も投げ直すことになる。
+          // 形式の拒否（E1001 非対応形式 / E1003 Office 変換未実装）は、何なら通るかを
+          // 添える。コードだけ見せても利用者は次に何を選べばいいか分からない。
           tally.failed += 1;
-          tally.failedReasons.push((e as Error).message);
+          const rejectedFormat = e instanceof ApiError && (e.code === "E1001" || e.code === "E1003");
+          tally.failedReasons.push(
+            rejectedFormat ? `${(e as Error).message} ${UPLOAD_FORMATS_HINT}` : (e as Error).message,
+          );
         }
       }
     } finally {
@@ -146,13 +150,7 @@ function DocumentsInner() {
   }
 
   const items = docs.data?.items ?? [];
-  const filtered = useMemo(() => {
-    const kw = q.trim().toLowerCase();
-    if (!kw) return items;
-    return items.filter((d) =>
-      [d.document_id, d.doc_type, d.external_ref].some((v) => v?.toLowerCase().includes(kw)),
-    );
-  }, [items, q]);
+  const filtered = useMemo(() => items.filter((d) => matchesDocumentQuery(d, q)), [items, q]);
 
   // ---- 選択と一括再抽出（設計 bulk-processing §3） ----
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
@@ -226,7 +224,7 @@ function DocumentsInner() {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="帳票ID・取引先・external_ref で検索"
+            placeholder="ファイル名・帳票ID・種別・external_ref で検索"
             aria-label="検索"
           />
         </span>
@@ -274,7 +272,7 @@ function DocumentsInner() {
         <input
           ref={fileRef}
           type="file"
-          accept={ACCEPT}
+          accept={UPLOAD_ACCEPT}
           multiple
           hidden
           onChange={(e) => {
@@ -282,7 +280,12 @@ function DocumentsInner() {
             e.target.value = ""; // 同じファイルを続けて選べるように
           }}
         />
-        <button className="btn sm grad" onClick={() => fileRef.current?.click()} disabled={uploading}>
+        <button
+          className="btn sm grad"
+          onClick={() => fileRef.current?.click()}
+          disabled={uploading}
+          title={`対応形式: ${UPLOAD_FORMATS_LABEL}`}
+        >
           {uploading ? "アップロード中…" : "＋ アップロード"}
         </button>
       </div>
@@ -385,7 +388,10 @@ function DocumentsInner() {
                       </td>
                     )}
                     <td>
-                      <span className="docname">{d.document_id}</span>
+                      {/* 原本ファイル名を出し、ID は title で引ける（名前が無い行は ID のまま） */}
+                      <span className="docname" title={d.document_id}>
+                        {documentDisplayName(d)}
+                      </span>
                     </td>
                     <td>{d.doc_type ?? "—"}</td>
                     <td className="mono">{d.page_count ?? "—"}</td>
@@ -394,9 +400,11 @@ function DocumentsInner() {
                     </td>
                     <td className="sub">{d.external_ref ?? "—"}</td>
                     <td onClick={(e) => e.stopPropagation()}>
+                      {/* 確認文言の名前は「帳票」列と同じ規則（DeleteDocument が
+                          documentDisplayName で決める）。external_ref は名前ではない */}
                       <DeleteDocument
                         documentId={d.document_id}
-                        label={d.external_ref ?? d.document_id}
+                        originalName={d.original_name}
                         onDeleted={() => {
                           setSelected((prev) => {
                             if (!prev.has(d.document_id)) return prev;
@@ -418,7 +426,9 @@ function DocumentsInner() {
               <div className="empty">
                 <div className="emoji">🗂️</div>
                 <h3>該当するドキュメントがありません</h3>
-                <p>帳票をアップロードするか、ここにドラッグ&ドロップしてください（複数可）。</p>
+                <p>
+                  帳票をアップロードするか、ここにドラッグ&ドロップしてください（複数可・{UPLOAD_FORMATS_LABEL}）。
+                </p>
                 <button className="btn grad" style={{ marginTop: 10 }} onClick={() => fileRef.current?.click()}>
                   ＋ 帳票をアップロード
                 </button>
@@ -449,7 +459,11 @@ function DocumentsInner() {
                           </span>
                         </td>
                         <td>
-                          <span className="docname">{it.document_id}</span>
+                          {/* 名前はキュー API が行ごとに返す（一覧 API から引くと、その
+                              先頭ページに無い古い帳票だけが同じ表で ID 表示になる） */}
+                          <span className="docname" title={it.document_id}>
+                            {documentDisplayName(it)}
+                          </span>
                         </td>
                         <td>
                           <span className="chip st-review">要確認 {it.pending}</span>

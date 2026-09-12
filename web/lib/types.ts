@@ -135,6 +135,8 @@ export interface RegionHintStats {
 export interface DocumentMeta {
   document_id: string;
   status: string;
+  /** 原本ファイル名。一覧・単体の両方で返る（無い行は null）。画面の表示名に使う */
+  original_name?: string | null;
   doc_type?: string | null;
   external_ref?: string | null;
   page_count?: number | null;
@@ -152,6 +154,8 @@ export interface ReviewQueueItem {
   run_id: string;
   pending: number;
   priority: number;
+  /** 原本ファイル名（帳票の original_name）。行の表示名に使う。無い帳票は null */
+  original_name?: string | null;
 }
 
 export interface CorrectionItem {
@@ -201,6 +205,8 @@ export interface SchemaDto {
   exclude_regions?: RegionRect[];
   /** テンプレート化時点の帳票ページ数 */
   source_page_count?: number | null;
+  /** アーカイブ済み（C9-D）。listSchemas は既定で出さないので、true は includeArchived のときだけ */
+  archived?: boolean;
 }
 
 /** 取込時の種別指定・分類の候補（GET /doc-types）。fields は含まない軽い一覧。 */
@@ -278,6 +284,31 @@ export interface ConnectionDto {
   last_synced_at?: string | null;
   last_sync_status?: string | null; // ok / error
   last_sync_error?: string | null;
+}
+
+// POST /connections/{id}/test の応答。成功で status='tested'。
+// postgres は失敗も 200 + ok=false + message、webhook/s3 の失敗は 422（ApiError）
+export interface ConnectionTestResult {
+  ok: boolean;
+  status: string;
+  message?: string | null;
+}
+
+/** DELETE /connections/{id} の受領書（C9-D） */
+export interface ConnectionDeleted {
+  connection_id: string;
+  deleted: boolean;
+  cursors_deleted: number;
+  /** gateway が作った秘密（Webhook の署名鍵）を保管先からも消せたか。対象外は null */
+  secret_deleted?: boolean | null;
+}
+
+/** 409(E1005) の details.workflows に載る「参照しているワークフロー」 */
+export interface WorkflowRefDto {
+  id: string;
+  name: string;
+  status: string;
+  version: number;
 }
 
 export interface RuleDto {
@@ -394,12 +425,48 @@ export interface DryRunResultDto {
   sinks: SinkPreviewDto[];
 }
 
+/** runner が射影に残すエラー。message 以外のキーを持つ場合もあるので広めに受ける */
+export type WorkflowRunError = { message?: string | null } & Record<string, unknown>;
+
+/**
+ * GET /workflows/{id}/runs の 1 件（WorkflowRunSummaryDto）。
+ * status: running / waiting_hitl / succeeded / failed / skipped（§16 設計 v0.2 §3）
+ */
 export interface WorkflowRunItemDto {
   id: string;
   workflow_id: string;
   workflow_version: number;
   document_id?: string | null;
   status: string;
+  error?: WorkflowRunError | null;
   started_at?: string | null;
   finished_at?: string | null;
+  /** 発火の出所（manual / schedule / s3_event / gdrive_event …）。旧 run や旧 gateway では無い */
+  trigger_type?: string | null;
+  /** 発火したトリガーノードの id（複数トリガーの WF で経路を示す） */
+  trigger_node_id?: string | null;
+  /**
+   * 帳票の削除で切り離された run（document_id は NULL、未終端なら failed に終端化済み）。
+   * document_id が無いだけでは判別できない（schedule 発火の run は最初から帳票を持たない）。
+   * 旧 gateway では無い
+   */
+  document_deleted?: boolean | null;
+}
+
+/** workflow_node_runs の 1 行。status: pending / running / succeeded / failed */
+export interface WorkflowNodeRunDto {
+  node_id: string;
+  node_type: string;
+  status: string;
+  attempt: number;
+  output?: Record<string, unknown> | null;
+  error?: WorkflowRunError | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** GET /workflow-runs/{id}。waiting は何を待っているか（await_extract / await_hitl） */
+export interface WorkflowRunDto extends WorkflowRunItemDto {
+  waiting?: ({ kind?: string; node_id?: string; run_id?: string } & Record<string, unknown>) | null;
+  node_runs: WorkflowNodeRunDto[];
 }

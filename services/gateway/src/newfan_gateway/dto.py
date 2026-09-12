@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -41,6 +41,10 @@ class PageDim(BaseModel):
 class DocumentMeta(BaseModel):
     document_id: str
     status: str
+    # 原本のファイル名（documents.original_name）。画面上の「帳票」の表示名で、
+    # チャット取込やフォルダ監視で入った帳票を ID だけで見分けさせないために返す。
+    # 一覧・単体の両方で埋める（documents 行に元からある列なので追加のクエリは要らない）。
+    original_name: Optional[str] = None
     doc_type: Optional[str] = None
     external_ref: Optional[str] = None
     page_count: Optional[int] = None
@@ -106,7 +110,7 @@ class ExtractBatchSkippedItem(BaseModel):
     """投入しなかった帳票と理由。code は単体 /extract の ApiError コード
     （E1001 不在・E1005 競合/確定済み/確定処理中/他者ロック）か、一括固有の
     ``no_schema``。E1005 は ``reason``（confirmed / in_review / locked / processing /
-    active_run）で種類を示す。web の要約はこれで数える（文言に依存させない）。"""
+    active_run / archived）で種類を示す。web の要約はこれで数える（文言に依存させない）。"""
 
     document_id: str
     code: str
@@ -213,6 +217,10 @@ class ReviewQueueItem(BaseModel):
     run_id: str
     pending: int
     priority: float
+    # 原本のファイル名（documents.original_name）。キューの行を ID だけで見せないため
+    # run 側にも載せる。一覧 API（既定 50 件）から名前を引く方式だと、先頭ページに
+    # 無い古い帳票だけが同じ表の中で ID 表示になり、レビュアーには理由が見えない。
+    original_name: Optional[str] = None
 
 
 class ReviewQueue(BaseModel):
@@ -260,6 +268,9 @@ class SchemaDto(BaseModel):
     fields: list[SchemaFieldDto]
     exclude_regions: list[RegionRect] = Field(default_factory=list)
     source_page_count: Optional[int] = None
+    # アーカイブ済み（C9-D）。GET /schemas は既定で出さないので、true が返るのは
+    # include_archived=true のときだけ。UI はバッジと「復元」ボタンに使う
+    archived: bool = False
 
 
 class SchemaList(BaseModel):
@@ -360,6 +371,13 @@ class WorkflowList(BaseModel):
     items: list[WorkflowSummaryDto]
 
 
+class WorkflowDeleted(BaseModel):
+    """DELETE /workflows/{id} の受領書（C9-D）。204 にしない理由は DocumentDeleted と同じ。"""
+
+    workflow_id: str
+    deleted: bool = True
+
+
 class LintFindingDto(BaseModel):
     rule: str
     severity: str
@@ -410,6 +428,15 @@ class WorkflowRunSummaryDto(BaseModel):
     error: Optional[dict[str, Any]] = None
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    # 発火の出所（manual / schedule / s3_event / gdrive_event …）と発火したトリガーの
+    # node_id。trigger 全体は graph_json スナップショットを含んで大きいので、
+    # 実行履歴の一覧に要るこの 2 つだけを出す
+    trigger_type: Optional[str] = None
+    trigger_node_id: Optional[str] = None
+    # 帳票の削除で切り離された run（state.document_deleted）。document_id が NULL なだけでは
+    # 判別できない（schedule 発火の run は最初から帳票を持たない）ので、旗として出す。
+    # UI はこれで「再実行」を塞ぐ（gateway 側の retry も同じ旗で 409 にする）
+    document_deleted: bool = False
 
 
 class WorkflowRunDto(WorkflowRunSummaryDto):
@@ -450,6 +477,28 @@ class ConnectionDto(BaseModel):
 
 class ConnectionList(BaseModel):
     items: list[ConnectionDto]
+
+
+class ConnectionStatusRequest(BaseModel):
+    """PATCH /connections/{id}（C9-D）。無効化（disabled）と再有効化（active）だけ。
+
+    tested/untested は疎通テスト・同期の結果として worker/gateway が付けるもので、
+    人が手で付ける値ではない。
+    """
+
+    status: Literal["active", "disabled"]
+
+
+class ConnectionDeleted(BaseModel):
+    """DELETE /connections/{id} の受領書。204 にしない理由は DocumentDeleted と同じ。"""
+
+    connection_id: str
+    deleted: bool = True
+    cursors_deleted: int = 0
+    # gateway が作った秘密（webhook の署名鍵）を保管先からも消せたか。対象外（postgres の
+    # 利用者登録の秘密・secret_ref 無し）は None。False は行だけ消えて秘密が残った状態で、
+    # 監査（connection.delete の secret_ref）から突き合わせる
+    secret_deleted: Optional[bool] = None
 
 
 class ConnectionTestResult(BaseModel):
@@ -530,11 +579,56 @@ class ChatRequest(BaseModel):
 
 
 class ChatConfirmRequest(BaseModel):
-    action: str  # "update_schema" 等
+    """承認カードの実行要求（§4.5）。
+
+    action は書込みツール名（update_schema / rerun_extract / manage_rules）。
+    params は SSE の confirm_request から action / prompt を除いた残りを UI がそのまま
+    返したもので、action ごとに下の Chat*Params で検証する（未知の action と不正な
+    params は E1003）。
+    """
+
+    action: str
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatUpdateSchemaParams(BaseModel):
+    """update_schema: スキーマに項目を 1 つ追加する。"""
+
+    doc_type: str = "invoice"
+    field: dict[str, Any]
+
+
+class ChatRerunExtractParams(BaseModel):
+    """rerun_extract: 新しい Run を発行する。
+
+    supersede_review は REST POST /documents/{id}/extract と同名・同義。チャットの
+    主用途が「レビュー中の帳票を取り直す」なので既定 True（needs_review を superseded に
+    終端させて取り直す）。False にすると REST 既定と同じく needs_review も競合として断る。
+    """
+
+    document_id: str
+    schema_id: Optional[str] = None
+    supersede_review: bool = True
+
+
+class ChatManageRulesParams(BaseModel):
+    """manage_rules: ルールを有効化（active）/ 退役（retired）する。
+
+    語彙は PATCH /rules/{id} と同じ。操作名を "action" にしないのは、confirm_request が
+    平坦な dict で "action" をツール名に使っているため。
+    """
+
+    rule_id: str
+    status: Literal["active", "retired"]
+
+
 class ChatConfirmResult(BaseModel):
+    """承認実行の結果。action によらず同じ形。
+
+    ok=False は「実行しなかった」（重複項目・競合・検証未達など、利用者に見せる理由が
+    message にある）。権限不足・未知の action・params 不正は HTTP エラー（E5001 / E1003）。
+    """
+
     ok: bool
     message: str
     detail: dict[str, Any] = Field(default_factory=dict)
@@ -553,13 +647,14 @@ class ClassifyCandidateDto(BaseModel):
 
 
 class ClassifyResponse(BaseModel):
-    """帳票自動分類（⑦）。抽出前にファイル名等から最も近いスキーマを提案する。"""
+    """帳票自動分類（⑦）。ファイル名と、抽出済みなら表題部から最も近いスキーマを提案する。"""
 
     suggested_schema_id: Optional[str] = None
     doc_type: Optional[str] = None
     confidence: float = 0.0
     reason: str = ""
-    # 判定の根拠種別: declared(指定済)/content(本文)/filename(ファイル名)/heuristic
+    # 判定の根拠種別: declared(指定済) / filename+title(ファイル名＋表題部の証拠が
+    # 寄与, ADR-0008) / filename(ファイル名) / heuristic(手がかり無し)
     method: str = "heuristic"
     candidates: list[ClassifyCandidateDto] = Field(default_factory=list)
 

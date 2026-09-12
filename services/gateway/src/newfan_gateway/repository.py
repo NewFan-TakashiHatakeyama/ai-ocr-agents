@@ -30,6 +30,15 @@ class DocumentGoneError(Exception):
 class Repository(Protocol):
     def create_document(self, doc: DocumentRecord, pages: list[PageRecord]) -> None: ...
     def get_document(self, tenant_id: str, document_id: str) -> Optional[DocumentRecord]: ...
+    def get_documents_by_ids(
+        self, tenant_id: str, document_ids: list[str]
+    ) -> dict[str, DocumentRecord]:
+        """document_id → DocumentRecord（自テナント分だけ。無い id はキーごと欠ける）。
+
+        レビューキューのように run の列に帳票の属性（原本ファイル名）を添える用途で、
+        run ごとに get_document を呼ぶ N+1 を避けるための一括取得。
+        """
+        ...
     def list_documents(
         self,
         tenant_id: str,
@@ -135,6 +144,16 @@ class InMemoryRepository:
     def get_document(self, tenant_id: str, document_id: str) -> Optional[DocumentRecord]:
         doc = self._docs.get(document_id)
         return doc if doc and self._owned(doc.tenant_id, tenant_id) else None
+
+    def get_documents_by_ids(
+        self, tenant_id: str, document_ids: list[str]
+    ) -> dict[str, DocumentRecord]:
+        found: dict[str, DocumentRecord] = {}
+        for document_id in document_ids:
+            doc = self.get_document(tenant_id, document_id)
+            if doc is not None:
+                found[document_id] = doc
+        return found
 
     def list_documents(
         self,

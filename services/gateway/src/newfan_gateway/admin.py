@@ -32,6 +32,28 @@ def reject_reserved_field_names(fields: list[SchemaFieldDef]) -> None:
     for f in fields:
         check_field_name(f.name)
 
+
+def archived_schema_message(doc_type: str, *, action: str = "使う") -> str:
+    """アーカイブ済みスキーマを断るときの文言（C9-D）。REST（E1005）と chat（ok=False）で
+    同じ言葉にする——「先に復元してください」が次の一手で、画面のバッジと対応する。"""
+    return f"スキーマ「{doc_type}」はアーカイブ済みです。{action}には先に復元してください"
+
+
+class SchemaArchivedError(ValueError):
+    """アーカイブ済み doc_type への書き込み（新版作成）を put_schema が拒む（C9-D）。
+
+    ValueError の派生にするのは reject_reserved_field_names と同じ理由: chat 経路
+    （chat_tools.update_schema）は ValueError を ok=False の応答に変えて会話を
+    続けるので、ここで別系統の例外にするとグラフごと落ちる。ルータは E1005 に翻訳する。
+    アーカイブ済みに新版を足すと、その版だけ is_active=true で「一覧に戻る」ため、
+    アーカイブが黙って解除される。復元（unarchive）を明示的に踏ませる。
+    """
+
+    def __init__(self, doc_type: str) -> None:
+        super().__init__(archived_schema_message(doc_type, action="編集する"))
+        self.doc_type = doc_type
+
+
 # ルール有効化の閾値（§2.5 rules.validation_pass: 再現率≥90% かつ 回帰0件）
 MIN_REPRODUCTION = 0.9
 
@@ -44,11 +66,61 @@ def is_activatable(report: Optional[dict[str, Any]]) -> bool:
     return repro >= MIN_REPRODUCTION and regressions == 0
 
 
+ACTIVATION_BLOCKED_MESSAGE = "検証未達のため有効化できません（再現率≥90%・回帰0件が必要）"
+
+
+def can_activate(rec: RuleRecord) -> bool:
+    """ルールを active にしてよいか（§5.8.4）。
+
+    決定論変換（regex/vocab 等）は検証合格（再現率≥90%・回帰0件）が条件。ただし
+    「人が明示的に書いた」llm_hint は検証対象ではないため条件を課さない。学習
+    エージェント生成の llm_hint（created_by="agent"）は従来どおりゲート対象
+    （無検証ルールの1クリック注入を防ぐ）。
+
+    PATCH /rules/{id} とチャット承認（manage_rules）の**共通判定**。片方だけ緩むと
+    チャットが検証ゲートの抜け道になる。
+    """
+    human_hint = rec.rule_type == "llm_hint" and rec.created_by != "agent"
+    return human_hint or is_activatable(rec.validation_report)
+
+
 class AdminRepository(Protocol):
     # スキーマ（§5.5）
-    def list_schemas(self, tenant_id: str) -> list[SchemaRecord]: ...
-    def get_schema(self, tenant_id: str, doc_type: str) -> Optional[SchemaRecord]: ...
+    def list_schemas(
+        self, tenant_id: str, *, include_archived: bool = False
+    ) -> list[SchemaRecord]:
+        """doc_type ごとの最新版。既定ではアーカイブ済みを含めない（C9-D）。
+
+        呼び出し側（抽出のスキーマ選択・分類候補・doc-types・ワークフローの extract
+        ノード）はすべて「今使えるもの」を求めているので、既定で隠す。管理画面の
+        「アーカイブ済みを表示」だけが include_archived=True を渡す。
+        """
+        ...
+
+    def get_schema(self, tenant_id: str, doc_type: str) -> Optional[SchemaRecord]:
+        """doc_type の最新版。アーカイブ済みでも返す（archived=True）。
+
+        隠すかどうかは呼び出し側が決める（PUT は E1005、GET は E1001、chat は
+        ok=False）。ここで None にすると「無い」と「アーカイブ済み」が区別できず、
+        create=True の PUT が同名の新版を作ってアーカイブを黙って解除する。
+        """
+        ...
+
     def get_schema_by_id(self, tenant_id: str, schema_id: str) -> Optional[SchemaRecord]: ...
+    def schema_ids_for_doc_type(self, tenant_id: str, doc_type: str) -> list[str]:
+        """doc_type の全版の id（版の昇順）。ワークフローの extract.schema_id は旧版を
+        固定保持し得るので、アーカイブのガードは全版で参照を探す。"""
+        ...
+
+    def set_schema_archived(
+        self, tenant_id: str, doc_type: str, archived: bool
+    ) -> Optional[SchemaRecord]:
+        """全版の is_active を一括で更新し、更新後の最新版を返す。doc_type が無ければ None。
+
+        行は消さない（extraction_runs.schema_id の FK と過去の抽出結果の定義を保つ）。
+        参照ガード（active なワークフローの extract.schema_id）はルータが行う。
+        """
+        ...
     def put_schema(
         self,
         tenant_id: str,
@@ -119,6 +191,19 @@ class AdminRepository(Protocol):
     def set_connection_status(
         self, tenant_id: str, connection_id: str, status: str
     ) -> Optional[ConnectionRecord]: ...
+    def delete_connection(
+        self, tenant_id: str, connection_id: str
+    ) -> Optional[dict[str, int]]:
+        """接続を消す（C9-D）。消したら件数の dict、無い/参照されていて消せなければ None。
+
+        ワークフロー（現在の定義と run のスナップショット）から参照されている接続は
+        消さない。ルータが先にガードして「誰が使っているか」を返すが、Pg 実装は
+        DELETE 文自体にも同じ条件を含める（ガードと削除が別トランザクションのため、
+        その間に有効化された参照を黙って壊さない）。
+        source_cursors（フォルダ監視の重複排除台帳）は接続と一緒に消える。接続が
+        無くなれば台帳は引かれず、残すと孤児になるだけ。件数は監査へ載せる。
+        """
+        ...
 
     # KPI（§12.1）
     def metrics_summary(self, tenant_id: str) -> MetricsSummary: ...
@@ -136,7 +221,9 @@ class InMemoryAdminRepository:
     def seed_schema(self, rec: SchemaRecord) -> None:
         self._schemas[rec.id] = rec
 
-    def list_schemas(self, tenant_id: str) -> list[SchemaRecord]:
+    def list_schemas(
+        self, tenant_id: str, *, include_archived: bool = False
+    ) -> list[SchemaRecord]:
         latest: dict[str, SchemaRecord] = {}
         for s in self._schemas.values():
             if s.tenant_id != tenant_id:
@@ -144,15 +231,37 @@ class InMemoryAdminRepository:
             cur = latest.get(s.doc_type)
             if cur is None or s.version > cur.version:
                 latest[s.doc_type] = s
-        return sorted(latest.values(), key=lambda s: s.doc_type)
+        return sorted(
+            (s for s in latest.values() if include_archived or not s.archived),
+            key=lambda s: s.doc_type,
+        )
 
     def get_schema_by_id(self, tenant_id: str, schema_id: str) -> Optional[SchemaRecord]:
         rec = self._schemas.get(schema_id)
         return rec if rec and rec.tenant_id == tenant_id else None
 
     def get_schema(self, tenant_id: str, doc_type: str) -> Optional[SchemaRecord]:
-        rows = [s for s in self._schemas.values() if s.tenant_id == tenant_id and s.doc_type == doc_type]
+        rows = self._versions(tenant_id, doc_type)
         return max(rows, key=lambda s: s.version) if rows else None
+
+    def _versions(self, tenant_id: str, doc_type: str) -> list[SchemaRecord]:
+        return [
+            s for s in self._schemas.values() if s.tenant_id == tenant_id and s.doc_type == doc_type
+        ]
+
+    def schema_ids_for_doc_type(self, tenant_id: str, doc_type: str) -> list[str]:
+        return [s.id for s in sorted(self._versions(tenant_id, doc_type), key=lambda s: s.version)]
+
+    def set_schema_archived(
+        self, tenant_id: str, doc_type: str, archived: bool
+    ) -> Optional[SchemaRecord]:
+        rows = self._versions(tenant_id, doc_type)
+        if not rows:
+            return None
+        for s in rows:
+            # 全版を同じ状態にする（Pg の UPDATE ... WHERE doc_type=:d と同じ意味論）
+            s.archived = archived
+        return self.get_schema(tenant_id, doc_type)
 
     def put_schema(
         self,
@@ -165,6 +274,10 @@ class InMemoryAdminRepository:
     ) -> SchemaRecord:
         reject_reserved_field_names(fields)  # D9: 書き込み側で拒む（読み出しでは拒まない）
         prev = self.get_schema(tenant_id, doc_type)
+        if prev is not None and prev.archived:
+            # 書き込み側の共通入口で拒む（D9 と同じ置き場所）。新版を足すとアーカイブが
+            # 黙って解除される。
+            raise SchemaArchivedError(doc_type)
         # None = 引き継ぎ（§4.4）。Pg 実装と意味論を揃える。
         regions = (
             list(exclude_regions)
@@ -309,6 +422,17 @@ class InMemoryAdminRepository:
         updated = rec.model_copy(update={"status": status})
         self._connections[self._connections.index(rec)] = updated
         return updated
+
+    def delete_connection(
+        self, tenant_id: str, connection_id: str
+    ) -> Optional[dict[str, int]]:
+        # InMemory はワークフロー表を持たないので参照ガードはルータ側に任せる
+        # （Pg 実装は DELETE 文に NOT EXISTS で同条件を含める）。
+        rec = self.get_connection(tenant_id, connection_id)
+        if rec is None:
+            return None
+        self._connections.remove(rec)
+        return {"cursors_deleted": 0}
 
     def list_webhook_endpoints(self, tenant_id: str) -> list[ConnectionRecord]:
         return [c for c in self._connections if c.tenant_id == tenant_id and c.type == "webhook"]

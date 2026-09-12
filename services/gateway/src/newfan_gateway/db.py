@@ -48,6 +48,23 @@ class Base(DeclarativeBase):
     pass
 
 
+def _graph_ref_sql(graph_col: str, key: str, param: str) -> str:
+    """`graph_col`（jsonb のグラフ）のいずれかのノードが config.<key> = ANY(:param) を
+    持つかを返す EXISTS 句（C9-D。workflows_repo.graph_references の jsonb 版）。
+
+    nodes が配列でない行（壊れた graph_json）で jsonb_array_elements が落ちると
+    削除 API 全体が 500 になるため、配列でなければ空配列として扱う。
+    """
+    nodes = (
+        f"CASE WHEN jsonb_typeof({graph_col}->'nodes')='array'"
+        f" THEN {graph_col}->'nodes' ELSE '[]'::jsonb END"
+    )
+    return (
+        f"EXISTS (SELECT 1 FROM jsonb_array_elements({nodes}) AS n"
+        f" WHERE n->'config'->>'{key}' = ANY(:{param}))"
+    )
+
+
 class Document(Base):
     __tablename__ = "documents"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -168,6 +185,17 @@ class PgRepository:
         with self._rls(tenant_id) as s:
             row = s.get(Document, document_id)
             return _doc_record(row) if row else None
+
+    def get_documents_by_ids(self, tenant_id, document_ids):
+        ids = list(dict.fromkeys(document_ids))  # 重複を落とす（同じ帳票の run が複数）
+        if not ids:
+            return {}
+        with self._rls(tenant_id) as s:
+            # RLS に加えて tenant_id を WHERE に明示する二重防御（get_run_spans と同じ方針）
+            stmt = select(Document).where(
+                Document.id.in_(ids), Document.tenant_id == tenant_id
+            )
+            return {r.id: _doc_record(r) for r in s.scalars(stmt)}
 
     def list_documents(
         self, tenant_id, *, status, cursor, limit, doc_type=None, statuses=None
@@ -742,9 +770,14 @@ class PgAdminRepository:
             self._rls(c, tenant_id)
             r = c.execute(
                 text(
-                    "SELECT id, tenant_id, doc_type, version, fields,"
-                    " exclude_regions, source_page_count"
-                    " FROM field_schemas WHERE tenant_id=:t AND id=:i"
+                    "SELECT s.id, s.tenant_id, s.doc_type, s.version, s.fields,"
+                    " s.exclude_regions, s.source_page_count,"
+                    # アーカイブ判定は doc_type 単位（全版が is_active=false）。
+                    # seed_schemas.py は旧版だけを false にするので、この行の is_active
+                    # だけ見ると seed 済み環境の旧版 id が全部「アーカイブ済み」になる
+                    " NOT EXISTS (SELECT 1 FROM field_schemas a WHERE a.tenant_id=s.tenant_id"
+                    "   AND a.doc_type=s.doc_type AND a.is_active) AS archived"
+                    " FROM field_schemas s WHERE s.tenant_id=:t AND s.id=:i"
                 ),
                 {"t": tenant_id, "i": schema_id},
             ).mappings().first()
@@ -756,20 +789,25 @@ class PgAdminRepository:
             fields=[SchemaFieldDef(**f) for f in (r["fields"] or [])],
             exclude_regions=list(r["exclude_regions"] or []),
             source_page_count=r["source_page_count"],
+            archived=bool(r["archived"]),
         )
 
-    def list_schemas(self, tenant_id: str):
+    def list_schemas(self, tenant_id: str, *, include_archived: bool = False):
         from newfan_gateway.records import SchemaFieldDef, SchemaRecord
 
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
             rows = c.execute(
                 text(
-                    "SELECT DISTINCT ON (doc_type) id, doc_type, version, fields, "
-                    "exclude_regions, source_page_count "
-                    "FROM field_schemas WHERE tenant_id=:t ORDER BY doc_type, version DESC"
+                    "SELECT * FROM ("
+                    "  SELECT DISTINCT ON (doc_type) id, doc_type, version, fields,"
+                    "    exclude_regions, source_page_count,"
+                    # 窓関数は DISTINCT ON より先に評価されるので、全版にわたる集約になる
+                    "    NOT bool_or(is_active) OVER (PARTITION BY doc_type) AS archived"
+                    "  FROM field_schemas WHERE tenant_id=:t ORDER BY doc_type, version DESC"
+                    ") s WHERE CAST(:inc AS boolean) OR NOT s.archived ORDER BY doc_type"
                 ),
-                {"t": tenant_id},
+                {"t": tenant_id, "inc": include_archived},
             ).all()
         return [
             SchemaRecord(
@@ -780,6 +818,7 @@ class PgAdminRepository:
                 fields=[SchemaFieldDef.model_validate(f) for f in (r.fields or [])],
                 exclude_regions=list(r.exclude_regions or []),
                 source_page_count=r.source_page_count,
+                archived=bool(r.archived),
             )
             for r in rows
         ]
@@ -791,7 +830,8 @@ class PgAdminRepository:
             self._rls(c, tenant_id)
             r = c.execute(
                 text(
-                    "SELECT id, version, fields, exclude_regions, source_page_count "
+                    "SELECT id, version, fields, exclude_regions, source_page_count,"
+                    " NOT bool_or(is_active) OVER () AS archived "
                     "FROM field_schemas "
                     "WHERE tenant_id=:t AND doc_type=:d ORDER BY version DESC LIMIT 1"
                 ),
@@ -807,7 +847,33 @@ class PgAdminRepository:
             fields=[SchemaFieldDef.model_validate(f) for f in (r.fields or [])],
             exclude_regions=list(r.exclude_regions or []),
             source_page_count=r.source_page_count,
+            archived=bool(r.archived),
         )
+
+    def schema_ids_for_doc_type(self, tenant_id: str, doc_type: str):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT id FROM field_schemas WHERE tenant_id=:t AND doc_type=:d"
+                    " ORDER BY version"
+                ),
+                {"t": tenant_id, "d": doc_type},
+            ).all()
+        return [r[0] for r in rows]
+
+    def set_schema_archived(self, tenant_id: str, doc_type: str, archived: bool):
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            n = c.execute(
+                text(
+                    "UPDATE field_schemas SET is_active=:a WHERE tenant_id=:t AND doc_type=:d"
+                ),
+                {"a": not archived, "t": tenant_id, "d": doc_type},
+            ).rowcount
+        if n == 0:
+            return None
+        return self.get_schema(tenant_id, doc_type)
 
     def put_schema(
         self, tenant_id: str, doc_type: str, fields, *, exclude_regions=None, source_page_count=None
@@ -815,7 +881,7 @@ class PgAdminRepository:
         import json as _json
         import uuid as _uuid
 
-        from newfan_gateway.admin import reject_reserved_field_names
+        from newfan_gateway.admin import SchemaArchivedError, reject_reserved_field_names
         from newfan_gateway.records import SchemaRecord
 
         reject_reserved_field_names(fields)  # D9: 書き込み側で拒む（読み出しでは拒まない）
@@ -826,13 +892,19 @@ class PgAdminRepository:
             # 版選択（ORDER BY version DESC LIMIT 1）で取る。ORDER BY を落とすと
             # v1 の設定が復活して v2 以降の設定が消えるという、InMemory では
             # 検出できない事故になる（設計 §4.4 / C22）。
+            # archived は全版の集約（窓関数）。アーカイブ済みへの新版は同じ
+            # トランザクション内で拒む（新版が INSERT されると is_active=true の
+            # 既定でアーカイブが黙って解除される。C9-D）
             prev = c.execute(
                 text(
-                    "SELECT exclude_regions, source_page_count FROM field_schemas "
+                    "SELECT exclude_regions, source_page_count,"
+                    " NOT bool_or(is_active) OVER () AS archived FROM field_schemas "
                     "WHERE tenant_id=:t AND doc_type=:d ORDER BY version DESC LIMIT 1"
                 ),
                 {"t": tenant_id, "d": doc_type},
             ).first()
+            if prev is not None and prev[2]:
+                raise SchemaArchivedError(doc_type)
             # None = 引き継ぎ / 明示 [] = クリア（§4.4）
             if exclude_regions is not None:
                 regions = [
@@ -1105,6 +1177,35 @@ class PgAdminRepository:
             )
         return self.get_connection(tenant_id, connection_id)
 
+    def delete_connection(self, tenant_id, connection_id):
+        """接続の削除（C9-D）。参照ガードを DELETE 文に含めて 1 トランザクションで行う。
+
+        ルータの事前チェック（誰が使っているかを返す）とは別トランザクションなので、
+        その間に有効化・実行された参照をここでもう一度見る。参照があれば rowcount=0
+        で何も消えない（None を返す。ルータは「参照あり」として E1005 に翻訳する）。
+        """
+        wf_ref = _graph_ref_sql("w.graph_json", "connection_id", "ids")
+        run_ref = _graph_ref_sql("r.trigger->'graph_json'", "connection_id", "ids")
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            deleted = c.execute(
+                text(
+                    "DELETE FROM connections WHERE tenant_id=:t AND id=:i"
+                    " AND NOT EXISTS (SELECT 1 FROM workflows w"
+                    f"   WHERE w.tenant_id=:t AND {wf_ref})"
+                    " AND NOT EXISTS (SELECT 1 FROM workflow_runs r"
+                    f"   WHERE r.tenant_id=:t AND {run_ref})"
+                ),
+                {"t": tenant_id, "i": connection_id, "ids": [connection_id]},
+            ).rowcount
+            if deleted != 1:
+                return None
+            cursors = c.execute(
+                text("DELETE FROM source_cursors WHERE tenant_id=:t AND connection_id=:i"),
+                {"t": tenant_id, "i": connection_id},
+            ).rowcount
+        return {"cursors_deleted": cursors}
+
     def list_webhook_endpoints(self, tenant_id: str):
         from newfan_gateway.records import ConnectionRecord
 
@@ -1321,6 +1422,64 @@ class PgWorkflowsRepository:
             ).first()
         return self.get_workflow(tenant_id, workflow_id) if r else None
 
+    def has_runs(self, tenant_id: str, workflow_id: str) -> bool:
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "SELECT 1 FROM workflow_runs WHERE tenant_id=:t AND workflow_id=:w LIMIT 1"
+                ),
+                {"t": tenant_id, "w": workflow_id},
+            ).first()
+        return r is not None
+
+    def delete_workflow(self, tenant_id: str, workflow_id: str, *, actor_id: str, detail) -> bool:
+        """定義の削除（C9-D）。条件を DELETE 文に含め、監査を同じトランザクションで残す。
+
+        run があると workflow_runs.workflow_id の FK でも落ちるが、それは 500 に
+        なるので NOT EXISTS で先に止める（同時に run が作られた窓は IntegrityError を
+        「消せなかった」に倒す）。監査はアプリロールが DELETE できない audit_logs
+        （ensure_app_role.py）に残る唯一の痕跡なので、削除本体と同じトランザクションに置く。
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            with self._engine.begin() as c:
+                self._rls(c, tenant_id)
+                row = c.execute(
+                    text(
+                        "DELETE FROM workflows w WHERE w.tenant_id=:t AND w.id=:i"
+                        " AND w.status <> 'active'"
+                        " AND NOT EXISTS (SELECT 1 FROM workflow_runs r"
+                        "   WHERE r.tenant_id=:t AND r.workflow_id=:i)"
+                        " RETURNING w.name, w.status, w.version"
+                    ),
+                    {"t": tenant_id, "i": workflow_id},
+                ).first()
+                if row is None:
+                    return False
+                c.execute(
+                    text(
+                        "INSERT INTO audit_logs (id, tenant_id, actor_type, actor_id, action,"
+                        " target_type, target_id, detail)"
+                        " VALUES (:a_id,:t,'human',:a,'workflow.delete','workflow',:i,"
+                        " CAST(:d AS jsonb))"
+                    ),
+                    {
+                        "a_id": new_id("audit"),
+                        "t": tenant_id,
+                        "a": actor_id,
+                        "i": workflow_id,
+                        "d": json.dumps(
+                            {**detail, "name": row[0], "status": row[1], "version": row[2]},
+                            ensure_ascii=False,
+                        ),
+                    },
+                )
+        except IntegrityError:
+            return False
+        return True
+
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool:
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
@@ -1363,21 +1522,67 @@ class PgWorkflowsRepository:
             ).first()
         return r is not None
 
+    def workflows_referencing_connection(self, tenant_id: str, connection_id: str,
+                                         *, statuses=None):
+        return self._workflows_referencing(
+            tenant_id, "connection_id", [connection_id], statuses=statuses
+        )
+
+    def workflows_referencing_schema(self, tenant_id: str, schema_ids, *, statuses=None):
+        return self._workflows_referencing(
+            tenant_id, "schema_id", list(schema_ids), statuses=statuses
+        )
+
+    def _workflows_referencing(self, tenant_id: str, key: str, ids: list[str], *, statuses):
+        """config.<key> が ids のいずれかを指す（現在の定義の）ワークフロー。"""
+        if not ids:
+            return []
+        ref = _graph_ref_sql("w.graph_json", key, "ids")
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT id, tenant_id, name, status, version, graph_json, auto_confirm,"
+                    " created_by, updated_at FROM workflows w WHERE w.tenant_id=:t"
+                    " AND (CAST(:st AS text[]) IS NULL OR w.status = ANY(CAST(:st AS text[])))"
+                    f" AND {ref} ORDER BY updated_at DESC"
+                ),
+                {
+                    "t": tenant_id,
+                    "ids": list(ids),
+                    "st": list(statuses) if statuses is not None else None,
+                },
+            ).mappings().all()
+        return [self._row_to_record(r) for r in rows]
+
+    def runs_referencing_connection(self, tenant_id: str, connection_id: str) -> int:
+        # trigger.graph_json は版固定のスナップショット（§11.1）。索引は無いが、
+        # 接続の削除は稀な管理操作なので全走査で足りる
+        ref = _graph_ref_sql("r.trigger->'graph_json'", "connection_id", "ids")
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            n = c.execute(
+                text(f"SELECT count(*) FROM workflow_runs r WHERE r.tenant_id=:t AND {ref}"),
+                {"t": tenant_id, "ids": [connection_id]},
+            ).scalar_one()
+        return int(n)
+
     def record_audit(self, tenant_id: str, *, actor_id: str, action: str,
-                     target_id: str, detail) -> None:
+                     target_id: str, detail, target_type: str = "workflow") -> None:
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
             c.execute(
                 text(
                     "INSERT INTO audit_logs (id, tenant_id, actor_type, actor_id, action,"
                     " target_type, target_id, detail)"
-                    " VALUES (:i,:t,'human',:a,:ac,'workflow',:tg, CAST(:d AS jsonb))"
+                    " VALUES (:i,:t,'human',:a,:ac,:tt,:tg, CAST(:d AS jsonb))"
                 ),
                 {
                     "i": new_id("audit"),
                     "t": tenant_id,
                     "a": actor_id,
                     "ac": action,
+                    "tt": target_type,
                     "tg": target_id,
                     "d": json.dumps(detail, ensure_ascii=False),
                 },

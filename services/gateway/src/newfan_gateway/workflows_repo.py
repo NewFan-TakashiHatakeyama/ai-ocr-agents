@@ -12,10 +12,31 @@ Protocol + InMemory 実装。本番の PostgreSQL 実装は db.PgWorkflowsReposi
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol
+from typing import Any, Iterable, Optional, Protocol
 
 from newfan_gateway.ids import new_id
 from newfan_gateway.records import WorkflowNodeRunRecord, WorkflowRecord, WorkflowRunRecord
+
+
+def graph_references(graph_json: Any, key: str, values: Iterable[str]) -> bool:
+    """graph_json のいずれかのノードの config.<key> が values のどれかを指すか。
+
+    接続の無効化/削除・スキーマのアーカイブが「参照しているワークフローがあるか」を
+    見るための共通判定。ノードの config は種別ごとに形が違うが、参照は
+    `config.connection_id` / `config.schema_id` の 2 種しか無い（models.py）ので
+    キー名の一致で足りる。Pg 実装は同じ判定を jsonb で行う（db.py の _GRAPH_REF_SQL）。
+    """
+    wanted = set(values)
+    if not wanted:
+        return False
+    nodes = (graph_json or {}).get("nodes") if isinstance(graph_json, dict) else None
+    if not isinstance(nodes, list):
+        return False
+    for n in nodes:
+        cfg = n.get("config") if isinstance(n, dict) else None
+        if isinstance(cfg, dict) and cfg.get(key) in wanted:
+            return True
+    return False
 
 # activate を許すノード種別（実装済み Phase のもののみ）。
 # 保存と lint は 13 種すべて通すが、実行できない種別を含むワークフローの有効化は
@@ -60,10 +81,62 @@ class WorkflowsRepository(Protocol):
         self, tenant_id: str, workflow_id: str, status: str
     ) -> Optional[WorkflowRecord]: ...
 
+    # 削除（C9-D）。draft/paused（active でない）かつ run が 1 件も無いときだけ
+    def has_runs(self, tenant_id: str, workflow_id: str) -> bool: ...
+    def delete_workflow(
+        self,
+        tenant_id: str,
+        workflow_id: str,
+        *,
+        actor_id: str,
+        detail: dict[str, Any],
+    ) -> bool:
+        """定義行を消し、監査を同じトランザクションに残す。消せなければ False。
+
+        条件（status <> 'active' かつ workflow_runs が無い）は DELETE 文自体に含める。
+        ルータの事前チェックとは別トランザクションなので、その間に有効化・実行された
+        ものを黙って消さない。run があると FK（workflow_runs.workflow_id）でも落ちるが、
+        それは 500 になるので条件で先に止める。
+        """
+        ...
+
     # activate 時の lint L009/L010 の参照解決
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool: ...
     def schema_is_latest(self, tenant_id: str, schema_id: str) -> bool: ...
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool: ...
+
+    # 接続の無効化/削除のガード（C9-D）。「誰が使っているか」を先に見せて断る
+    def workflows_referencing_connection(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> list[WorkflowRecord]:
+        """現在の定義（workflows.graph_json）が当該接続を指すワークフロー。
+
+        statuses を渡すとその status のものだけ（無効化のガードは active のみ、
+        削除のガードは全 status）。
+        """
+        ...
+
+    def runs_referencing_connection(self, tenant_id: str, connection_id: str) -> int:
+        """trigger.graph_json スナップショット（§11.1 版固定）が当該接続を指す run の数。
+
+        定義から外された旧版でも run が残っていれば参照は生きている（retry の再開先、
+        履歴の再現）。削除のガードはこれも見る（無効化なら通す）。
+        """
+        ...
+
+    # スキーマのアーカイブのガード（C9-D）。extract.schema_id は旧版を固定保持し得る
+    # ので、doc_type の全版の id を渡す
+    def workflows_referencing_schema(
+        self,
+        tenant_id: str,
+        schema_ids: Iterable[str],
+        *,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> list[WorkflowRecord]: ...
 
     # 実行（§16 設計 v0.2 §11 / P3）
     def create_run(self, rec: WorkflowRunRecord) -> WorkflowRunRecord: ...
@@ -85,7 +158,8 @@ class WorkflowsRepository(Protocol):
         """
         ...
 
-    # §16.8: config 変更・有効化/停止は audit_logs へ（actor=human/agent）
+    # §16.8: config 変更・有効化/停止は audit_logs へ（actor=human/agent）。
+    # target_type は既定 'workflow'（従来どおり）。接続/スキーマの操作は明示して渡す
     def record_audit(
         self,
         tenant_id: str,
@@ -94,16 +168,21 @@ class WorkflowsRepository(Protocol):
         action: str,
         target_id: str,
         detail: dict[str, Any],
+        target_type: str = "workflow",
     ) -> None: ...
 
 
 class InMemoryWorkflowsRepository:
-    def __init__(self) -> None:
+    def __init__(self, *, admin: Any = None) -> None:
         self._rows: dict[str, WorkflowRecord] = {}
         self._runs: dict[str, WorkflowRunRecord] = {}
         self._node_runs: dict[str, list[WorkflowNodeRunRecord]] = {}
         self._schemas: set[tuple[str, str]] = set()
         self._connections: set[tuple[str, str]] = set()
+        # 接続の実体（AdminRepository）を渡すと connection_ok が Pg 実装と同じ規則
+        # （status IN ('active','tested')）で判定する。seed_connection は従来どおり
+        # 無条件 OK（既存テストの互換）
+        self._admin = admin
         self.audits: list[dict[str, Any]] = []
 
     # --- テスト/dev 用 seed ---
@@ -156,6 +235,29 @@ class InMemoryWorkflowsRepository:
         w.status = status
         return w
 
+    def has_runs(self, tenant_id: str, workflow_id: str) -> bool:
+        return any(
+            r.tenant_id == tenant_id and r.workflow_id == workflow_id for r in self._runs.values()
+        )
+
+    def delete_workflow(
+        self,
+        tenant_id: str,
+        workflow_id: str,
+        *,
+        actor_id: str,
+        detail: dict[str, Any],
+    ) -> bool:
+        w = self.get_workflow(tenant_id, workflow_id)
+        if w is None or w.status == "active" or self.has_runs(tenant_id, workflow_id):
+            return False
+        del self._rows[workflow_id]
+        self.record_audit(
+            tenant_id, actor_id=actor_id, action="workflow.delete", target_id=workflow_id,
+            detail={**detail, "name": w.name, "status": w.status, "version": w.version},
+        )
+        return True
+
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool:
         return (tenant_id, schema_id) in self._schemas
 
@@ -165,7 +267,52 @@ class InMemoryWorkflowsRepository:
         return (tenant_id, schema_id) in self._schemas
 
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool:
-        return (tenant_id, connection_id) in self._connections
+        if (tenant_id, connection_id) in self._connections:
+            return True
+        if self._admin is None:
+            return False
+        # 疎通未確認（untested）の接続は有効化に使わせない（Pg の connection_ok と同じ）
+        rec = self._admin.get_connection(tenant_id, connection_id)
+        return rec is not None and rec.status in ("active", "tested")
+
+    def workflows_referencing_connection(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> list[WorkflowRecord]:
+        return self._referencing(tenant_id, "connection_id", [connection_id], statuses)
+
+    def workflows_referencing_schema(
+        self,
+        tenant_id: str,
+        schema_ids: Iterable[str],
+        *,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> list[WorkflowRecord]:
+        return self._referencing(tenant_id, "schema_id", list(schema_ids), statuses)
+
+    def _referencing(
+        self, tenant_id: str, key: str, values: list[str], statuses: Optional[Iterable[str]]
+    ) -> list[WorkflowRecord]:
+        allowed = set(statuses) if statuses is not None else None
+        return [
+            w
+            for w in self.list_workflows(tenant_id)
+            if (allowed is None or w.status in allowed)
+            and graph_references(w.graph_json, key, values)
+        ]
+
+    def runs_referencing_connection(self, tenant_id: str, connection_id: str) -> int:
+        return sum(
+            1
+            for r in self._runs.values()
+            if r.tenant_id == tenant_id
+            and graph_references(
+                (r.trigger or {}).get("graph_json"), "connection_id", [connection_id]
+            )
+        )
 
     # --- 実行（P3） ---
     def create_run(self, rec: WorkflowRunRecord) -> WorkflowRunRecord:
@@ -212,6 +359,7 @@ class InMemoryWorkflowsRepository:
         action: str,
         target_id: str,
         detail: dict[str, Any],
+        target_type: str = "workflow",
     ) -> None:
         self.audits.append(
             {
@@ -219,6 +367,7 @@ class InMemoryWorkflowsRepository:
                 "tenant_id": tenant_id,
                 "actor_id": actor_id,
                 "action": action,
+                "target_type": target_type,
                 "target_id": target_id,
                 "detail": detail,
             }

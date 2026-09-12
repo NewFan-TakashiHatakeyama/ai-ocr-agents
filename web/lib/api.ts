@@ -3,7 +3,9 @@
 import type {
   CatalogDto,
   ClassifyResult,
+  ConnectionDeleted,
   ConnectionDto,
+  ConnectionTestResult,
   DryRunResultDto,
   ExtractAccepted,
   ExtractBatchResponse,
@@ -12,6 +14,7 @@ import type {
   WorkflowDto,
   WorkflowGraphDto,
   WorkflowListItemDto,
+  WorkflowRunDto,
   WorkflowRunItemDto,
   ChatConfirmResult,
   CorrectionItem,
@@ -194,8 +197,19 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
-  // 管理画面（SCR-04/05/06, admin）
-  listSchemas: () => request<{ items: SchemaDto[] }>(`/schemas`),
+  // 管理画面（SCR-04/05/06, admin）。アーカイブ済み（C9-D）は既定で出さない——
+  // 抽出のスキーマ選択・ワークフローの extract ノードはこの一覧を候補にするので、
+  // 隠すだけで「新しく使われる」経路が塞がる。管理画面の表示切替だけが true を渡す
+  listSchemas: (opts?: { includeArchived?: boolean }) =>
+    request<{ items: SchemaDto[] }>(
+      `/schemas${opts?.includeArchived ? "?include_archived=true" : ""}`,
+    ),
+  // アーカイブ / 復元。全版の is_active を切り替えるだけで行は消えない（過去の抽出結果
+  // から定義を辿れる）。有効なワークフローが使っていれば 409(E1005, details.workflows)
+  archiveSchema: (docType: string) =>
+    request<SchemaDto>(`/schemas/${encodeURIComponent(docType)}/archive`, { method: "POST" }),
+  unarchiveSchema: (docType: string) =>
+    request<SchemaDto>(`/schemas/${encodeURIComponent(docType)}/unarchive`, { method: "POST" }),
   // doc_type の**最新版**を取る（領域編集のプリロード起点）。listSchemas でも
   // 最新版は取れるが、run.schema_id は抽出時点の旧版であり得るので id 突合は
   // できない。編集は必ず doc_type 起点で行う。
@@ -241,6 +255,25 @@ export const api = {
   // 「今すぐ同期」: gdrive 接続の監視フォルダを即時に差分検知する（worker が実行）
   syncConnection: (connectionId: string) =>
     request<{ queued: boolean }>(`/connections/${connectionId}/sync`, { method: "POST" }),
+  // 疎通テスト（postgres: SELECT 1 / webhook: 署名付き test イベント / s3: HeadBucket）。
+  // 成功で status='tested'（ワークフローの有効化に使える）。postgres の失敗は
+  // 200 + ok=false、webhook/s3 の失敗は 422（ApiError）で理由が返る
+  testConnection: (connectionId: string) =>
+    request<ConnectionTestResult>(`/connections/${connectionId}/test`, { method: "POST" }),
+  // 接続の無効化 / 再有効化（C9-D）。有効なワークフローが使っている接続の無効化は
+  // 409(E1005, details.workflows) で断られる（先にワークフローを停止する）。
+  // 再有効化の着地点は型で違う: postgres は untested に戻る（疎通テストを通すまで
+  // ワークフローに使えない）。webhook / s3 / フォルダ監視系は active。応答の status を見る
+  patchConnectionStatus: (connectionId: string, status: "active" | "disabled") =>
+    request<ConnectionDto>(`/connections/${connectionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
+  // 接続の削除。どのワークフロー版（定義・実行のスナップショット）からも参照されて
+  // いない接続だけ消せる。参照があれば 409(E1005, details.reason="referenced")。
+  // Webhook は gateway が作った署名鍵も保管先から消す（secret_deleted）
+  deleteConnection: (connectionId: string) =>
+    request<ConnectionDeleted>(`/connections/${connectionId}`, { method: "DELETE" }),
   listRules: (status?: string) =>
     request<{ items: RuleDto[] }>(`/rules${status ? `?status=${status}` : ""}`),
   patchRule: (ruleId: string, status: string) =>
@@ -286,9 +319,13 @@ export const api = {
     }
   },
 
-  chatConfirm: (action: string, params: Record<string, unknown>) =>
+  // 承認カードの実行。Idempotency-Key は extract と同じ扱い（gateway が同キーを
+  // キャッシュ応答する）。カードごとに 1 つ鍵を作って再送でも使い回すと、連打や
+  // ネットワーク断後の再試行で rerun_extract が二重に Run を発行しない。
+  chatConfirm: (action: string, params: Record<string, unknown>, opts?: { idempotencyKey?: string }) =>
     request<ChatConfirmResult>(`/chat/confirm`, {
       method: "POST",
+      headers: opts?.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : undefined,
       body: JSON.stringify({ action, params }),
     }),
 
@@ -317,8 +354,24 @@ export const api = {
     request<WorkflowDto>(`/workflows/${id}/activate`, { method: "POST" }),
   pauseWorkflow: (id: string) =>
     request<WorkflowDto>(`/workflows/${id}/pause`, { method: "POST" }),
+  // 削除（C9-D）。draft/paused で実行履歴が無いものだけ。active は 409(reason=active)、
+  // 履歴があれば 409(reason=has_runs) — その場合は停止のまま残す
+  deleteWorkflow: (id: string) =>
+    request<{ workflow_id: string; deleted: boolean }>(`/workflows/${id}`, {
+      method: "DELETE",
+    }),
+  // 実行履歴（新しい順、既定 50 件）。running / waiting_hitl があるあいだ UI が 5 秒ごとに引く
   listWorkflowRuns: (id: string) =>
     request<{ items: WorkflowRunItemDto[] }>(`/workflows/${id}/runs`),
+  // 1 run の詳細（node_runs 付き、viewer 可）
+  getWorkflowRun: (runId: string) => request<WorkflowRunDto>(`/workflow-runs/${runId}`),
+  // failed の run を失敗セグメントから再実行する（admin）。完了済みノードは走り直さない
+  //（§6.5 の再実行境界）。failed 以外は 409(E1005)。呼ぶ前に確認を取ること
+  retryWorkflowRun: (runId: string) =>
+    request<{ workflow_run_id: string; workflow_version: number }>(
+      `/workflow-runs/${runId}/retry`,
+      { method: "POST" },
+    ),
 
   uploadDocument: (file: File, docType?: string) => {
     const fd = new FormData();

@@ -56,10 +56,20 @@ class SecretStore(Protocol):
 
     def get(self, ref: str) -> str: ...
 
+    def delete(self, ref: str) -> None:
+        """参照の秘密を消す（C9-D）。既に無ければ何もしない（冪等）。
+
+        gateway が自分で作った秘密（webhook の署名鍵）を、接続の削除と一緒に片付ける
+        ために使う。利用者が登録した秘密（postgres の secret_ref）には使わない——
+        参照が消えるだけで実体は利用者の管理下に残る。
+        """
+        ...
+
 
 class FakeSecretStore:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
+        self.deleted: list[str] = []
 
     def create(self, name: str, value: str) -> str:
         ref = f"arn:fake:{name}"
@@ -68,3 +78,7 @@ class FakeSecretStore:
 
     def get(self, ref: str) -> str:
         return self.values[ref]
+
+    def delete(self, ref: str) -> None:
+        self.values.pop(ref, None)
+        self.deleted.append(ref)

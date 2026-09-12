@@ -11,6 +11,7 @@
 // 再構築すると全ノードが毎フレーム再描画されカクつくため、この分離が必須。
 import {
   createContext,
+  Suspense,
   use,
   useCallback,
   useContext,
@@ -20,6 +21,7 @@ import {
   useState,
 } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Background,
@@ -57,6 +59,7 @@ import type {
 
 import { CATEGORY, NodeIcon, TYPE_LABEL } from "../node-icons";
 import { fieldLabel, injectPickers, jaTranslateString, localizeSchema, pruneEmpty } from "../field-labels";
+import { RunsPanel } from "./runs-panel";
 
 // 複数行で書くフィールドは textarea にする（1行 input だと窮屈で読みにくい）
 const UI_SCHEMA_BY_TYPE: Record<string, UiSchema> = {
@@ -174,6 +177,13 @@ function WorkflowEditor({ id }: { id: string }) {
   const qc = useQueryClient();
   const push = useToasts((s) => s.push);
   const { screenToFlowPosition } = useReactFlow();
+  const router = useRouter();
+  const params = useSearchParams();
+  // 「編集」/「実行」タブ。URL（?tab=runs）で持つので、実行開始のトーストや
+  // ブックマークから直接「実行」に来られる。エディタの state はタブを跨いで保つ
+  const tab: "edit" | "runs" = params.get("tab") === "runs" ? "runs" : "edit";
+  const setTab = (next: "edit" | "runs") =>
+    router.replace(next === "runs" ? `/workflows/${id}?tab=runs` : `/workflows/${id}`);
 
   const { data: wf, error } = useQuery({
     queryKey: ["workflow", id],
@@ -615,6 +625,25 @@ function WorkflowEditor({ id }: { id: string }) {
         {wf && <StatusChip status={wf.status} />}
         {wf && <span className="sub">v{wf.version}</span>}
         {dirty && <span className="sub" style={{ color: "var(--warn, #d98a1f)" }}>未保存</span>}
+        <div className="tab2 wf-tabs" role="tablist">
+          <button
+            className={tab === "edit" ? "on" : ""}
+            onClick={() => setTab("edit")}
+            role="tab"
+            aria-selected={tab === "edit"}
+          >
+            編集
+          </button>
+          <button
+            className={tab === "runs" ? "on" : ""}
+            onClick={() => setTab("runs")}
+            role="tab"
+            aria-selected={tab === "runs"}
+            title="実行履歴・失敗・再実行"
+          >
+            実行
+          </button>
+        </div>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <button
             className="btn"
@@ -657,254 +686,267 @@ function WorkflowEditor({ id }: { id: string }) {
         </div>
       </div>
 
-      <div className="wf-editor">
-        {/* パレット */}
-        <div className="wf-palette">
-          <div className="wf-pane-title">ノード（カタログ）</div>
-          <div className="wf-palette-hint">クリック、またはキャンバスへドラッグで追加</div>
-          {Object.entries(CATEGORY).map(([cat, meta]) => (
-            <div key={cat}>
-              <div className="wf-palette-cat" style={{ color: meta.color }}>
-                {meta.label}
+      {tab === "runs" ? (
+        <RunsPanel workflowId={id} nodeLabelById={nodeLabelById} />
+      ) : (
+        <div className="wf-editor">
+          {/* パレット */}
+          <div className="wf-palette">
+            <div className="wf-pane-title">ノード（カタログ）</div>
+            <div className="wf-palette-hint">クリック、またはキャンバスへドラッグで追加</div>
+            {Object.entries(CATEGORY).map(([cat, meta]) => (
+              <div key={cat}>
+                <div className="wf-palette-cat" style={{ color: meta.color }}>
+                  {meta.label}
+                </div>
+                {Object.keys(catalog?.types ?? {})
+                  .filter((t) => t.startsWith(cat + "."))
+                  .map((t) => (
+                    <button
+                      key={t}
+                      className="wf-palette-item"
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData(DND_MIME, t);
+                        e.dataTransfer.effectAllowed = "move";
+                      }}
+                      onClick={() => addNode(t)}
+                    >
+                      <span className="wf-palette-ic" style={{ background: meta.color }}>
+                        <NodeIcon type={t} size={13} />
+                      </span>
+                      <span className="wf-palette-name">{TYPE_LABEL[t] ?? t}</span>
+                      {!implemented.has(t) && <span className="wfnode-todo">未実装</span>}
+                    </button>
+                  ))}
               </div>
-              {Object.keys(catalog?.types ?? {})
-                .filter((t) => t.startsWith(cat + "."))
-                .map((t) => (
-                  <button
-                    key={t}
-                    className="wf-palette-item"
-                    draggable
-                    onDragStart={(e) => {
-                      e.dataTransfer.setData(DND_MIME, t);
-                      e.dataTransfer.effectAllowed = "move";
-                    }}
-                    onClick={() => addNode(t)}
-                  >
-                    <span className="wf-palette-ic" style={{ background: meta.color }}>
-                      <NodeIcon type={t} size={13} />
-                    </span>
-                    <span className="wf-palette-name">{TYPE_LABEL[t] ?? t}</span>
-                    {!implemented.has(t) && <span className="wfnode-todo">未実装</span>}
-                  </button>
-                ))}
-            </div>
-          ))}
-          <button
-            className="btn danger"
-            style={{ marginTop: 12 }}
-            onClick={removeSelected}
-            disabled={!rfNodes.some((n) => n.selected)}
-          >
-            選択ノードを削除
-          </button>
-        </div>
-
-        {/* キャンバス */}
-        <div
-          className="wf-canvas"
-          onDragOver={(e) => {
-            e.preventDefault();
-            // 外来ドラッグ（OS のファイル等）にはドロップ不可カーソルを示す
-            if (!e.dataTransfer.types.includes(DND_MIME)) e.dataTransfer.dropEffect = "none";
-          }}
-          onDrop={onDrop}
-        >
-          <EditorMeta.Provider value={editorMeta}>
-            <ReactFlow
-              nodes={rfNodes}
-              edges={rfEdges}
-              nodeTypes={NODE_TYPES}
-              onNodesChange={handleNodesChange}
-              onNodesDelete={onNodesDelete}
-              onEdgesChange={onEdgesChange}
-              onEdgesDelete={onEdgesDelete}
-              onConnect={onConnect}
-              deleteKeyCode={["Delete", "Backspace"]}
-              connectionRadius={38}
-              fitView
-              fitViewOptions={{ padding: 0.25, maxZoom: 1.2 }}
-              proOptions={{ hideAttribution: true }}
-            >
-              <Background gap={16} />
-              <Controls showInteractive={false} />
-              <MiniMap
-                className="wf-minimap"
-                pannable
-                zoomable
-                nodeColor={(n) =>
-                  CATEGORY[(n as WfFlowNode).data.wf.type.split(".")[0]]?.color ?? "#8888"
-                }
-              />
-            </ReactFlow>
-          </EditorMeta.Provider>
-        </div>
-
-        {/* 右パネル: config フォーム + lint + dry-run */}
-        <div className="wf-side">
-          {selected && selectedSchema ? (
-            <div className="wf-config">
-              <div className="wf-pane-title">
-                設定：{TYPE_LABEL[selected.type] ?? selected.type}
-                <span className="sub" style={{ marginLeft: 6 }}>{selected.id}</span>
-              </div>
-              <Form
-                key={selected.id}
-                schema={selectedSchema}
-                uiSchema={selectedUiSchema}
-                translateString={jaTranslateString}
-                validator={validator}
-                formData={selected.config}
-                liveValidate={false}
-                showErrorList={false}
-                onChange={({ formData }, fieldId) => {
-                  const next = (formData ?? {}) as Record<string, unknown>;
-                  if (deepEqual(next, selected.config)) return;
-                  const apply = () =>
-                    setRfNodes((ns) =>
-                      ns.map((n) =>
-                        n.id === selected.id
-                          ? { ...n, data: { wf: { ...n.data.wf, config: next } } }
-                          : n,
-                      ),
-                    );
-                  if (fieldId === undefined) {
-                    // fieldId 無しはユーザー操作ではなく rjsf の default 補完で、
-                    // Form の constructor（= render 中）から同期で呼ばれる。そのまま
-                    // setState すると React の「render 中に他コンポーネントを更新」
-                    // エラーになるためマイクロタスクへ逃がす。補完はバックエンド
-                    // 既定値と同義なので「未保存」にもしない。
-                    queueMicrotask(apply);
-                  } else {
-                    apply();
-                    setDirty(true);
-                  }
-                }}
-              >
-                {/* 送信ボタン不要（保存はツールバー） */}
-                <span />
-              </Form>
-            </div>
-          ) : (
-            <div className="wf-config empty">
-              キャンバスのノードを選ぶと、ここに設定が表示されます。
-            </div>
-          )}
-
-          <div className="wf-findings">
-            <div className="wf-pane-title">点検結果</div>
-            {findings.length === 0 && (
-              <div className="sub">まだ点検していません（「設定を点検」を押してください）。</div>
-            )}
-            {findings.map((f, i) => (
-              <button
-                key={i}
-                className={`wf-finding ${f.severity}`}
-                onClick={() => f.node_id && selectNode(f.node_id)}
-                title={f.node_id ? "クリックで該当ノードを選択" : undefined}
-              >
-                <span className={`wf-sev ${f.severity}`}>
-                  {f.severity === "error" ? "エラー" : "警告"}
-                </span>
-                {f.message}
-                {f.node_id && <span className="wf-nodetag">{nodeLabelById.get(f.node_id) ?? f.node_id}</span>}
-              </button>
             ))}
+            <button
+              className="btn danger"
+              style={{ marginTop: 12 }}
+              onClick={removeSelected}
+              disabled={!rfNodes.some((n) => n.selected)}
+            >
+              選択ノードを削除
+            </button>
           </div>
 
-          {dryRun && (
-            <div className="wf-findings">
-              <div className="wf-pane-title">出力プレビュー</div>
-              <div className="sub" style={{ marginBottom: 6 }}>
-                実行はせず、DB 格納・Webhook が書き込む・送信する内容を確認できます
-                （通知・ファイル出力はプレビュー対象外）。
+          {/* キャンバス */}
+          <div
+            className="wf-canvas"
+            onDragOver={(e) => {
+              e.preventDefault();
+              // 外来ドラッグ（OS のファイル等）にはドロップ不可カーソルを示す
+              if (!e.dataTransfer.types.includes(DND_MIME)) e.dataTransfer.dropEffect = "none";
+            }}
+            onDrop={onDrop}
+          >
+            <EditorMeta.Provider value={editorMeta}>
+              <ReactFlow
+                nodes={rfNodes}
+                edges={rfEdges}
+                nodeTypes={NODE_TYPES}
+                onNodesChange={handleNodesChange}
+                onNodesDelete={onNodesDelete}
+                onEdgesChange={onEdgesChange}
+                onEdgesDelete={onEdgesDelete}
+                onConnect={onConnect}
+                deleteKeyCode={["Delete", "Backspace"]}
+                connectionRadius={38}
+                fitView
+                fitViewOptions={{ padding: 0.25, maxZoom: 1.2 }}
+                proOptions={{ hideAttribution: true }}
+              >
+                <Background gap={16} />
+                <Controls showInteractive={false} />
+                <MiniMap
+                  className="wf-minimap"
+                  pannable
+                  zoomable
+                  nodeColor={(n) =>
+                    CATEGORY[(n as WfFlowNode).data.wf.type.split(".")[0]]?.color ?? "#8888"
+                  }
+                />
+              </ReactFlow>
+            </EditorMeta.Provider>
+          </div>
+
+          {/* 右パネル: config フォーム + lint + dry-run */}
+          <div className="wf-side">
+            {selected && selectedSchema ? (
+              <div className="wf-config">
+                <div className="wf-pane-title">
+                  設定：{TYPE_LABEL[selected.type] ?? selected.type}
+                  <span className="sub" style={{ marginLeft: 6 }}>{selected.id}</span>
+                </div>
+                <Form
+                  key={selected.id}
+                  schema={selectedSchema}
+                  uiSchema={selectedUiSchema}
+                  translateString={jaTranslateString}
+                  validator={validator}
+                  formData={selected.config}
+                  liveValidate={false}
+                  showErrorList={false}
+                  onChange={({ formData }, fieldId) => {
+                    const next = (formData ?? {}) as Record<string, unknown>;
+                    if (deepEqual(next, selected.config)) return;
+                    const apply = () =>
+                      setRfNodes((ns) =>
+                        ns.map((n) =>
+                          n.id === selected.id
+                            ? { ...n, data: { wf: { ...n.data.wf, config: next } } }
+                            : n,
+                        ),
+                      );
+                    if (fieldId === undefined) {
+                      // fieldId 無しはユーザー操作ではなく rjsf の default 補完で、
+                      // Form の constructor（= render 中）から同期で呼ばれる。そのまま
+                      // setState すると React の「render 中に他コンポーネントを更新」
+                      // エラーになるためマイクロタスクへ逃がす。補完はバックエンド
+                      // 既定値と同義なので「未保存」にもしない。
+                      queueMicrotask(apply);
+                    } else {
+                      apply();
+                      setDirty(true);
+                    }
+                  }}
+                >
+                  {/* 送信ボタン不要（保存はツールバー） */}
+                  <span />
+                </Form>
               </div>
-              {dryRun.sinks.length === 0 && (
-                <div className="sub">
-                  {rfNodes.some((n) =>
-                    ["sink.notify", "sink.file"].includes(n.data.wf.type),
-                  )
-                    ? "通知・ファイル出力ノードは、このプレビューの対象外です（DB 格納・Webhook のみ表示します）。"
-                    : "プレビュー対象の出力ノード（DB 格納・Webhook）がありません。"}
-                </div>
+            ) : (
+              <div className="wf-config empty">
+                キャンバスのノードを選ぶと、ここに設定が表示されます。
+              </div>
+            )}
+
+            <div className="wf-findings">
+              <div className="wf-pane-title">点検結果</div>
+              {findings.length === 0 && (
+                <div className="sub">まだ点検していません（「設定を点検」を押してください）。</div>
               )}
-              {dryRun.sinks.map((s2) => (
-                <div key={s2.node_id} className={`wf-preview ${s2.ok ? "ok" : "ng"}`}>
-                  <div className="wf-preview-head">
-                    <span className="wf-preview-node">
-                      {TYPE_LABEL[s2.node_type] ?? s2.node_type}
-                      <span className="wf-nodetag">{s2.node_id}</span>
-                    </span>
-                    <span className={`wf-sev ${s2.ok ? "ok" : "error"}`}>
-                      {s2.ok ? "OK" : "エラー"}
-                    </span>
-                  </div>
-                  {!s2.ok && s2.error && <div className="wf-preview-err">{s2.error}</div>}
-                  {(() => {
-                    // DB 格納は SQL ではなくテーブル形式で「どの列に何が入るか」を見せる
-                    const t = s2.ok && s2.node_type === "sink.db_write" ? dbWriteTable(s2.node_id) : null;
-                    if (!t) return null;
-                    return (
-                      <>
-                        <div className="wf-preview-target">
-                          書き込み先：<b>{t.target ?? "（未設定）"}</b>
-                          <span className="wf-nodetag">{t.method}</span>
-                        </div>
-                        <table className="wf-dbtable">
-                          <thead>
-                            <tr>
-                              <th>列（テーブルの項目）</th>
-                              <th>入る値</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {t.rows.map((r) => (
-                              <tr key={r.column}>
-                                <td className="wf-dbcol">{r.column}</td>
-                                <td>
-                                  {r.source}
-                                  {r.note && <span className="wf-dbnote">{r.note}</span>}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                        {s2.sql && (
-                          <details className="wf-sqldetails">
-                            <summary>SQL を表示（上級者向け）</summary>
-                            <pre className="wf-sql">{s2.sql}</pre>
-                          </details>
-                        )}
-                      </>
-                    );
-                  })()}
-                  {/* db_write 以外（webhook 等）は従来どおり SQL / ペイロードを表示 */}
-                  {s2.sql && s2.node_type !== "sink.db_write" && (
-                    <>
-                      <div className="wf-preview-label">書き込まれる SQL</div>
-                      <pre className="wf-sql">{s2.sql}</pre>
-                    </>
-                  )}
-                  {s2.payload && (
-                    <>
-                      <div className="wf-preview-label">送信・出力される内容</div>
-                      <pre className="wf-sql">{JSON.stringify(s2.payload, null, 2)}</pre>
-                    </>
-                  )}
-                </div>
+              {findings.map((f, i) => (
+                <button
+                  key={i}
+                  className={`wf-finding ${f.severity}`}
+                  onClick={() => f.node_id && selectNode(f.node_id)}
+                  title={f.node_id ? "クリックで該当ノードを選択" : undefined}
+                >
+                  <span className={`wf-sev ${f.severity}`}>
+                    {f.severity === "error" ? "エラー" : "警告"}
+                  </span>
+                  {f.message}
+                  {f.node_id && <span className="wf-nodetag">{nodeLabelById.get(f.node_id) ?? f.node_id}</span>}
+                </button>
               ))}
             </div>
-          )}
+
+            {dryRun && (
+              <div className="wf-findings">
+                <div className="wf-pane-title">出力プレビュー</div>
+                <div className="sub" style={{ marginBottom: 6 }}>
+                  実行はせず、DB 格納・Webhook が書き込む・送信する内容を確認できます
+                  （通知・ファイル出力はプレビュー対象外）。
+                </div>
+                {dryRun.sinks.length === 0 && (
+                  <div className="sub">
+                    {rfNodes.some((n) =>
+                      ["sink.notify", "sink.file"].includes(n.data.wf.type),
+                    )
+                      ? "通知・ファイル出力ノードは、このプレビューの対象外です（DB 格納・Webhook のみ表示します）。"
+                      : "プレビュー対象の出力ノード（DB 格納・Webhook）がありません。"}
+                  </div>
+                )}
+                {dryRun.sinks.map((s2) => (
+                  <div key={s2.node_id} className={`wf-preview ${s2.ok ? "ok" : "ng"}`}>
+                    <div className="wf-preview-head">
+                      <span className="wf-preview-node">
+                        {TYPE_LABEL[s2.node_type] ?? s2.node_type}
+                        <span className="wf-nodetag">{s2.node_id}</span>
+                      </span>
+                      <span className={`wf-sev ${s2.ok ? "ok" : "error"}`}>
+                        {s2.ok ? "OK" : "エラー"}
+                      </span>
+                    </div>
+                    {!s2.ok && s2.error && <div className="wf-preview-err">{s2.error}</div>}
+                    {(() => {
+                      // DB 格納は SQL ではなくテーブル形式で「どの列に何が入るか」を見せる
+                      const t = s2.ok && s2.node_type === "sink.db_write" ? dbWriteTable(s2.node_id) : null;
+                      if (!t) return null;
+                      return (
+                        <>
+                          <div className="wf-preview-target">
+                            書き込み先：<b>{t.target ?? "（未設定）"}</b>
+                            <span className="wf-nodetag">{t.method}</span>
+                          </div>
+                          <table className="wf-dbtable">
+                            <thead>
+                              <tr>
+                                <th>列（テーブルの項目）</th>
+                                <th>入る値</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {t.rows.map((r) => (
+                                <tr key={r.column}>
+                                  <td className="wf-dbcol">{r.column}</td>
+                                  <td>
+                                    {r.source}
+                                    {r.note && <span className="wf-dbnote">{r.note}</span>}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          {s2.sql && (
+                            <details className="wf-sqldetails">
+                              <summary>SQL を表示（上級者向け）</summary>
+                              <pre className="wf-sql">{s2.sql}</pre>
+                            </details>
+                          )}
+                        </>
+                      );
+                    })()}
+                    {/* db_write 以外（webhook 等）は従来どおり SQL / ペイロードを表示 */}
+                    {s2.sql && s2.node_type !== "sink.db_write" && (
+                      <>
+                        <div className="wf-preview-label">書き込まれる SQL</div>
+                        <pre className="wf-sql">{s2.sql}</pre>
+                      </>
+                    )}
+                    {s2.payload && (
+                      <>
+                        <div className="wf-preview-label">送信・出力される内容</div>
+                        <pre className="wf-sql">{JSON.stringify(s2.payload, null, 2)}</pre>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </AppShell>
   );
 }
 
+// useSearchParams は Suspense 境界内で使う（Next 15）。
 export default function WorkflowEditorPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   return (
     <ReactFlowProvider>
-      <WorkflowEditor id={id} />
+      <Suspense
+        fallback={
+          <AppShell active="workflows">
+            <div className="sub" style={{ padding: 24 }}>読み込み中…</div>
+          </AppShell>
+        }
+      >
+        <WorkflowEditor id={id} />
+      </Suspense>
     </ReactFlowProvider>
   );
 }

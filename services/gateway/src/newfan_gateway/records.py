@@ -115,6 +115,11 @@ class SchemaRecord(BaseModel):
     exclude_regions: list[RegionRect] = Field(default_factory=list)
     # テンプレート化時点の帳票ページ数。位置ガードの page 判定に使う（§5.5）。
     source_page_count: Optional[int] = None
+    # アーカイブ済み（C9-D）。doc_type 単位の状態で、**全版の is_active が false** の
+    # ときだけ true（seed_schemas.py は旧版だけを false にするため「最新版の is_active」
+    # では判定できない）。行は消さない——extraction_runs.schema_id の FK を保ち、
+    # 過去の抽出結果から定義を辿れるようにしておく。
+    archived: bool = False
     updated_at: datetime = Field(default_factory=_now)
 
 
