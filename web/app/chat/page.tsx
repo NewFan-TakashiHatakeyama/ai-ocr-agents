@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Suspense, useRef, useState } from "react";
 
 import { AppShell } from "@/components/AppShell";
 import { ApiError, api } from "@/lib/api";
+import { type Confirm, deniedMessage, describeConfirm, resultLink, splitConfirm } from "@/lib/chatConfirm";
 import { CHAT_DOC_TYPE_PARAM, schemaAddRequest } from "@/lib/schemaChat";
 import { useToasts } from "@/lib/toast";
 import { UPLOAD_ACCEPT, UPLOAD_FORMATS_HINT, UPLOAD_FORMATS_LABEL } from "@/lib/uploads";
@@ -17,11 +18,11 @@ interface ToolCall {
   label?: string;
   steps?: string[];
 }
-interface Confirm {
-  action: string;
-  prompt: string;
-  doc_type?: string;
-  field?: Record<string, unknown>;
+// 承認カードの実行結果（POST /chat/confirm の ok / message + 開ける画面）
+interface ConfirmResult {
+  ok: boolean;
+  message: string;
+  link: { href: string; label: string } | null;
 }
 interface Msg {
   id: number;
@@ -29,10 +30,17 @@ interface Msg {
   text: string;
   tools: ToolCall[];
   confirm?: Confirm;
+  result?: ConfirmResult;
   streaming?: boolean;
 }
 
 const SUGGESTIONS = ["要確認の請求書を見せて", "スキーマに「支払方法」を追加して", "先月のSTP率は？"];
+
+// update_schema の承認カードが対象にするスキーマ。confirm_request は平坦なオブジェクトで
+// 追加のキーは unknown なので、文字列のときだけ名前として扱う（空文字は「不明」）。
+function targetDocType(c: Confirm): string | undefined {
+  return typeof c.doc_type === "string" && c.doc_type ? c.doc_type : undefined;
+}
 
 function ChatInner() {
   // スキーマ管理の「チャットで追加を依頼」から来たときは ?doc_type=<開いていたスキーマ>。
@@ -44,7 +52,6 @@ function ChatInner() {
   const [input, setInput] = useState(() => (fromSchema ? schemaAddRequest(fromSchema) : ""));
   const [busy, setBusy] = useState(false);
   const push = useToasts((s) => s.push);
-  const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
   const idRef = useRef(0);
 
@@ -79,19 +86,28 @@ function ChatInner() {
   }
 
   async function approve(id: number, c: Confirm) {
+    // confirm_request の残り（action / prompt 以外）をそのまま返す。update_schema だけ
+    // でなく rerun_extract（document_id / schema_id）・manage_rules（rule_id / status）も
+    // 同じ経路（サーバ側の dto.Chat*Params が名前を検証する）。
+    const { action, params } = splitConfirm(c);
     try {
-      const r = await api.chatConfirm(c.action, { doc_type: c.doc_type, field: c.field });
+      const r = await api.chatConfirm(action, params);
       push({ kind: r.ok ? "ok" : "warn", message: r.message });
-      patch(id, (m) => ({ ...m, confirm: undefined }));
-      if (r.ok) router.push("/schemas");
+      // 結果はカードの位置に残す（承認した内容と結果を会話の中で読めるように）
+      patch(id, (m) => ({
+        ...m,
+        confirm: undefined,
+        result: { ok: r.ok, message: r.message, link: r.ok ? resultLink(action, r.detail ?? {}) : null },
+      }));
     } catch (e) {
-      push({
-        kind: "warn",
-        message:
-          e instanceof ApiError && e.status === 403
-            ? "この操作には管理者権限が必要です。"
-            : "実行に失敗しました。時間をおいて再試行してください。",
-      });
+      if (e instanceof ApiError && e.status === 403) {
+        const message = deniedMessage(action);
+        push({ kind: "warn", message });
+        patch(id, (m) => ({ ...m, confirm: undefined, result: { ok: false, message, link: null } }));
+        return;
+      }
+      // 一時的な失敗はカードを残して再試行できるようにする
+      push({ kind: "warn", message: "実行に失敗しました。時間をおいて再試行してください。" });
     }
   }
 
@@ -170,20 +186,20 @@ function ChatInner() {
                     <div className="confirm-card">
                       <div className="cc-head">
                         <b>エージェントの提案：</b>
-                        <span style={{ color: "var(--ink2)", flex: 1 }}>{msg.confirm.prompt}</span>
+                        <span style={{ color: "var(--ink2)", flex: 1 }}>{msg.confirm.prompt ?? msg.confirm.action}</span>
                         {/* どのスキーマの新版になるかを承認前に見せる。prompt はエージェントが
                             書く文で対象を含むとは限らず、承認後にサーバは doc_type 無しを
                             invoice として扱う。対象が読めない提案は承認させない */}
                         {msg.confirm.action === "update_schema" && (
                           <span className="sub" title="承認するとこのスキーマの新しい版が作られます">
-                            対象スキーマ: <b>{msg.confirm.doc_type ?? "（不明）"}</b>
+                            対象スキーマ: <b>{targetDocType(msg.confirm) ?? "（不明）"}</b>
                           </span>
                         )}
                         <button
                           className="btn sm primary"
-                          disabled={msg.confirm.action === "update_schema" && !msg.confirm.doc_type}
+                          disabled={msg.confirm.action === "update_schema" && !targetDocType(msg.confirm)}
                           title={
-                            msg.confirm.action === "update_schema" && !msg.confirm.doc_type
+                            msg.confirm.action === "update_schema" && !targetDocType(msg.confirm)
                               ? "対象のスキーマが特定できません。「<スキーマ名> のスキーマに…」のように言い直してください"
                               : undefined
                           }
@@ -195,6 +211,25 @@ function ChatInner() {
                           今回はしない
                         </button>
                       </div>
+                      {/* 実際にサーバへ送る内容（LLM の確認文とは別に、承認の根拠として見せる） */}
+                      {describeConfirm(msg.confirm).length > 0 && (
+                        <ul className="cc-body">
+                          {describeConfirm(msg.confirm).map((line) => (
+                            <li key={line}>{line}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                  {msg.result && (
+                    <div className="tool-card" role="status">
+                      <span>{msg.result.ok ? "✅" : "⚠️"}</span>
+                      <span style={{ flex: 1 }}>{msg.result.message}</span>
+                      {msg.result.link && (
+                        <Link className="btn sm primary" href={msg.result.link.href}>
+                          {msg.result.link.label}
+                        </Link>
+                      )}
                     </div>
                   )}
                 </>
