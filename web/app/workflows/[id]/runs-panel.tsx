@@ -7,7 +7,11 @@
 // - 一覧: 状態チップ / 開始・終了・所要 / トリガー（発火ノード）/ 失敗ノードとエラー / 帳票へのリンク
 // - running / waiting_hitl がある間は 5 秒ごとに自動更新（終端だけなら止める）
 // - 行クリックで詳細ドロワー（node_runs を順に、状態・所要時間・エラー）
-// - 「再実行」は failed の run だけ（確認 → POST retry）。他は disabled にして理由を title に
+// - 「再実行」は failed の run だけ（確認 → POST retry）。他は disabled にして理由を title に。
+//   帳票の削除で failed に終端化された run（document_deleted）も塞ぐ: retry すると帳票の
+//   無い waiting_hitl が蘇り、確定する画面も止める API も無い（gateway も 409 で弾く）
+// - run 単位のエラーは failed のときだけ出す（一覧・ドロワーとも）。runner は成功・待機の
+//   射影で error を消さないので、再実行して成功した run にも前回の失敗文が残っている
 //
 // 失敗ノードは一覧の DTO に無い（node_runs は詳細だけ）。failed の run に限って詳細を引き、
 // 一覧に「失敗箇所」として出す。failed は終端なので finished_at をキーに含めれば再取得は
@@ -28,9 +32,11 @@ import {
   formatDateTime,
   formatDuration,
   hasRunMovedOn,
+  isDocumentDeleted,
   isRunActive,
   nodeStatusView,
   retryBlockedReason,
+  runErrorMessage,
   runStatusView,
   triggerLabel,
   waitingLabel,
@@ -84,7 +90,7 @@ function RetryButton({
   onRetry: (run: WorkflowRunItemDto) => void;
   small?: boolean;
 }) {
-  const reason = retryBlockedReason(run.status);
+  const reason = retryBlockedReason(run);
   const blocked = reason ?? (watching ? "再実行を受け付けました。worker が拾うのを待っています" : null);
   // disabled なボタンは title が出ないブラウザがあるので、包む span に理由を持たせる
   return (
@@ -142,7 +148,8 @@ function RunDrawer({
   const now = Date.now();
   const waitingNodeId = detail.data?.waiting?.node_id ?? null;
   const waiting = waitingLabel(detail.data?.waiting);
-  const runErr = errorMessage(run?.error);
+  // failed のときだけ（一覧と同じ）。成功・待機に戻った run に残る前回の error は見せない
+  const runErr = runErrorMessage(run);
   const nodeRuns: WorkflowNodeRunDto[] = detail.data?.node_runs ?? [];
 
   return (
@@ -212,6 +219,10 @@ function RunDrawer({
                 <Link href={`/documents/${run.document_id}`} className="wfrun-link">
                   {run.document_id}
                 </Link>
+              ) : isDocumentDeleted(run) ? (
+                <span className="sub" title="帳票が削除されたため、この実行は切り離されました">
+                  削除済み
+                </span>
               ) : (
                 "—"
               )}
@@ -355,7 +366,7 @@ export function RunsPanel({
   });
 
   const confirmRetry = (run: WorkflowRunItemDto) => {
-    if (retryBlockedReason(run.status) || retryWatch[run.id]) return;
+    if (retryBlockedReason(run) || retryWatch[run.id]) return;
     const ok = window.confirm(
       `この実行（${run.id}）を失敗した箇所から再実行します。\n` +
         "完了済みのノードは走り直しません。\n\n" +
@@ -430,7 +441,7 @@ export function RunsPanel({
               const failedNode = r.status === "failed" ? failedNodeById.get(r.id) : undefined;
               const failedNodeRun =
                 failedNode && failedNode !== "loading" ? failedNode : null;
-              const err = errorMessage(failedNodeRun?.error) ?? errorMessage(r.error);
+              const err = errorMessage(failedNodeRun?.error) ?? runErrorMessage(r);
               return (
                 <tr
                   key={r.id}
@@ -492,6 +503,10 @@ export function RunsPanel({
                       >
                         {r.document_id}
                       </Link>
+                    ) : isDocumentDeleted(r) ? (
+                      <span className="sub" title="帳票が削除されたため、この実行は切り離されました">
+                        削除済み
+                      </span>
                     ) : (
                       <span className="sub">—</span>
                     )}

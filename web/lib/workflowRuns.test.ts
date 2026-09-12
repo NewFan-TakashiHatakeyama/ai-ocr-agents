@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { WorkflowNodeRunDto } from "@/lib/types";
+import type { WorkflowNodeRunDto, WorkflowRunItemDto } from "@/lib/types";
 
 import {
   anyRunActive,
@@ -13,9 +13,12 @@ import {
   formatDateTime,
   formatDuration,
   hasRunMovedOn,
+  isDocumentDeleted,
   isRunActive,
   nodeStatusView,
+  RETRY_BLOCKED_DOCUMENT_DELETED,
   retryBlockedReason,
+  runErrorMessage,
   runStatusView,
   triggerLabel,
   waitingLabel,
@@ -23,6 +26,10 @@ import {
 
 function node(p: Partial<WorkflowNodeRunDto> & { node_id: string }): WorkflowNodeRunDto {
   return { node_type: "process.extract", status: "succeeded", attempt: 1, ...p };
+}
+
+function run(p: Partial<WorkflowRunItemDto> & { status: string }): WorkflowRunItemDto {
+  return { id: "wfrun_1", workflow_id: "wf_1", workflow_version: 1, document_id: "doc_1", ...p };
 }
 
 describe("runStatusView / nodeStatusView", () => {
@@ -145,6 +152,49 @@ describe("errorMessage", () => {
   });
 });
 
+describe("runErrorMessage", () => {
+  const stale = { message: "sink.webhook: 503" };
+
+  it("failed のときだけ run 単位のエラーを出す", () => {
+    expect(runErrorMessage(run({ status: "failed", error: stale }))).toBe("sink.webhook: 503");
+    expect(runErrorMessage(run({ status: "failed" }))).toBeNull();
+    expect(runErrorMessage(null)).toBeNull();
+    expect(runErrorMessage(undefined)).toBeNull();
+  });
+
+  it("再実行後に成功・待機・実行中になった run に残る前回の error は見せない", () => {
+    // runner は成功・待機の射影で error を消さない（COALESCE）ので、旧い失敗文が残る
+    expect(runErrorMessage(run({ status: "succeeded", error: stale }))).toBeNull();
+    expect(runErrorMessage(run({ status: "waiting_hitl", error: stale }))).toBeNull();
+    expect(runErrorMessage(run({ status: "running", error: stale }))).toBeNull();
+    expect(runErrorMessage(run({ status: "skipped", error: stale }))).toBeNull();
+  });
+});
+
+describe("isDocumentDeleted", () => {
+  const deletedErr = { code: "E1001", message: "document deleted" };
+
+  it("gateway の旗（document_deleted）で判別する", () => {
+    expect(isDocumentDeleted(run({ status: "failed", document_deleted: true, document_id: null }))).toBe(true);
+    expect(isDocumentDeleted(run({ status: "failed", document_deleted: false }))).toBe(false);
+    expect(isDocumentDeleted(null)).toBe(false);
+  });
+
+  it("旗の無い旧 gateway でも、帳票が無く削除時の error（E1001）が付いていれば削除済み扱い", () => {
+    expect(isDocumentDeleted(run({ status: "failed", document_id: null, error: deletedErr }))).toBe(true);
+    expect(isDocumentDeleted(run({ status: "failed", document_id: undefined, error: deletedErr }))).toBe(true);
+  });
+
+  it("帳票が無いだけでは削除済みにしない（schedule 発火の run は最初から帳票を持たない）", () => {
+    expect(isDocumentDeleted(run({ status: "failed", document_id: null }))).toBe(false);
+    expect(
+      isDocumentDeleted(run({ status: "failed", document_id: null, error: { message: "boom" } })),
+    ).toBe(false);
+    // 帳票が付いたままの E1001 は削除ではない
+    expect(isDocumentDeleted(run({ status: "failed", document_id: "doc_1", error: deletedErr }))).toBe(false);
+  });
+});
+
 describe("triggerLabel", () => {
   it("トリガー種別を日本語にし、未知は原文、無ければ「—」", () => {
     expect(triggerLabel("manual")).toBe("手動実行");
@@ -160,12 +210,41 @@ describe("triggerLabel", () => {
 
 describe("retryBlockedReason", () => {
   it("failed だけ再実行できる。他は理由を返す", () => {
-    expect(retryBlockedReason("failed")).toBeNull();
-    expect(retryBlockedReason("running")).toContain("実行中");
-    expect(retryBlockedReason("waiting_hitl")).toContain("人手確認待ち");
-    expect(retryBlockedReason("succeeded")).toContain("成功");
-    expect(retryBlockedReason("skipped")).toContain("スキップ");
-    expect(retryBlockedReason("unknown")).toContain("失敗した実行だけ");
+    expect(retryBlockedReason(run({ status: "failed" }))).toBeNull();
+    expect(retryBlockedReason(run({ status: "running" }))).toContain("実行中");
+    expect(retryBlockedReason(run({ status: "waiting_hitl" }))).toContain("人手確認待ち");
+    expect(retryBlockedReason(run({ status: "succeeded" }))).toContain("成功");
+    expect(retryBlockedReason(run({ status: "skipped" }))).toContain("スキップ");
+    expect(retryBlockedReason(run({ status: "unknown" }))).toContain("失敗した実行だけ");
+  });
+
+  it("帳票の削除で failed に終端化された run は再実行できない（waiting_hitl が蘇るのを防ぐ）", () => {
+    const deleted = run({
+      status: "failed",
+      document_id: null,
+      document_deleted: true,
+      error: { code: "E1001", message: "document deleted" },
+    });
+    expect(retryBlockedReason(deleted)).toBe(RETRY_BLOCKED_DOCUMENT_DELETED);
+    expect(retryBlockedReason(deleted)).toContain("帳票が削除された");
+    // 旧 gateway（旗なし）でも error から拾う
+    expect(
+      retryBlockedReason(
+        run({ status: "failed", document_id: null, error: { code: "E1001", message: "document deleted" } }),
+      ),
+    ).toBe(RETRY_BLOCKED_DOCUMENT_DELETED);
+  });
+
+  it("帳票を持たない schedule 発火の失敗は再実行できる", () => {
+    expect(
+      retryBlockedReason(run({ status: "failed", document_id: null, trigger_type: "schedule" })),
+    ).toBeNull();
+  });
+
+  it("成功した run の帳票が後から削除されても、理由は status のものを優先する", () => {
+    expect(
+      retryBlockedReason(run({ status: "succeeded", document_id: null, document_deleted: true })),
+    ).toContain("成功");
   });
 });
 

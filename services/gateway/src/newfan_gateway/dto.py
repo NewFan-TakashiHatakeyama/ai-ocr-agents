@@ -433,6 +433,10 @@ class WorkflowRunSummaryDto(BaseModel):
     # 実行履歴の一覧に要るこの 2 つだけを出す
     trigger_type: Optional[str] = None
     trigger_node_id: Optional[str] = None
+    # 帳票の削除で切り離された run（state.document_deleted）。document_id が NULL なだけでは
+    # 判別できない（schedule 発火の run は最初から帳票を持たない）ので、旗として出す。
+    # UI はこれで「再実行」を塞ぐ（gateway 側の retry も同じ旗で 409 にする）
+    document_deleted: bool = False
 
 
 class WorkflowRunDto(WorkflowRunSummaryDto):

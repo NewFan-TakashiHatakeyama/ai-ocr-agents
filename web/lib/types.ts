@@ -445,6 +445,12 @@ export interface WorkflowRunItemDto {
   trigger_type?: string | null;
   /** 発火したトリガーノードの id（複数トリガーの WF で経路を示す） */
   trigger_node_id?: string | null;
+  /**
+   * 帳票の削除で切り離された run（document_id は NULL、未終端なら failed に終端化済み）。
+   * document_id が無いだけでは判別できない（schedule 発火の run は最初から帳票を持たない）。
+   * 旧 gateway では無い
+   */
+  document_deleted?: boolean | null;
 }
 
 /** workflow_node_runs の 1 行。status: pending / running / succeeded / failed */

@@ -1315,6 +1315,11 @@ def put_schema(
 WORKFLOW_STREAM = "q.workflow"
 
 
+def _run_document_deleted(rec: WorkflowRunRecord) -> bool:
+    """帳票の削除で切り離された run か（db.delete_document が state に立てる旗）。"""
+    return bool((rec.state or {}).get("document_deleted"))
+
+
 def _run_summary(rec: WorkflowRunRecord) -> dto.WorkflowRunSummaryDto:
     trigger = rec.trigger or {}
     return dto.WorkflowRunSummaryDto(
@@ -1328,6 +1333,7 @@ def _run_summary(rec: WorkflowRunRecord) -> dto.WorkflowRunSummaryDto:
         finished_at=rec.finished_at,
         trigger_type=trigger.get("type"),
         trigger_node_id=trigger.get("node_id"),
+        document_deleted=_run_document_deleted(rec),
     )
 
 
@@ -1431,6 +1437,17 @@ def retry_workflow_run(
     if rec.status != "failed":
         raise ApiError(
             "E1005", "failed でない run は retry できません", details={"status": rec.status}
+        )
+    if _run_document_deleted(rec):
+        # 帳票の削除は waiting_hitl / running の run を failed に終端化して切り離す
+        # （db.delete_document）。それを retry すると checkpoint から interrupt が
+        # 再び立ち、帳票の無い run が waiting_hitl に蘇る（確定する画面が無く、
+        # 止める API も無いので永久に残る）。document_id の NULL だけでは判別しない:
+        # schedule 発火の run は最初から帳票を持たず、それは retry してよい
+        raise ApiError(
+            "E1005",
+            "帳票が削除された run は retry できません",
+            details={"status": rec.status, "document_deleted": True},
         )
     queue.enqueue(
         WORKFLOW_STREAM,

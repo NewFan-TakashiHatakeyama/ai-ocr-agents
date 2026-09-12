@@ -122,6 +122,21 @@ export function failedNodeOf(
   return nodeRuns?.find((n) => n.status === "failed") ?? null;
 }
 
+/**
+ * run 単位のエラー文。failed のときだけ。
+ *
+ * runner は成功・待機の射影で error を消さない（workflow_store の
+ * `error = COALESCE(:err, error)`）ので、再実行して成功した run にも前回の失敗文が
+ * 残っている。成功チップの下に赤いエラーを出すと「結局失敗したのか」が読めなくなるため、
+ * 一覧・ドロワーとも status が failed のときに限って見せる。
+ */
+export function runErrorMessage(
+  run: Pick<WorkflowRunItemDto, "status" | "error"> | null | undefined,
+): string | null {
+  if (!run || run.status !== "failed") return null;
+  return errorMessage(run.error);
+}
+
 /** 射影の error → 表示文。{message} が無い形でも捨てずに JSON で見せる */
 export function errorMessage(err: WorkflowRunError | string | null | undefined): string | null {
   if (err === null || err === undefined) return null;
@@ -154,13 +169,37 @@ export function triggerLabel(type: string | null | undefined): string {
 }
 
 /**
+ * 帳票の削除で切り離された run か。gateway の旗（document_deleted）を見る。
+ * 旗を出さない旧 gateway 向けに、削除時に書かれる error（code E1001「document deleted」）
+ * も拾う。document_id が無いだけでは判別しない（schedule 発火の run は最初から帳票が無い）。
+ */
+export function isDocumentDeleted(
+  run: Pick<WorkflowRunItemDto, "document_id" | "document_deleted" | "error"> | null | undefined,
+): boolean {
+  if (!run) return false;
+  if (run.document_deleted === true) return true;
+  return (
+    (run.document_id === null || run.document_id === undefined) &&
+    typeof run.error === "object" &&
+    run.error !== null &&
+    run.error.code === "E1001"
+  );
+}
+
+export const RETRY_BLOCKED_DOCUMENT_DELETED = "帳票が削除されたため再実行できません";
+
+/**
  * 再実行できない理由（title 用）。failed だけが再実行可能（gateway は他を 409 で弾く）。
+ * ただし帳票の削除で failed に終端化された run は除く: retry すると checkpoint の
+ * interrupt が再び立って、帳票の無い waiting_hitl が蘇る（確定する画面も止める API も無い）。
  * 可能なら null。
  */
-export function retryBlockedReason(status: string): string | null {
-  switch (status) {
+export function retryBlockedReason(
+  run: Pick<WorkflowRunItemDto, "status" | "document_id" | "document_deleted" | "error">,
+): string | null {
+  switch (run.status) {
     case "failed":
-      return null;
+      return isDocumentDeleted(run) ? RETRY_BLOCKED_DOCUMENT_DELETED : null;
     case "running":
       return "実行中のため再実行できません";
     case "waiting_hitl":
