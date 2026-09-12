@@ -146,6 +146,11 @@ services:
       # 出荷ゲートを通したので既定 on。これはキルスイッチで、止めるときだけ
       # `REGION_KIE_HINTS=0` を .env に書く（未設定・空文字は on）。
       REGION_KIE_HINTS: ${REGION_KIE_HINTS:-}
+      # 「有効化前に引かれた領域」注記の境界（設計 v2 §1.5）。未設定・空文字はコードの
+      # 定数（2026-09-12T00:00:00Z）。この環境で実際に on にした時点が違う（止めていた
+      # 期間がある等）ときだけ ISO 8601（Z かオフセット付き）で .env に書く。
+      # 解釈できない値は定数に倒し、worker が warning を出す。
+      REGION_HINTS_ACTIVATED_AT: ${REGION_HINTS_ACTIVATED_AT:-}
       # 位置ずれ検知を実際にレビューへ反映するか（Phase 5）。既定 off（shadow）。
       REGION_GUARD_ENFORCE: ${REGION_GUARD_ENFORCE:-}
       # ⑤⑥ SaaS連携（GDrive/M365/Box）。ローカルは Fake＝下記マウントのディレクトリを

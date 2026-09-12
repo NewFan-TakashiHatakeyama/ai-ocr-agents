@@ -2,6 +2,7 @@
 
 import copy
 import json
+import logging
 
 import pytest
 from newfan_llm_adapter import FakeProvider, LLMAdapter, PromptBundle, default_bundle_dir
@@ -391,6 +392,100 @@ def test_明細フィールドは有効化前の判定の対象外(monkeypatch) 
     }
     _, report = llm_nodes.build_region_hints(schema, _PAGES_1, [_sp(1, "品名", [200, 900, 300, 940])])
     assert not report and report.pre_activation == []
+
+
+# ---------- 有効化の時点の上書き（REGION_HINTS_ACTIVATED_AT） ----------
+#
+# 実際に on になった時点は環境ごとにずれ得る（キルスイッチで止めていた期間・デプロイ日）。
+# 環境変数で境界を動かせる。解釈できない値は既定に倒し、warning を 1 回だけ出す。
+
+
+@pytest.fixture(autouse=True)
+def _activated_at_isolated(monkeypatch):
+    """このファイルの全テストを、実行環境の REGION_HINTS_ACTIVATED_AT と値ごとの
+    解釈キャッシュから切り離す（既定の境界 2026-09-12 を前提にした表があるため）。"""
+    monkeypatch.delenv("REGION_HINTS_ACTIVATED_AT", raising=False)
+    monkeypatch.setattr(llm_nodes, "_activated_at_cache", {})
+
+
+_AFTER_DEFAULT = "2026-09-13T09:00:00Z"  # 既定の境界では有効化後
+_BEFORE_DEFAULT = "2026-09-11T23:59:59Z"  # 既定の境界では有効化前
+
+
+def _pre_activation_of(created_at: str) -> list[str]:
+    _, report = llm_nodes.build_region_hints(_schema_created_at(created_at), _PAGES_1, [_IN])
+    assert report.given == ["total_amount"]
+    return report.pre_activation
+
+
+def test_未設定なら有効化の時点は定数() -> None:
+    assert llm_nodes.region_hints_activated_at() == llm_nodes._REGION_HINTS_ACTIVATED_DT
+    assert llm_nodes.REGION_HINTS_ACTIVATED_AT == "2026-09-12T00:00:00Z"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "2026-10-01T00:00:00Z",
+        "2026-10-01T09:00:00+09:00",  # オフセット付き（= 2026-10-01T00:00:00Z）
+        "2026-10-01",  # 日付だけ（naive）は UTC とみなす
+        "  2026-10-01T00:00:00Z  ",  # 前後空白を無視
+    ],
+)
+def test_有効化の時点を後ろへずらすと有効化後の領域が有効化前になる(monkeypatch, override) -> None:
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    assert _pre_activation_of(_AFTER_DEFAULT) == []
+    monkeypatch.setenv("REGION_HINTS_ACTIVATED_AT", override)
+    assert _pre_activation_of(_AFTER_DEFAULT) == ["total_amount"]
+    # 新しい境界の直前・ちょうど・直後
+    assert _pre_activation_of("2026-09-30T23:59:59Z") == ["total_amount"]
+    assert _pre_activation_of("2026-10-01T00:00:00Z") == []
+    assert _pre_activation_of("2026-10-01T00:00:01Z") == []
+
+
+def test_有効化の時点を前へずらすと有効化前だった領域が有効化後になる(monkeypatch) -> None:
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    assert _pre_activation_of(_BEFORE_DEFAULT) == ["total_amount"]
+    monkeypatch.setenv("REGION_HINTS_ACTIVATED_AT", "2026-09-01T00:00:00Z")
+    assert _pre_activation_of(_BEFORE_DEFAULT) == []
+    # 無い・解釈できない created_at は境界に関係なく「有効化前」のまま
+    assert _pre_activation_of("garbage") == ["total_amount"]
+    _, report = llm_nodes.build_region_hints(_schema_created_at(None), _PAGES_1, [_IN])
+    assert report.pre_activation == ["total_amount"]
+
+
+@pytest.mark.parametrize("garbage", ["garbage", "2026-13-45", "2026/10/01", "1759276800", "Z"])
+def test_解釈できない上書きは既定に倒し警告を1回だけ出す(monkeypatch, caplog, garbage) -> None:
+    monkeypatch.setenv("REGION_KIE_HINTS", "1")
+    monkeypatch.setenv("REGION_HINTS_ACTIVATED_AT", garbage)
+    with caplog.at_level(logging.WARNING, logger="newfan_orchestrator.llm_nodes"):
+        assert llm_nodes.region_hints_activated_at() == llm_nodes._REGION_HINTS_ACTIVATED_DT
+        # 既定の境界のまま判定される（run ごと・項目ごとに読んでも warning は増えない）
+        assert _pre_activation_of(_AFTER_DEFAULT) == []
+        assert _pre_activation_of(_BEFORE_DEFAULT) == ["total_amount"]
+    warnings = [r for r in caplog.records if "REGION_HINTS_ACTIVATED_AT" in r.getMessage()]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert garbage in message and "2026-09-12T00:00:00Z" in message
+
+
+def test_空白だけの上書きは未設定と同じで警告も出ない(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("REGION_HINTS_ACTIVATED_AT", "   ")
+    with caplog.at_level(logging.WARNING, logger="newfan_orchestrator.llm_nodes"):
+        assert llm_nodes.region_hints_activated_at() == llm_nodes._REGION_HINTS_ACTIVATED_DT
+    assert not [r for r in caplog.records if "REGION_HINTS_ACTIVATED_AT" in r.getMessage()]
+
+
+def test_上書きは呼ぶたびに_env_を読む(monkeypatch) -> None:
+    """プロセス内で値を差し替えても（テストの monkeypatch）、前の値を引きずらない。"""
+    monkeypatch.setenv("REGION_HINTS_ACTIVATED_AT", "2026-10-01T00:00:00Z")
+    first = llm_nodes.region_hints_activated_at()
+    monkeypatch.setenv("REGION_HINTS_ACTIVATED_AT", "2026-11-01T00:00:00Z")
+    second = llm_nodes.region_hints_activated_at()
+    monkeypatch.delenv("REGION_HINTS_ACTIVATED_AT")
+    assert first.isoformat() == "2026-10-01T00:00:00+00:00"
+    assert second.isoformat() == "2026-11-01T00:00:00+00:00"
+    assert llm_nodes.region_hints_activated_at() == llm_nodes._REGION_HINTS_ACTIVATED_DT
 
 
 @pytest.mark.parametrize(
