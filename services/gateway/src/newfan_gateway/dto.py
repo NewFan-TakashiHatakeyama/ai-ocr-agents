@@ -428,6 +428,11 @@ class WorkflowRunSummaryDto(BaseModel):
     error: Optional[dict[str, Any]] = None
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    # 発火の出所（manual / schedule / s3_event / gdrive_event …）と発火したトリガーの
+    # node_id。trigger 全体は graph_json スナップショットを含んで大きいので、
+    # 実行履歴の一覧に要るこの 2 つだけを出す
+    trigger_type: Optional[str] = None
+    trigger_node_id: Optional[str] = None
 
 
 class WorkflowRunDto(WorkflowRunSummaryDto):

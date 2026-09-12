@@ -109,6 +109,9 @@ def test_run一覧と詳細(ctx) -> None:
     r = client.get(f"/v1/workflows/{meta['wid']}/runs", headers=_auth(role="viewer"))
     assert r.status_code == 200
     assert [i["id"] for i in r.json()["items"]] == [run_id]
+    # 一覧には発火の出所と発火ノードだけ出す（実行履歴 UI の「トリガー」列）
+    assert r.json()["items"][0]["trigger_type"] == "manual"
+    assert r.json()["items"][0]["trigger_node_id"] == "t1"
 
     r = client.get(f"/v1/workflow-runs/{run_id}", headers=_auth(role="viewer"))
     body = r.json()

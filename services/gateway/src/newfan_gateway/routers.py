@@ -1316,6 +1316,7 @@ WORKFLOW_STREAM = "q.workflow"
 
 
 def _run_summary(rec: WorkflowRunRecord) -> dto.WorkflowRunSummaryDto:
+    trigger = rec.trigger or {}
     return dto.WorkflowRunSummaryDto(
         id=rec.id,
         workflow_id=rec.workflow_id,
@@ -1325,6 +1326,8 @@ def _run_summary(rec: WorkflowRunRecord) -> dto.WorkflowRunSummaryDto:
         error=rec.error,
         started_at=rec.started_at,
         finished_at=rec.finished_at,
+        trigger_type=trigger.get("type"),
+        trigger_node_id=trigger.get("node_id"),
     )
 
 
