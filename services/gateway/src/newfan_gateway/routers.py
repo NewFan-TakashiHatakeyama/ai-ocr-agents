@@ -131,14 +131,22 @@ def create_document(
 
 @router.get("/documents", response_model=dto.DocumentList)
 def list_documents(
-    status: Optional[str] = None,
+    # status は繰り返し指定できる（?status=uploaded&status=failed = OR）。
+    # 1 値だけの従来の呼び方（web の listDocuments）はそのまま通る。
+    status: Optional[list[str]] = Query(default=None),
+    doc_type: Optional[str] = None,
     cursor: Optional[str] = None,
     limit: int = 50,
     principal: Principal = Depends(require_role("viewer")),
     repo: Repository = Depends(get_repo),
 ) -> dto.DocumentList:
     rows, next_cursor = repo.list_documents(
-        principal.tenant_id, status=status, cursor=cursor, limit=min(limit, 100)
+        principal.tenant_id,
+        status=None,
+        cursor=cursor,
+        limit=min(limit, 100),
+        doc_type=doc_type,
+        statuses=status or None,
     )
     return dto.DocumentList(
         items=[

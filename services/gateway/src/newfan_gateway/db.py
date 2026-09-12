@@ -20,8 +20,10 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    and_,
     create_engine,
     func,
+    or_,
     select,
     text,
 )
@@ -57,6 +59,11 @@ class Document(Base):
     doc_type: Mapped[Optional[str]] = mapped_column(Text)
     external_ref: Mapped[Optional[str]] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String, default="uploaded")
+    # 一覧の並び（created_at 降順）とカーソルに要る。DDL 側に DEFAULT now() があるので
+    # INSERT では渡さない（create_document が exclude している）。
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class Page(Base):
@@ -162,11 +169,43 @@ class PgRepository:
             row = s.get(Document, document_id)
             return _doc_record(row) if row else None
 
-    def list_documents(self, tenant_id, *, status, cursor, limit):
+    def list_documents(
+        self, tenant_id, *, status, cursor, limit, doc_type=None, statuses=None
+    ):
+        # 並びは created_at 降順（同時刻は id 降順）。以前は id 降順だったが、id は
+        # `doc_` + ランダム uuid なので「新しい順」ではなく実質ランダムだった。
+        # 一括再抽出の「先頭 200 件」がこの並びに依存する（設計 bulk-processing §2）。
+        # RLS に加えて tenant_id を WHERE に置く（ローカル compose の接続ロールは
+        # 所有者で RLS を素通りするため、WHERE が唯一の防御になる）。
+        if statuses is not None and not statuses:
+            return [], None
         with self._rls(tenant_id) as s:
-            stmt = select(Document).order_by(Document.id.desc()).limit(limit + 1)
+            stmt = (
+                select(Document)
+                .where(Document.tenant_id == tenant_id)
+                .order_by(Document.created_at.desc(), Document.id.desc())
+                .limit(limit + 1)
+            )
             if status:
                 stmt = stmt.where(Document.status == status)
+            if statuses is not None:
+                stmt = stmt.where(Document.status.in_(tuple(statuses)))
+            if doc_type is not None:
+                stmt = stmt.where(Document.doc_type == doc_type)
+            if cursor:
+                # キーセット: 直前ページ末尾の帳票より「古い」行から続ける。
+                # 見つからなければ（消された等）先頭から返す。
+                anchor = s.get(Document, cursor)
+                if anchor is not None and anchor.tenant_id == tenant_id:
+                    stmt = stmt.where(
+                        or_(
+                            Document.created_at < anchor.created_at,
+                            and_(
+                                Document.created_at == anchor.created_at,
+                                Document.id < anchor.id,
+                            ),
+                        )
+                    )
             rows = list(s.scalars(stmt))
             has_more = len(rows) > limit
             rows = rows[:limit]
@@ -636,10 +675,13 @@ class PgRepository:
 
 
 def _doc_record(row: Document) -> DocumentRecord:
+    # created_at は DB の値を写す（無ければ record 側の既定 now() に任せる）
+    extra = {"created_at": row.created_at} if row.created_at is not None else {}
     return DocumentRecord(
         id=row.id, tenant_id=row.tenant_id, storage_uri=row.storage_uri,
         original_name=row.original_name, mime_type=row.mime_type, page_count=row.page_count,
         doc_type=row.doc_type, external_ref=row.external_ref, status=row.status,
+        **extra,
     )
 
 

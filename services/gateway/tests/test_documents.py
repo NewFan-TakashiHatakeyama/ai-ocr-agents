@@ -43,6 +43,68 @@ def test_list_documents(ctx: SimpleNamespace) -> None:
     assert len(r.json()["items"]) == 2
 
 
+def _upload_as(ctx: SimpleNamespace, doc_type: str | None, status: str) -> str:
+    data = {"doc_type": doc_type} if doc_type else {}
+    r = ctx.client.post(
+        "/v1/documents",
+        headers=auth("uploader"),
+        files={"file": ("x.pdf", PDF, "application/pdf")},
+        data=data,
+    )
+    assert r.status_code == 201, r.text
+    doc_id = r.json()["document_id"]
+    if status != "uploaded":
+        ctx.repo.set_document_status("ten_1", doc_id, status)
+    return doc_id
+
+
+def test_list_documents_filters_by_doc_type(ctx: SimpleNamespace) -> None:
+    """doc_type は完全一致。種別なし（null）の帳票は含まない（一括再抽出の母集合）。"""
+    inv = _upload_as(ctx, "invoice", "uploaded")
+    _upload_as(ctx, "receipt", "uploaded")
+    _upload_as(ctx, None, "uploaded")
+    r = ctx.client.get("/v1/documents?doc_type=invoice", headers=auth("viewer"))
+    assert r.status_code == 200
+    assert [d["document_id"] for d in r.json()["items"]] == [inv]
+
+
+def test_list_documents_filters_by_repeated_status(ctx: SimpleNamespace) -> None:
+    """status は繰り返し指定で OR。従来の 1 値指定も同じ経路で通る。"""
+    up = _upload_as(ctx, "invoice", "uploaded")
+    failed = _upload_as(ctx, "invoice", "failed")
+    _upload_as(ctx, "invoice", "confirmed")
+
+    r = ctx.client.get(
+        "/v1/documents?status=uploaded&status=failed", headers=auth("viewer")
+    )
+    assert r.status_code == 200
+    assert {d["document_id"] for d in r.json()["items"]} == {up, failed}
+
+    r1 = ctx.client.get("/v1/documents?status=failed", headers=auth("viewer"))
+    assert [d["document_id"] for d in r1.json()["items"]] == [failed]
+
+
+def test_list_documents_combines_doc_type_and_status(ctx: SimpleNamespace) -> None:
+    """doc_type と status は AND。他テナントの帳票は混ざらない。"""
+    from gw_helpers import make_token
+
+    hit = _upload_as(ctx, "invoice", "failed")
+    _upload_as(ctx, "invoice", "confirmed")
+    _upload_as(ctx, "receipt", "failed")
+    other = {"Authorization": f"Bearer {make_token(role='uploader', tenant='ten_2')}"}
+    ctx.client.post(
+        "/v1/documents",
+        headers=other,
+        files={"file": ("x.pdf", PDF, "application/pdf")},
+        data={"doc_type": "invoice"},
+    )
+    r = ctx.client.get(
+        "/v1/documents?doc_type=invoice&status=failed&status=uploaded",
+        headers=auth("viewer"),
+    )
+    assert [d["document_id"] for d in r.json()["items"]] == [hit]
+
+
 def test_page_image_signed_url(ctx: SimpleNamespace) -> None:
     """署名URLは実際にブラウザが取得できること（url が空でないだけでは不足）。
 
