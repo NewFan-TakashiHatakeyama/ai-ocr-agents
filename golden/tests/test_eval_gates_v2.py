@@ -157,6 +157,65 @@ class TestG2:
         assert "下回る帳票" in why
 
 
+class TestG4:
+    """第 4 回から: 落とした／捨てた対の McNemar が「介入が有意に悪い」でなければ通す。
+
+    第 3 回までの「差が 0 以上」は、効果が無ければ差が 0 を中心に散らばるので、効果が
+    無くても半分の確率で落ちた（設計 §3 の注記）。
+    """
+
+    @staticmethod
+    def _s3(outcomes: list[tuple[bool, bool]]) -> dict[str, Any]:
+        """(対照の正誤, 介入の正誤) の列を、5 帳票 × 5 試行 × 4 項目に順に割り付ける。
+        介入アームは全項目を rejected（捨てた）にして affected の対にする。"""
+        fields = ["a", "b", "c", "d"]
+        control: list[dict] = []
+        treat: list[dict] = []
+        k = 0
+        for d in range(5):
+            for t in range(5):
+                ch: dict[str, bool] = {}
+                th: dict[str, bool] = {}
+                for f in fields:
+                    if k >= len(outcomes):
+                        break
+                    ch[f], th[f] = outcomes[k]
+                    k += 1
+                if not ch:
+                    continue
+                control.append(_run(f"s3_d{d}", t, ch))
+                treat.append(
+                    _run(
+                        f"s3_d{d}",
+                        t,
+                        th,
+                        {"given": list(th), "dropped": {}, "outcomes": {f: "rejected" for f in th}},
+                    )
+                )
+        return _report(control, treat, 5)
+
+    def test_100_対で差が_マイナス1_なら通る(self) -> None:
+        """効果が無いときの揺れ（30 対 29）。旧規則「差 ≥ 0」では落ちていた。"""
+        rows = [(True, False)] * 30 + [(False, True)] * 29 + [(True, True)] * 41
+        ok, why = eg.gate_g4(self._s3(rows))
+        assert ok is True
+        assert "100 対" in why and "差 -1" in why
+        assert "対照のみ 30 / 介入のみ 29" in why and "有意差なし" in why
+
+    def test_20_対すべて対照だけ正解なら落ちる(self) -> None:
+        ok, why = eg.gate_g4(self._s3([(True, False)] * 20))
+        assert ok is False
+        assert "介入が有意に悪い" in why and "差 -20" in why
+
+    def test_対が_0_なら判定不能(self) -> None:
+        ok, why = eg.gate_g4(self._s3([]))
+        assert ok is None
+        assert "判定材料なし" in why
+
+    def test_S3_が無ければ判定不能(self) -> None:
+        assert eg.gate_g4(None) == (None, "S3 の結果が無い")
+
+
 def test_率が_None_でも表を出せる(tmp_path: Path) -> None:
     rep = _report([_run("s1_d", 0, {"a": True})], [], 1)
     rep["treat_exact_match"] = None
