@@ -41,6 +41,10 @@ class PageDim(BaseModel):
 class DocumentMeta(BaseModel):
     document_id: str
     status: str
+    # 原本のファイル名（documents.original_name）。画面上の「帳票」の表示名で、
+    # チャット取込やフォルダ監視で入った帳票を ID だけで見分けさせないために返す。
+    # 一覧・単体の両方で埋める（documents 行に元からある列なので追加のクエリは要らない）。
+    original_name: Optional[str] = None
     doc_type: Optional[str] = None
     external_ref: Optional[str] = None
     page_count: Optional[int] = None

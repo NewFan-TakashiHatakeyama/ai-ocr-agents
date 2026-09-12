@@ -102,6 +102,9 @@ class ChatTools:
             "items": [
                 {
                     "document_id": d.id,
+                    # 原本ファイル名。無いと LLM は ID しか言えず、利用者は
+                    # 「どの帳票の話か」を突き合わせられない
+                    "original_name": d.original_name,
                     "status": d.status,
                     "doc_type": d.doc_type,
                     "external_ref": d.external_ref,

@@ -103,6 +103,46 @@ def test_list_documents_combines_doc_type_and_status(ctx: SimpleNamespace) -> No
         headers=auth("viewer"),
     )
     assert [d["document_id"] for d in r.json()["items"]] == [hit]
+def test_list_and_get_expose_original_name(ctx: SimpleNamespace) -> None:
+    """一覧・単体の両方が原本ファイル名（original_name）を返す。
+
+    以前は一覧が document_id しか返さず、チャットやフォルダ監視で取り込んだ帳票を
+    利用者が見分けられなかった。web の一覧の表示名・検索はこの値に依存する。
+    """
+    r = ctx.client.post(
+        "/v1/documents",
+        headers=auth("uploader"),
+        files={"file": ("請求書_2026-09_ACME.pdf", PDF, "application/pdf")},
+    )
+    assert r.status_code == 201, r.text
+    doc_id = r.json()["document_id"]
+
+    listed = ctx.client.get("/v1/documents", headers=auth("viewer")).json()["items"]
+    assert [d["original_name"] for d in listed if d["document_id"] == doc_id] == [
+        "請求書_2026-09_ACME.pdf"
+    ]
+    single = ctx.client.get(f"/v1/documents/{doc_id}", headers=auth("viewer")).json()
+    assert single["original_name"] == "請求書_2026-09_ACME.pdf"
+
+
+def test_original_name_is_null_when_unknown(ctx: SimpleNamespace) -> None:
+    """名前を持たない行（旧データ・外部投入）は null で返し、一覧を落とさない。"""
+    from newfan_gateway.records import DocumentRecord
+
+    ctx.repo.create_document(
+        DocumentRecord(
+            id="doc_noname",
+            tenant_id="ten_1",
+            storage_uri="file:///x",
+            mime_type="application/pdf",
+            page_count=1,
+        ),
+        [],
+    )
+    r = ctx.client.get("/v1/documents", headers=auth("viewer"))
+    assert r.status_code == 200
+    items = {d["document_id"]: d for d in r.json()["items"]}
+    assert items["doc_noname"]["original_name"] is None
 
 
 def test_page_image_signed_url(ctx: SimpleNamespace) -> None:

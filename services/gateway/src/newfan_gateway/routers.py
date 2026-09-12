@@ -153,6 +153,7 @@ def list_documents(
             dto.DocumentMeta(
                 document_id=d.id,
                 status=d.status,
+                original_name=d.original_name,
                 doc_type=d.doc_type,
                 external_ref=d.external_ref,
                 page_count=d.page_count,
@@ -180,6 +181,7 @@ def _document_meta(repo: Repository, tenant_id: str, doc: DocumentRecord) -> dto
     return dto.DocumentMeta(
         document_id=doc.id,
         status=doc.status,
+        original_name=doc.original_name,
         doc_type=doc.doc_type,
         external_ref=doc.external_ref,
         page_count=doc.page_count,

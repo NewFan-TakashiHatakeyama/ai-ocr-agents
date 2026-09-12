@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from gw_helpers import auth
+from gw_helpers import PDF, auth
 
 
 def _sse(text: str) -> list[tuple[str, dict]]:
@@ -81,6 +81,22 @@ def test_chat_tools_update_schema_rejects_reserved_name_without_raising(
     assert res["ok"] is False and "required" in res["message"]
     # 断った呼び出しは新版を作らない
     assert ctx.admin.get_schema("ten_1", "invoice").version == before
+
+
+def test_chat_tools_search_documents_includes_original_name(ctx: SimpleNamespace) -> None:
+    """search_documents は原本ファイル名を返す（ID だけでは利用者が突き合わせられない）。"""
+    from newfan_gateway.chat_tools import ChatTools
+
+    r = ctx.client.post(
+        "/v1/documents",
+        headers=auth("uploader"),
+        files={"file": ("納品書_0912.pdf", PDF, "application/pdf")},
+    )
+    assert r.status_code == 201, r.text
+    tools = ChatTools(repo=ctx.repo, admin=ctx.admin, queue=ctx.queue)
+    res = tools.search_documents("ten_1")
+    assert res["count"] == 1
+    assert res["items"][0]["original_name"] == "納品書_0912.pdf"
 
 
 def test_chat_confirm_update_schema_reserved_name_returns_ok_false(ctx: SimpleNamespace) -> None:
