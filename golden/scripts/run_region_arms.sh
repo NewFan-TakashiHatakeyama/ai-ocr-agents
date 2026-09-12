@@ -3,7 +3,7 @@
 # 手順どおりに 1 本で回す。実測記録 region-measurement-2026-09-12.md「再実行の手順」から呼ぶ。
 #
 #   golden/scripts/run_region_arms.sh --api http://localhost:8000/v1 --token "$JWT" \
-#       --out out/phase4 [--trials-s1 5] [--structure http://localhost:8081] [--resume]
+#       --out out/phase4 [--trials-s1 5] [--structure http://localhost:8081] [--resume] [--arms s3,s2,s1]
 #
 # アームごと（S3 → S2 → S1 の順。ゲートを決める S3 を先に）に:
 #   1. region_from_gold: 正解値の位置から領域を起こす（例示値も一緒に出る）。
@@ -24,6 +24,11 @@
 #     どの worker / プロンプトで回したかが残らないので、後から見分けられない）。
 #     コードやプロンプトを変えて測り直すなら別の --out にする。
 #
+# --arms: 回すアームを絞る（既定 s3,s2,s1 の全部）。変更が**決定論で特定のアームにしか届かない**
+# と示せるとき（例: 例示値の語彙で落とすガード。S1 は例示値を落として回すので届かない）に、
+# そのアームだけ測り直すのに使う。プロンプトの変更は波及するので絞らない（設計 §3）。
+# 絞ったときのゲート判定は、回さなかったアームに前回の出力を渡す（記録に「どの回の出力か」を残す）。
+#
 # 試行数: S3 / S2 は 5（設計 §3）、S1 は --trials-s1（既定 5。第 3 回で 2 試行は検出力不足と
 # 分かった）。前提: worker のヒントが有効（既定 on。REGION_KIE_HINTS を off にしていないこと）、
 # フィクスチャ（golden/data/region_ab_s{1,2,3}.jsonl と *_goldspec.json / *_positional.json）は
@@ -37,8 +42,9 @@ OUT=""
 TRIALS_S1=5
 STRUCTURE="http://localhost:8081"
 RESUME_MODE=0
+ARMS="s3,s2,s1"
 usage() {
-  echo "使い方: $0 --api URL --token JWT --out DIR [--trials-s1 N] [--structure URL] [--resume]" >&2
+  echo "使い方: $0 --api URL --token JWT --out DIR [--trials-s1 N] [--structure URL] [--resume] [--arms s3,s2,s1]" >&2
   exit 2
 }
 while [ $# -gt 0 ]; do
@@ -49,11 +55,16 @@ while [ $# -gt 0 ]; do
     --trials-s1) TRIALS_S1="$2"; shift 2;;
     --structure) STRUCTURE="$2"; shift 2;;
     --resume) RESUME_MODE=1; shift;;
+    --arms) ARMS="$2"; shift 2;;
     -h|--help) usage;;
     *) echo "不明な引数: $1" >&2; usage;;
   esac
 done
 [ -n "$API" ] && [ -n "$TOKEN" ] && [ -n "$OUT" ] || usage
+ARM_LIST="${ARMS//,/ }"
+for ARM in $ARM_LIST; do
+  case "$ARM" in s1|s2|s3) ;; *) echo "不明なアーム: $ARM（s1 / s2 / s3）" >&2; usage;; esac
+done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
@@ -67,7 +78,7 @@ mkdir -p "$OUT"
 
 # 前回の出力がある --out に --resume なしで回さない（前回の結果を新しい計測として書き直さないため）
 EXISTING=""
-for ARM in s3 s2 s1; do
+for ARM in $ARM_LIST; do
   [ -f "$OUT/${ARM}_ab.json" ] && EXISTING="$EXISTING $OUT/${ARM}_ab.json"
 done
 if [ -n "$EXISTING" ] && [ "$RESUME_MODE" -eq 0 ]; then
@@ -116,7 +127,7 @@ print("merged ->", out, "例示値あり", n)
 PYEOF
 }
 
-for ARM in s3 s2 s1; do
+for ARM in $ARM_LIST; do
   case "$ARM" in
     s3) TRIALS=5; STRIP=0; LABEL="S3: 別雛形テンプレートの害（12 件 × 5 試行、例示値あり）";;
     s2) TRIALS=5; STRIP=0; LABEL="S2: 同じ雛形への転用（5 件 × 5 試行、例示値あり）";;
