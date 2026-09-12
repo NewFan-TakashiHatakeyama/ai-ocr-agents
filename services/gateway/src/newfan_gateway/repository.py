@@ -31,8 +31,23 @@ class Repository(Protocol):
     def create_document(self, doc: DocumentRecord, pages: list[PageRecord]) -> None: ...
     def get_document(self, tenant_id: str, document_id: str) -> Optional[DocumentRecord]: ...
     def list_documents(
-        self, tenant_id: str, *, status: Optional[str], cursor: Optional[str], limit: int
-    ) -> tuple[list[DocumentRecord], Optional[str]]: ...
+        self,
+        tenant_id: str,
+        *,
+        status: Optional[str],
+        cursor: Optional[str],
+        limit: int,
+        doc_type: Optional[str] = None,
+        statuses: Optional[list[str]] = None,
+    ) -> tuple[list[DocumentRecord], Optional[str]]:
+        """帳票一覧（created_at 降順、cursor は直前ページ末尾の document_id）。
+
+        ``status`` は 1 値、``statuses`` は複数値の絞り込みで、両方あれば AND。
+        ``doc_type`` は完全一致。一括再抽出（設計 bulk-processing §2）が
+        「この種別の uploaded / needs_review / failed」を引くために要る。
+        """
+        ...
+
     def get_pages(self, tenant_id: str, document_id: str) -> list[PageRecord]: ...
 
     def has_active_run(self, tenant_id: str, document_id: str) -> bool: ...
@@ -122,14 +137,25 @@ class InMemoryRepository:
         return doc if doc and self._owned(doc.tenant_id, tenant_id) else None
 
     def list_documents(
-        self, tenant_id: str, *, status: Optional[str], cursor: Optional[str], limit: int
+        self,
+        tenant_id: str,
+        *,
+        status: Optional[str],
+        cursor: Optional[str],
+        limit: int,
+        doc_type: Optional[str] = None,
+        statuses: Optional[list[str]] = None,
     ) -> tuple[list[DocumentRecord], Optional[str]]:
         rows = [
             d
             for d in self._docs.values()
-            if d.tenant_id == tenant_id and (status is None or d.status == status)
+            if d.tenant_id == tenant_id
+            and (status is None or d.status == status)
+            and (statuses is None or d.status in statuses)
+            and (doc_type is None or d.doc_type == doc_type)
         ]
-        rows.sort(key=lambda d: d.created_at, reverse=True)
+        # 同時刻は id 降順で安定させる（Pg と同じ並び）
+        rows.sort(key=lambda d: (d.created_at, d.id), reverse=True)
         start = 0
         if cursor is not None:
             ids = [d.id for d in rows]

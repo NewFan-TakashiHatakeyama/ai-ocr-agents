@@ -67,6 +67,8 @@ export default function SchemasPage() {
       setCreating(false);
       setDocType(rec.doc_type);
       qc.invalidateQueries({ queryKey: ["schemas"] });
+      // 一覧の種別セレクト（GET /doc-types）も新しい種別・版を反映する
+      qc.invalidateQueries({ queryKey: ["doc-types"] });
     },
     onError: (e) => {
       const status = (e as { status?: number })?.status;

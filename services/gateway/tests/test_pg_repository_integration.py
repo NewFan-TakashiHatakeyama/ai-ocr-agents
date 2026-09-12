@@ -568,3 +568,106 @@ def test_pg_legacy_reserved_field_name_does_not_break_reads() -> None:
             c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
             for sid in made:
                 c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": sid})
+
+
+def test_pg_list_documents_filters_order_and_cursor(repo) -> None:
+    """doc_type / statuses の絞り込み・created_at 降順・カーソルが実 SQL で成立すること
+    （設計 bulk-processing §2 の「この種別の uploaded/needs_review/failed を新しい順に 200 件」）。
+
+    InMemory は Python のリスト内包なので、`IN` の組み立て・`ORDER BY created_at`・
+    キーセットの比較式の誤りは Pg でしか出ない。ローカル compose の接続ロールは
+    所有者（RLS を素通り）なので、テナント境界は WHERE の tenant_id が唯一の防御。
+    """
+    from sqlalchemy import text
+
+    from newfan_gateway.records import DocumentRecord, PageRecord
+
+    tenant = "ten_test"
+    other = "ten_test_other"
+    tag = uuid.uuid4().hex[:8]
+    with repo._engine.begin() as c:  # noqa: SLF001 - テスト用の前提データ投入
+        for t in (tenant, other):
+            c.execute(
+                text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+                {"i": t, "n": "test"},
+            )
+
+    def _doc(suffix: str, t: str, doc_type: str | None, status: str) -> str:
+        did = f"doc_{tag}_{suffix}"
+        repo.create_document(
+            DocumentRecord(
+                id=did, tenant_id=t, storage_uri="s3://b/k", mime_type="image/png",
+                page_count=1, doc_type=doc_type, status=status,
+            ),
+            [PageRecord(page_no=1, width=10, height=10, image_uri="s3://b/p1.png")],
+        )
+        return did
+
+    # 「古い順」に作り、あとで created_at を明示的にずらす（同一トランザクション内の
+    # now() 衝突と、id の辞書順が時刻順と一致してしまう偶然の両方を避ける）
+    made = [
+        _doc("a_inv_up", tenant, f"inv_{tag}", "uploaded"),
+        _doc("b_inv_fail", tenant, f"inv_{tag}", "failed"),
+        _doc("c_inv_conf", tenant, f"inv_{tag}", "confirmed"),
+        _doc("d_rcpt_up", tenant, f"rcpt_{tag}", "uploaded"),
+        _doc("e_none_up", tenant, None, "uploaded"),
+        _doc("f_other_inv_up", other, f"inv_{tag}", "uploaded"),
+    ]
+    try:
+        with repo._engine.begin() as c:  # noqa: SLF001 - 時刻を明示的に段付け
+            for i, did in enumerate(made):
+                c.execute(
+                    text(
+                        "UPDATE documents SET created_at = now() - make_interval(hours => :h)"
+                        " WHERE id = :i"
+                    ),
+                    {"h": len(made) - i, "i": did},
+                )
+
+        # doc_type + statuses（一括再抽出の母集合）: confirmed は外れ、他種別・null・他テナントも外れる
+        rows, nxt = repo.list_documents(
+            tenant, status=None, cursor=None, limit=50,
+            doc_type=f"inv_{tag}", statuses=["uploaded", "needs_review", "failed"],
+        )
+        assert [d.id for d in rows] == [made[1], made[0]]  # 新しい順
+        assert nxt is None
+        assert all(d.created_at is not None for d in rows)
+
+        # statuses だけ（種別は問わない）。テスト外の既存行が混ざり得るので集合で見る
+        rows, _ = repo.list_documents(
+            tenant, status=None, cursor=None, limit=500, statuses=["failed"]
+        )
+        ids = {d.id for d in rows}
+        assert made[1] in ids and made[2] not in ids
+
+        # 1 値の status（従来経路）と doc_type の AND
+        rows, _ = repo.list_documents(
+            tenant, status="uploaded", cursor=None, limit=50, doc_type=f"inv_{tag}"
+        )
+        assert [d.id for d in rows] == [made[0]]
+
+        # 空の statuses は「何も該当しない」（IN () を組み立てない）
+        assert repo.list_documents(tenant, status=None, cursor=None, limit=50, statuses=[]) == (
+            [], None
+        )
+
+        # カーソル: doc_type で 3 件を 2 件ずつ
+        page1, cur = repo.list_documents(
+            tenant, status=None, cursor=None, limit=2, doc_type=f"inv_{tag}"
+        )
+        assert [d.id for d in page1] == [made[2], made[1]] and cur == made[1]
+        page2, cur2 = repo.list_documents(
+            tenant, status=None, cursor=cur, limit=2, doc_type=f"inv_{tag}"
+        )
+        assert [d.id for d in page2] == [made[0]] and cur2 is None
+
+        # テナント境界: 他テナントの帳票は doc_type が同じでも見えない
+        rows, _ = repo.list_documents(
+            other, status=None, cursor=None, limit=50, doc_type=f"inv_{tag}"
+        )
+        assert [d.id for d in rows] == [made[5]]
+    finally:
+        with repo._engine.begin() as c:  # noqa: SLF001
+            c.execute(
+                text("DELETE FROM documents WHERE id = ANY(:i)"), {"i": made}
+            )  # pages は ON DELETE CASCADE

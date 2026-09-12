@@ -14,17 +14,18 @@ export function Toaster() {
           role={t.kind === "err" ? "alert" : "status"}
         >
           <span>{t.message}</span>
-          {t.action && (
+          {[...(t.action ? [t.action] : []), ...(t.actions ?? [])].map((a) => (
             <button
+              key={a.label}
               className="btn sm"
               onClick={() => {
-                t.action?.onClick();
+                a.onClick();
                 dismiss(t.id);
               }}
             >
-              {t.action.label}
+              {a.label}
             </button>
-          )}
+          ))}
           <button className="btn sm ghost" aria-label="閉じる" onClick={() => dismiss(t.id)}>
             ×
           </button>

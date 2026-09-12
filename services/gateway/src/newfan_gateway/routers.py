@@ -131,14 +131,22 @@ def create_document(
 
 @router.get("/documents", response_model=dto.DocumentList)
 def list_documents(
-    status: Optional[str] = None,
+    # status は繰り返し指定できる（?status=uploaded&status=failed = OR）。
+    # 1 値だけの従来の呼び方（web の listDocuments）はそのまま通る。
+    status: Optional[list[str]] = Query(default=None),
+    doc_type: Optional[str] = None,
     cursor: Optional[str] = None,
     limit: int = 50,
     principal: Principal = Depends(require_role("viewer")),
     repo: Repository = Depends(get_repo),
 ) -> dto.DocumentList:
     rows, next_cursor = repo.list_documents(
-        principal.tenant_id, status=status, cursor=cursor, limit=min(limit, 100)
+        principal.tenant_id,
+        status=None,
+        cursor=cursor,
+        limit=min(limit, 100),
+        doc_type=doc_type,
+        statuses=status or None,
     )
     return dto.DocumentList(
         items=[
@@ -375,30 +383,67 @@ def classify_document(
     )
 
 
-@router.post("/documents/{document_id}/extract", status_code=202, response_model=dto.ExtractAccepted)
-def extract(
+def _start_extract(
+    repo: Repository,
+    queue: Queue,
+    admin: AdminRepository,
+    locks: LockStore,
+    principal: Principal,
     document_id: str,
-    body: dto.ExtractRequest,
-    request: Request,
-    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    principal: Principal = Depends(require_role("uploader")),
-    repo: Repository = Depends(get_repo),
-    queue: Queue = Depends(get_queue),
-    settings: Settings = Depends(get_settings),
-    admin: AdminRepository = Depends(get_admin),
-) -> dto.ExtractAccepted:
-    _require_document(repo, principal.tenant_id, document_id)
+    schema_id: Optional[str],
+    options: dto.ExtractOptions,
+    supersede_review: bool,
+) -> tuple[str, str]:
+    """1 帳票の抽出 run を発行して (job_id, run_id) を返す。
 
-    cached = _idempotency_hit(request, idempotency_key, principal.tenant_id)
-    if cached is not None:
-        return dto.ExtractAccepted(**cached)
+    単体の POST /documents/{id}/extract と一括の /documents/extract-batch が共有する
+    本体。拒否は ApiError（E1001 不在 / E1005）で、単体はそのまま HTTP エラーに、
+    一括は帳票ごとの skipped に翻訳する。E1005 は ``details["reason"]`` で種類を示す
+    （confirmed / in_review / locked / processing / active_run）。一括の要約はこれで
+    数えるので、文言だけ変えて reason を落とさないこと。冪等キーの扱いは呼び出し側。
+
+    判定の順: 不在 → schema_id → 確定済み → 確定処理中 → 他者ロック → run の競合。
+    帳票の状態に関する拒否は supersede_review に**依らず**先に済ませる。
+    """
+    doc = _require_document(repo, principal.tenant_id, document_id)
 
     # 空文字の schema_id は「未指定」として扱う。そのまま INSERT すると
     # extraction_runs の FK 違反で 500（E2000 内部エラー）になり、利用者には
     # 原因が一切見えない（API 直叩きで実際に発生）。存在しない ID も 404 で明示する。
-    schema_id = (body.schema_id or "").strip() or None
+    schema_id = (schema_id or "").strip() or None
     if schema_id is not None and admin.get_schema_by_id(principal.tenant_id, schema_id) is None:
         raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
+
+    # 確定済み（会計連携済みを含む）は supersede_review に関係なく置き換えない
+    # （設計 bulk-processing D3 / region-template-editor §3.1）。以前は supersede_review
+    # の分岐の中でしか見ておらず、既定（false）の一括投入が has_active_run
+    # （processing + needs_review）だけを通って確定済みを queued に落としていた。
+    latest = repo.get_latest_run(principal.tenant_id, document_id)
+    if latest is not None and latest.status in ("confirmed", "exported"):
+        raise ApiError(
+            "E1005",
+            "確定済みの結果があります。再抽出すると確定値が置き換わります",
+            details={"document_id": document_id, "status": latest.status, "reason": "confirmed"},
+        )
+    # 確定処理中の窓。confirm は documents を in_review にするだけで run は needs_review
+    # のまま resume を投げる（get_delete_blocker と同じ理由）。ここで旧 run を superseded
+    # に落とすと、resume したワーカーは superseded を confirmed に進めて会計連携まで
+    # 流し、その確定値は新 run の後ろに隠れる。
+    if doc.status == "in_review":
+        raise ApiError(
+            "E1005",
+            "確定処理中です。完了してから再抽出してください",
+            details={"document_id": document_id, "status": doc.status, "reason": "in_review"},
+        )
+    # 他者のソフトロック（§8.2）。削除と同じく助言的だが、確認中の帳票を横から
+    # 置き換えると入力済みの修正は新 run に引き継がれず、相手の確定は E1005 で止まる。
+    info = locks.get(principal.tenant_id, document_id)
+    if info is not None and info.holder_sub != principal.sub:
+        raise ApiError(
+            "E1005",
+            "他のユーザーが確認中です",
+            details={"document_id": document_id, "reason": "locked", "holder": info.holder_name},
+        )
 
     # 再抽出で置き換える旧 run から引き継ぐ options（ワークフローの通知先など）
     inherited_options: dict[str, Any] = {}
@@ -406,18 +451,12 @@ def extract(
     # supersede_review=true のときだけ「今まさに処理中」だけを競合とみなす
     # （chat の rerun_extract と同じ意味論）。テンプレート化直後の再抽出は
     # 「自動発見 run が needs_review」が典型状態で、既定のままでは必ず 409 になる。
-    if body.supersede_review:
+    if supersede_review:
         if repo.has_processing_run(principal.tenant_id, document_id):
             raise ApiError(
-                "E1005", "実行中の Run と競合しています", details={"document_id": document_id}
-            )
-        latest = repo.get_latest_run(principal.tenant_id, document_id)
-        if latest is not None and latest.status in ("confirmed", "exported"):
-            # 確定済み（会計連携済みを含む）を無警告で置き換えない
-            raise ApiError(
                 "E1005",
-                "確定済みの結果があります。再抽出すると確定値が置き換わります",
-                details={"document_id": document_id, "status": latest.status},
+                "実行中の Run と競合しています",
+                details={"document_id": document_id, "reason": "processing"},
             )
         # ワークフロー起点の run は options に notify 先（hitl_gate を再開させる先）を
         # 持つ。引き継がずに置き換えると、**待機中のワークフローが永久に再開されず、
@@ -431,7 +470,11 @@ def extract(
         # 削除ブロッカー・ワークフローの hitl_gate が古い run を見続ける。
         repo.supersede_review_runs(principal.tenant_id, document_id)
     elif repo.has_active_run(principal.tenant_id, document_id):
-        raise ApiError("E1005", "実行中の Run と競合しています", details={"document_id": document_id})
+        raise ApiError(
+            "E1005",
+            "実行中の Run と競合しています",
+            details={"document_id": document_id, "reason": "active_run"},
+        )
 
     run_id = new_id("run")
     job_id = new_id("job")
@@ -442,7 +485,7 @@ def extract(
             document_id=document_id,
             schema_id=schema_id,
             status="processing",
-            options={**body.options.model_dump(), **inherited_options},
+            options={**options.model_dump(), **inherited_options},
         )
     )
     repo.create_job(
@@ -450,10 +493,203 @@ def extract(
     )
     repo.set_document_status(principal.tenant_id, document_id, "queued")
     queue.enqueue("q.extract", {"job_id": job_id, "tenant_id": principal.tenant_id, "run_id": run_id})
+    return job_id, run_id
 
+
+@router.post("/documents/{document_id}/extract", status_code=202, response_model=dto.ExtractAccepted)
+def extract(
+    document_id: str,
+    body: dto.ExtractRequest,
+    request: Request,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    principal: Principal = Depends(require_role("uploader")),
+    repo: Repository = Depends(get_repo),
+    queue: Queue = Depends(get_queue),
+    settings: Settings = Depends(get_settings),
+    admin: AdminRepository = Depends(get_admin),
+    locks: LockStore = Depends(get_lock_store),
+) -> dto.ExtractAccepted:
+    _require_document(repo, principal.tenant_id, document_id)
+
+    cached = _idempotency_hit(request, idempotency_key, principal.tenant_id)
+    if cached is not None:
+        return dto.ExtractAccepted(**cached)
+
+    job_id, run_id = _start_extract(
+        repo,
+        queue,
+        admin,
+        locks,
+        principal,
+        document_id,
+        body.schema_id,
+        body.options,
+        body.supersede_review,
+    )
     payload = {"job_id": job_id, "run_id": run_id}
     _idempotency_store(request, idempotency_key, principal.tenant_id, payload)
     return dto.ExtractAccepted(**payload)
+
+
+# 一括再抽出の上限。LLM を回す件数の歯止めであり、これを超える母集合は
+# 呼び出し側が繰り返す（doc_type 指定なら truncated=true で知らせる）。
+EXTRACT_BATCH_MAX = 200
+# doc_type 指定の既定の母集合。確定済み（confirmed / exported）は既定で入れない
+# （設計 region-template-editor §3.1: 確定値を無警告で置き換えない）。
+EXTRACT_BATCH_DEFAULT_STATUSES = ("uploaded", "needs_review", "failed")
+
+
+@router.post(
+    "/documents/extract-batch", status_code=202, response_model=dto.ExtractBatchResponse
+)
+def extract_batch(
+    body: dto.ExtractBatchRequest,
+    request: Request,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    principal: Principal = Depends(require_role("uploader")),
+    repo: Repository = Depends(get_repo),
+    queue: Queue = Depends(get_queue),
+    admin: AdminRepository = Depends(get_admin),
+    locks: LockStore = Depends(get_lock_store),
+) -> dto.ExtractBatchResponse:
+    """複数帳票の抽出をまとめて投入する（設計 bulk-processing §2）。
+
+    帳票ごとに単体 /extract と同じ判定（_start_extract）を通し、通らなかった帳票は
+    **skipped に理由付きで載せて続行する**。1 件の不在や競合で一括全体を 4xx に
+    しない——200 件のうち 1 件が確定済みなだけで残り 199 件が止まるのは使えない。
+    応答は常に 202（全件 skipped でも。何が起きたかは本文が伝える）。
+
+    document_ids 指定は一覧の選択をそのまま受けるので、確定済み・確定処理中
+    （in_review）・他者ロック中も混ざり得る。それらの拒否は _start_extract が
+    supersede_review に依らず行い、skipped の reason で見分けられる。
+    """
+    tenant_id = principal.tenant_id
+    # 単体 /extract と同じキャッシュを使うが、名前空間を分ける。同じキーを単体→一括で
+    # 使い回されると応答の形が違って 500 になる。
+    idem_key = f"extract-batch:{idempotency_key}" if idempotency_key else None
+    cached = _idempotency_hit(request, idem_key, tenant_id)
+    if cached is not None:
+        return dto.ExtractBatchResponse(**cached)
+
+    has_ids = body.document_ids is not None
+    doc_type = (body.doc_type or "").strip() or None
+    if has_ids == (doc_type is not None):
+        raise ApiError(
+            "E1003", "document_ids か doc_type のどちらか一方を指定してください"
+        )
+    if body.statuses is not None and doc_type is None:
+        raise ApiError("E1003", "statuses は doc_type と一緒にだけ指定できます")
+    if body.statuses is not None and not body.statuses:
+        raise ApiError("E1003", "statuses が空です")
+    # 一括全体に効く schema_id は先に検証する。帳票ごとに E1001 で 200 件 skipped に
+    # なるより、1 件も触らずに断る方が分かりやすい。
+    schema_id = (body.schema_id or "").strip() or None
+    if schema_id is not None and admin.get_schema_by_id(tenant_id, schema_id) is None:
+        raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
+
+    truncated = False
+    # (document_id, 分かっていれば doc_type)
+    targets: list[tuple[str, Optional[str]]]
+    if has_ids:
+        # 重複は 1 回にする（2 回目は必ず E1005 になり、skipped に紛れ込むだけ）
+        ids = list(dict.fromkeys(body.document_ids or []))
+        if len(ids) > EXTRACT_BATCH_MAX:
+            raise ApiError(
+                "E1003",
+                f"一度に投入できるのは {EXTRACT_BATCH_MAX} 件までです",
+                details={"count": len(ids), "max": EXTRACT_BATCH_MAX},
+            )
+        targets = [(d, None) for d in ids]
+    else:
+        statuses = list(body.statuses or EXTRACT_BATCH_DEFAULT_STATUSES)
+        rows, next_cursor = repo.list_documents(
+            tenant_id,
+            status=None,
+            cursor=None,
+            limit=EXTRACT_BATCH_MAX,
+            doc_type=doc_type,
+            statuses=statuses,
+        )
+        truncated = next_cursor is not None
+        targets = [(d.id, d.doc_type) for d in rows]
+
+    # doc_type → 最新版 schema_id（無ければ None）。帳票ごとに引き直さない
+    latest_by_type: dict[str, Optional[str]] = {}
+
+    def _latest_schema(dt: str) -> Optional[str]:
+        if dt not in latest_by_type:
+            rec = admin.get_schema(tenant_id, dt)
+            latest_by_type[dt] = rec.id if rec is not None else None
+        return latest_by_type[dt]
+
+    accepted: list[dto.ExtractBatchAcceptedItem] = []
+    skipped: list[dto.ExtractBatchSkippedItem] = []
+    for document_id, known_type in targets:
+        sid = schema_id
+        if sid is None:
+            dt = known_type
+            if has_ids:
+                doc = repo.get_document(tenant_id, document_id)
+                if doc is None:
+                    # 不在も他テナントも同じ「見つからない」（存在を漏らさない）
+                    skipped.append(
+                        dto.ExtractBatchSkippedItem(
+                            document_id=document_id,
+                            code="E1001",
+                            message="ドキュメントが見つかりません",
+                        )
+                    )
+                    continue
+                dt = doc.doc_type
+            if not dt:
+                skipped.append(
+                    dto.ExtractBatchSkippedItem(
+                        document_id=document_id,
+                        code="no_schema",
+                        message="帳票に種別が無いため、使う定義を決められません",
+                    )
+                )
+                continue
+            sid = _latest_schema(dt)
+            if sid is None:
+                skipped.append(
+                    dto.ExtractBatchSkippedItem(
+                        document_id=document_id,
+                        code="no_schema",
+                        message=f"種別「{dt}」の定義（スキーマ）がありません",
+                    )
+                )
+                continue
+        try:
+            job_id, run_id = _start_extract(
+                repo,
+                queue,
+                admin,
+                locks,
+                principal,
+                document_id,
+                sid,
+                body.options,
+                body.supersede_review,
+            )
+        except ApiError as exc:
+            reason = exc.details.get("reason")
+            skipped.append(
+                dto.ExtractBatchSkippedItem(
+                    document_id=document_id,
+                    code=exc.code,
+                    message=exc.message,
+                    reason=str(reason) if reason is not None else None,
+                )
+            )
+            continue
+        accepted.append(
+            dto.ExtractBatchAcceptedItem(document_id=document_id, job_id=job_id, run_id=run_id)
+        )
+
+    result = dto.ExtractBatchResponse(accepted=accepted, skipped=skipped, truncated=truncated)
+    _idempotency_store(request, idem_key, tenant_id, result.model_dump())
+    return result
 
 
 @router.get("/jobs/{job_id}", response_model=dto.JobStatus)
