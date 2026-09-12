@@ -13,6 +13,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 
 import { ApiError, api } from "@/lib/api";
+import { summarizeBatch } from "@/lib/bulk";
 import { useExtractJob } from "@/lib/useExtractJob";
 import { useToasts } from "@/lib/toast";
 import { newUuid } from "@/lib/uuid";
@@ -97,6 +98,42 @@ export function useSchemaSaved({
     [documentId, push, poll, qc, onRefetch],
   );
 
+  // 同じ種別の帳票をまとめて取り直す（設計 bulk-processing §3「スキーマ保存後のトースト」）。
+  // 母集合はサーバの既定（uploaded / needs_review / failed を新しい順に 200 件）で、
+  // 確定済みは supersede_review でも置き換わらない（D3）。件数はサーバが決めるので
+  // 確認文言では上限だけ伝える。結果はジョブ単位で待たず、要約トーストと一覧の
+  // 自動再取得（5 秒）に任せる。
+  const rerunAll = useCallback(
+    (docType: string) => {
+      if (
+        !window.confirm(
+          `種別「${docType}」の帳票（未抽出・レビュー待ち・失敗。新しい順に最大 200 件）を、\n` +
+            "新しい定義で取り直します。\n" +
+            "レビュー待ちの結果と、それに対して入力済みの修正は引き継がれません。\n" +
+            "確定済みの帳票は置き換えません。\n" +
+            "実行してよろしいですか？",
+        )
+      ) {
+        return;
+      }
+      void (async () => {
+        try {
+          const r = await api.extractBatch(
+            { doc_type: docType },
+            { supersede_review: true, idempotencyKey: newUuid() },
+          );
+          push(summarizeBatch(r));
+          qc.invalidateQueries({ queryKey: ["documents"] });
+          qc.invalidateQueries({ queryKey: ["result", documentId] });
+          onRefetch();
+        } catch (e) {
+          push({ kind: "err", message: `一括再抽出を開始できません（${(e as Error).message}）。` });
+        }
+      })();
+    },
+    [documentId, push, qc, onRefetch],
+  );
+
   // 旧版を参照したままの有効ワークフローを探す。put_schema は常に新 uuid の新版
   // INSERT だが、ワークフローの extract ノードは field_schemas.id を固定保持する。
   // ここで見つけられるのは**直前の版**を指しているものだけで、さらに古い版は
@@ -158,9 +195,12 @@ export function useSchemaSaved({
         action: canRerun
           ? { label: "この帳票を再抽出", onClick: () => rerun(r.schemaId) }
           : undefined,
+        // 同種の帳票をまとめて取り直す。この帳票が確定済みでも他の帳票には意味がある
+        // ので canRerun とは独立に出す（確定済みはサーバが skipped にする）。
+        actions: [{ label: "この種別の帳票をすべて再抽出", onClick: () => rerunAll(r.docType) }],
       });
       void warnStaleWorkflows(r.prevSchemaId);
     },
-    [push, qc, readOnly, runStatus, rerun, warnStaleWorkflows],
+    [push, qc, readOnly, runStatus, rerun, rerunAll, warnStaleWorkflows],
   );
 }

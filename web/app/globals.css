@@ -655,6 +655,21 @@ a {
 .extract-suggest b { color: var(--brand-deep); }
 .extract-suggest .sub { color: var(--ink3); }
 
+/* 「アップロード後に抽出を開始」（種別を選んだときだけ有効） */
+.upload-auto { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; cursor: pointer; }
+.upload-auto:has(input:disabled) { opacity: 0.6; cursor: default; }
+/* 逐次アップロードの進行（3/10 件をアップロード中…） */
+.doc-progress { font-variant-numeric: tabular-nums; }
+
+/* 一覧の選択列と一括再抽出（設計 bulk-processing §3） */
+.dtable th.sel, .dtable td.sel { width: 28px; padding-right: 0; }
+.dtable td.sel input, .dtable th.sel input { cursor: pointer; }
+.dtable tbody tr.selected { background: var(--brand-soft); }
+.bulk-dialog { width: min(520px, calc(100vw - 32px)); }
+.bulk-dialog p { margin: 0; font-size: 13px; line-height: 1.7; }
+.bulk-dialog label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.bulk-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+
 /* SCR-02 アップロードのドラッグ&ドロップ */
 .doc-dropzone { position: relative; }
 .doc-dropzone.over { outline: 2px dashed var(--brand-deep); outline-offset: -8px; border-radius: 12px; }

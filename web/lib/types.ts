@@ -214,6 +214,30 @@ export interface ExtractAccepted {
   run_id: string;
 }
 
+/** POST /documents/extract-batch の 1 件（設計 bulk-processing §2）。 */
+export interface ExtractBatchAccepted {
+  document_id: string;
+  job_id: string;
+  run_id: string;
+}
+
+/**
+ * 投入しなかった帳票と理由。code は単体 /extract の ApiError コード
+ * （E1001 不在・E1005 競合/確定済み）か、一括固有の "no_schema"。
+ */
+export interface ExtractBatchSkipped {
+  document_id: string;
+  code: string;
+  message: string;
+}
+
+export interface ExtractBatchResponse {
+  accepted: ExtractBatchAccepted[];
+  skipped: ExtractBatchSkipped[];
+  /** doc_type 指定で母集合が上限（200）を超え、新しい順に切り詰めたとき true */
+  truncated: boolean;
+}
+
 export interface ClassifyCandidate {
   schema_id: string;
   doc_type: string;

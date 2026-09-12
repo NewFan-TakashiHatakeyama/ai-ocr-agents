@@ -37,6 +37,9 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
       const st = (e as { status?: number } | null)?.status ?? 0;
       return st >= 500 && count < 2;
     },
+    // 処理中の run（アップロード後に抽出を開始して遷移してきた直後や、一括再抽出の
+    // 対象）は結果が空のまま止まって見える。終わるまで取り直し、終われば止める。
+    refetchInterval: (query) => (query.state.data?.status === "processing" ? 3000 : false),
   });
   // result が E1001 のとき、それが「未抽出」なのか「帳票ごと削除済み」なのかは
   // result だけでは区別できない（サーバはどちらも E1001）。帳票の存在を別途確かめる。

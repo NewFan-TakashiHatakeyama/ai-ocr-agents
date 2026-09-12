@@ -6,6 +6,7 @@ import type {
   ConnectionDto,
   DryRunResultDto,
   ExtractAccepted,
+  ExtractBatchResponse,
   JobStatus,
   LintResultDto,
   WorkflowDto,
@@ -126,6 +127,25 @@ export const api = {
         schema_id: opts?.schema_id ?? null,
         options: { force_vl: opts?.force_vl ?? false },
         supersede_review: opts?.supersede_review ?? false,
+      }),
+    }),
+
+  // 複数帳票の抽出をまとめて投入する（設計 bulk-processing §2）。対象は
+  // document_ids か doc_type のどちらか一方。帳票ごとの拒否（確定済み・処理中・
+  // スキーマなし・不在）は skipped に理由付きで返り、HTTP は 202 のまま。
+  // 1 件の事情で全体が 4xx にはならないので、呼び出し側は必ず skipped を読んで伝える。
+  extractBatch: (
+    target: { document_ids: string[] } | { doc_type: string; statuses?: string[] },
+    opts?: { schema_id?: string; supersede_review?: boolean; idempotencyKey?: string },
+  ) =>
+    request<ExtractBatchResponse>(`/documents/extract-batch`, {
+      method: "POST",
+      headers: opts?.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : undefined,
+      body: JSON.stringify({
+        ...target,
+        schema_id: opts?.schema_id ?? null,
+        supersede_review: opts?.supersede_review ?? false,
+        options: {},
       }),
     }),
 
