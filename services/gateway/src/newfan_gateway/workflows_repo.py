@@ -81,6 +81,25 @@ class WorkflowsRepository(Protocol):
         self, tenant_id: str, workflow_id: str, status: str
     ) -> Optional[WorkflowRecord]: ...
 
+    # 削除（C9-D）。draft/paused（active でない）かつ run が 1 件も無いときだけ
+    def has_runs(self, tenant_id: str, workflow_id: str) -> bool: ...
+    def delete_workflow(
+        self,
+        tenant_id: str,
+        workflow_id: str,
+        *,
+        actor_id: str,
+        detail: dict[str, Any],
+    ) -> bool:
+        """定義行を消し、監査を同じトランザクションに残す。消せなければ False。
+
+        条件（status <> 'active' かつ workflow_runs が無い）は DELETE 文自体に含める。
+        ルータの事前チェックとは別トランザクションなので、その間に有効化・実行された
+        ものを黙って消さない。run があると FK（workflow_runs.workflow_id）でも落ちるが、
+        それは 500 になるので条件で先に止める。
+        """
+        ...
+
     # activate 時の lint L009/L010 の参照解決
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool: ...
     def schema_is_latest(self, tenant_id: str, schema_id: str) -> bool: ...
@@ -215,6 +234,29 @@ class InMemoryWorkflowsRepository:
             return None
         w.status = status
         return w
+
+    def has_runs(self, tenant_id: str, workflow_id: str) -> bool:
+        return any(
+            r.tenant_id == tenant_id and r.workflow_id == workflow_id for r in self._runs.values()
+        )
+
+    def delete_workflow(
+        self,
+        tenant_id: str,
+        workflow_id: str,
+        *,
+        actor_id: str,
+        detail: dict[str, Any],
+    ) -> bool:
+        w = self.get_workflow(tenant_id, workflow_id)
+        if w is None or w.status == "active" or self.has_runs(tenant_id, workflow_id):
+            return False
+        del self._rows[workflow_id]
+        self.record_audit(
+            tenant_id, actor_id=actor_id, action="workflow.delete", target_id=workflow_id,
+            detail={**detail, "name": w.name, "status": w.status, "version": w.version},
+        )
+        return True
 
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool:
         return (tenant_id, schema_id) in self._schemas

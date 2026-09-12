@@ -350,6 +350,12 @@ export const api = {
     request<WorkflowDto>(`/workflows/${id}/activate`, { method: "POST" }),
   pauseWorkflow: (id: string) =>
     request<WorkflowDto>(`/workflows/${id}/pause`, { method: "POST" }),
+  // 削除（C9-D）。draft/paused で実行履歴が無いものだけ。active は 409(reason=active)、
+  // 履歴があれば 409(reason=has_runs) — その場合は停止のまま残す
+  deleteWorkflow: (id: string) =>
+    request<{ workflow_id: string; deleted: boolean }>(`/workflows/${id}`, {
+      method: "DELETE",
+    }),
   listWorkflowRuns: (id: string) =>
     request<{ items: WorkflowRunItemDto[] }>(`/workflows/${id}/runs`),
 

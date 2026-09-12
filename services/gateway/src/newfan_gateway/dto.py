@@ -371,6 +371,13 @@ class WorkflowList(BaseModel):
     items: list[WorkflowSummaryDto]
 
 
+class WorkflowDeleted(BaseModel):
+    """DELETE /workflows/{id} の受領書（C9-D）。204 にしない理由は DocumentDeleted と同じ。"""
+
+    workflow_id: str
+    deleted: bool = True
+
+
 class LintFindingDto(BaseModel):
     rule: str
     severity: str

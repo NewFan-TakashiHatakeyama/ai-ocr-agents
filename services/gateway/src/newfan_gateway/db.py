@@ -1422,6 +1422,64 @@ class PgWorkflowsRepository:
             ).first()
         return self.get_workflow(tenant_id, workflow_id) if r else None
 
+    def has_runs(self, tenant_id: str, workflow_id: str) -> bool:
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            r = c.execute(
+                text(
+                    "SELECT 1 FROM workflow_runs WHERE tenant_id=:t AND workflow_id=:w LIMIT 1"
+                ),
+                {"t": tenant_id, "w": workflow_id},
+            ).first()
+        return r is not None
+
+    def delete_workflow(self, tenant_id: str, workflow_id: str, *, actor_id: str, detail) -> bool:
+        """定義の削除（C9-D）。条件を DELETE 文に含め、監査を同じトランザクションで残す。
+
+        run があると workflow_runs.workflow_id の FK でも落ちるが、それは 500 に
+        なるので NOT EXISTS で先に止める（同時に run が作られた窓は IntegrityError を
+        「消せなかった」に倒す）。監査はアプリロールが DELETE できない audit_logs
+        （ensure_app_role.py）に残る唯一の痕跡なので、削除本体と同じトランザクションに置く。
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            with self._engine.begin() as c:
+                self._rls(c, tenant_id)
+                row = c.execute(
+                    text(
+                        "DELETE FROM workflows w WHERE w.tenant_id=:t AND w.id=:i"
+                        " AND w.status <> 'active'"
+                        " AND NOT EXISTS (SELECT 1 FROM workflow_runs r"
+                        "   WHERE r.tenant_id=:t AND r.workflow_id=:i)"
+                        " RETURNING w.name, w.status, w.version"
+                    ),
+                    {"t": tenant_id, "i": workflow_id},
+                ).first()
+                if row is None:
+                    return False
+                c.execute(
+                    text(
+                        "INSERT INTO audit_logs (id, tenant_id, actor_type, actor_id, action,"
+                        " target_type, target_id, detail)"
+                        " VALUES (:a_id,:t,'human',:a,'workflow.delete','workflow',:i,"
+                        " CAST(:d AS jsonb))"
+                    ),
+                    {
+                        "a_id": new_id("audit"),
+                        "t": tenant_id,
+                        "a": actor_id,
+                        "i": workflow_id,
+                        "d": json.dumps(
+                            {**detail, "name": row[0], "status": row[1], "version": row[2]},
+                            ensure_ascii=False,
+                        ),
+                    },
+                )
+        except IntegrityError:
+            return False
+        return True
+
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool:
         with self._engine.begin() as c:
             self._rls(c, tenant_id)

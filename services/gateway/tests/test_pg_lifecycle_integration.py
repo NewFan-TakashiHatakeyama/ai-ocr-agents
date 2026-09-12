@@ -313,6 +313,71 @@ def test_アーカイブしてもextraction_runsのFKは保たれ定義を辿れ
             c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": _SCH})
 
 
+# ---------- ワークフロー ----------
+
+
+def _audit_actions(owner, target_id: str) -> list[str]:
+    with owner.begin() as c:
+        rows = c.execute(
+            text("SELECT action FROM audit_logs WHERE tenant_id=:t AND target_id=:i ORDER BY created_at"),
+            {"t": TENANT, "i": target_id},
+        ).all()
+    return [r[0] for r in rows]
+
+
+def test_draftの削除は行と監査を同一トランザクションで残す(repos, owner) -> None:
+    _, wf = repos
+    wid = _insert_workflow(owner, status="draft")
+    assert wf.has_runs(TENANT, wid) is False
+    assert wf.delete_workflow(TENANT, wid, actor_id="sato", detail={"by": "test"}) is True
+    assert wf.get_workflow(TENANT, wid) is None
+    assert _audit_actions(owner, wid) == ["workflow.delete"]
+    with owner.begin() as c:
+        detail = c.execute(
+            text("SELECT detail FROM audit_logs WHERE tenant_id=:t AND target_id=:i"),
+            {"t": TENANT, "i": wid},
+        ).scalar_one()
+    assert (detail["status"], detail["version"], detail["by"]) == ("draft", 1, "test")
+    # 2 回目は False（無い）、監査も増えない
+    assert wf.delete_workflow(TENANT, wid, actor_id="sato", detail={}) is False
+    assert _audit_actions(owner, wid) == ["workflow.delete"]
+
+
+def test_activeはDELETE文の条件で消えない(repos, owner) -> None:
+    _, wf = repos
+    wid = _insert_workflow(owner, status="active")
+    assert wf.delete_workflow(TENANT, wid, actor_id="sato", detail={}) is False
+    assert wf.get_workflow(TENANT, wid) is not None
+    assert _audit_actions(owner, wid) == []
+    # paused なら消せる
+    wf.set_status(TENANT, wid, "paused")
+    assert wf.delete_workflow(TENANT, wid, actor_id="sato", detail={}) is True
+
+
+def test_runがあるワークフローは消えずFKも張られている(repos, owner) -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    _, wf = repos
+    wid = _insert_workflow(owner, status="paused")
+    _insert_run(owner, wid)
+    assert wf.has_runs(TENANT, wid) is True
+    assert wf.delete_workflow(TENANT, wid, actor_id="sato", detail={}) is False
+    assert wf.get_workflow(TENANT, wid) is not None
+    assert _audit_actions(owner, wid) == []
+    # ガードを飛ばした物理削除は workflow_runs.workflow_id の FK に当たる
+    with pytest.raises(IntegrityError):
+        with owner.begin() as c:
+            c.execute(text("DELETE FROM workflows WHERE id=:i"), {"i": wid})
+
+
+def test_他テナントのワークフローは消せない(repos, owner) -> None:
+    _, wf = repos
+    wid = _insert_workflow(owner, status="draft")
+    assert wf.has_runs(OTHER, wid) is False
+    assert wf.delete_workflow(OTHER, wid, actor_id="sato", detail={}) is False
+    assert wf.get_workflow(TENANT, wid) is not None
+
+
 def test_audit_logsのtarget_typeを指定できる(repos, owner) -> None:
     _, wf = repos
     wf.record_audit(

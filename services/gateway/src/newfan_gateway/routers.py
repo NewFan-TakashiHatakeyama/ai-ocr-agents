@@ -1569,6 +1569,50 @@ def update_workflow(
     return _workflow_dto(rec)
 
 
+@router.delete("/workflows/{workflow_id}", response_model=dto.WorkflowDeleted)
+def delete_workflow(
+    workflow_id: str,
+    principal: Principal = Depends(require_role("admin")),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.WorkflowDeleted:
+    """ワークフローの削除（C9-D）。**active でなく、run が 1 件も無い**ものだけ。
+
+    run が残る定義を消すと、履歴（workflow_runs / node_runs）の参照先が無くなり
+    retry も再現もできない。使わなくなったものは停止（pause）のまま残す。
+    条件は Pg 実装の DELETE 文にも含める（事前チェックとは別トランザクション）。
+    """
+    rec = wf.get_workflow(principal.tenant_id, workflow_id)
+    if rec is None:
+        raise ApiError("E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id})
+    if rec.status == "active":
+        raise ApiError(
+            "E1005",
+            "有効なワークフローは削除できません。先に停止してください",
+            details={"reason": "active", "status": rec.status},
+        )
+    if wf.has_runs(principal.tenant_id, workflow_id):
+        raise ApiError(
+            "E1005",
+            "実行履歴があるワークフローは削除できません。停止のまま残してください",
+            details={"reason": "has_runs", "status": rec.status},
+        )
+    ok = wf.delete_workflow(
+        principal.tenant_id, workflow_id, actor_id=principal.sub, detail={"by": "api"}
+    )
+    if not ok:
+        # 事前チェックの後に有効化・実行された（別トランザクション）か、同時削除
+        if wf.get_workflow(principal.tenant_id, workflow_id) is None:
+            raise ApiError(
+                "E1001", "ワークフローが見つかりません", details={"workflow_id": workflow_id}
+            )
+        raise ApiError(
+            "E1005",
+            "有効化または実行されたため削除できません。停止のまま残してください",
+            details={"reason": "changed"},
+        )
+    return dto.WorkflowDeleted(workflow_id=workflow_id)
+
+
 @router.post("/workflows/{workflow_id}/lint", response_model=dto.WorkflowLintResponse)
 def lint_workflow(
     workflow_id: str,

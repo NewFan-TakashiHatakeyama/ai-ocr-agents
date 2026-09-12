@@ -9,6 +9,7 @@ import { AppShell } from "@/components/AppShell";
 import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
 import { useToasts } from "@/lib/toast";
+import type { WorkflowListItemDto } from "@/lib/types";
 
 // 新規作成の雛形: 手動トリガー → 抽出。エディタで育てる前提の最小 DAG
 const TEMPLATE_GRAPH = {
@@ -59,6 +60,44 @@ export default function WorkflowsPage() {
       push({ kind: "warn", message: `作成に失敗しました（${(e as Error).message}）。` }),
   });
 
+  // 削除（C9-D）。draft/paused で実行履歴が無いものだけ消せる。active は先に停止、
+  // 履歴があるものは停止のまま残す（履歴の参照先が無くなる）。
+  const del = useMutation({
+    mutationFn: (w: WorkflowListItemDto) => api.deleteWorkflow(w.id),
+    onSuccess: (_r, w) => {
+      push({ kind: "ok", message: `「${w.name}」を削除しました。` });
+      qc.invalidateQueries({ queryKey: ["workflows"] });
+    },
+    onError: (e, w) => {
+      // instanceof は dev のモジュール重複で false になり得るため status/details を直接見る
+      const err = e as { status?: number; details?: Record<string, unknown> };
+      if (err.status === 409) {
+        const reason = String(err.details?.reason ?? "");
+        push({
+          kind: "warn",
+          message:
+            reason === "active"
+              ? `「${w.name}」は有効なため削除できません。先に停止してください。`
+              : reason === "has_runs"
+                ? `「${w.name}」には実行履歴があるため削除できません。停止のまま残してください。`
+                : `「${w.name}」は有効化または実行されたため削除できません。一覧を更新してください。`,
+        });
+        qc.invalidateQueries({ queryKey: ["workflows"] });
+        return;
+      }
+      push({ kind: "err", message: `削除できませんでした（${(e as Error).message}）。` });
+    },
+  });
+
+  function confirmThenDelete(w: WorkflowListItemDto) {
+    const ok = window.confirm(
+      `ワークフロー「${w.name}」（v${w.version}）を削除します。\n` +
+        "定義は消え、元に戻せません（実行履歴があるものは削除できず、停止のまま残ります）。\n\n" +
+        "よろしいですか？",
+    );
+    if (ok) del.mutate(w);
+  }
+
   if (error instanceof ApiError && error.status === 403) return <AdminDenied />;
 
   return (
@@ -81,6 +120,23 @@ export default function WorkflowsPage() {
             <div className="wf-card-head">
               <span className="wf-name">{w.name}</span>
               <StatusChip status={w.status} />
+              {w.status !== "active" && (
+                // カード全体がリンクなので、ボタンはリンク遷移を止めてから動かす。
+                // active には出さない（押させてから 409 で断るのは最悪の順序。先に停止）
+                <button
+                  className="btn sm danger"
+                  style={{ marginLeft: "auto" }}
+                  disabled={del.isPending && del.variables?.id === w.id}
+                  title="このワークフローを削除する（元に戻せません。実行履歴があるものは削除できません）"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    confirmThenDelete(w);
+                  }}
+                >
+                  {del.isPending && del.variables?.id === w.id ? "削除中…" : "削除"}
+                </button>
+              )}
             </div>
             <div className="wf-card-sub">
               v{w.version}

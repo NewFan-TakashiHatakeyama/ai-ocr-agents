@@ -142,6 +142,69 @@ def test_admin以外は触れない(client: TestClient) -> None:
     assert r.status_code == 403
 
 
+# ---------- 削除（C9-D） ----------
+
+
+def test_draftは削除でき監査が残る(client: TestClient, repo: InMemoryWorkflowsRepository) -> None:
+    w = _create(client)
+    r = client.delete(f"/v1/workflows/{w['id']}", headers=_auth())
+    assert r.status_code == 200, r.text
+    assert r.json() == {"workflow_id": w["id"], "deleted": True}
+    assert client.get(f"/v1/workflows/{w['id']}", headers=_auth()).status_code == 400
+    assert client.get("/v1/workflows", headers=_auth()).json()["items"] == []
+    audit = repo.audits[-1]
+    assert (audit["action"], audit["target_id"], audit["detail"]["status"]) == (
+        "workflow.delete", w["id"], "draft",
+    )
+    # 2 回目は「見つからない」
+    assert client.delete(f"/v1/workflows/{w['id']}", headers=_auth()).status_code == 400
+
+
+def test_activeは削除できず停止すれば削除できる(client: TestClient) -> None:
+    w = _create(client)
+    client.post(f"/v1/workflows/{w['id']}/activate", headers=_auth())
+    r = client.delete(f"/v1/workflows/{w['id']}", headers=_auth())
+    assert r.status_code == 409
+    err = r.json()["error"]
+    assert err["code"] == "E1005" and err["details"]["reason"] == "active"
+    assert "停止" in err["message"]
+    assert client.get(f"/v1/workflows/{w['id']}", headers=_auth()).status_code == 200
+
+    client.post(f"/v1/workflows/{w['id']}/pause", headers=_auth())
+    r = client.delete(f"/v1/workflows/{w['id']}", headers=_auth())
+    assert r.status_code == 200, r.text
+
+
+def test_実行履歴があるワークフローは削除できない(
+    client: TestClient, repo: InMemoryWorkflowsRepository
+) -> None:
+    from newfan_gateway.records import WorkflowRunRecord
+
+    w = _create(client)
+    client.post(f"/v1/workflows/{w['id']}/activate", headers=_auth())
+    client.post(f"/v1/workflows/{w['id']}/pause", headers=_auth())
+    repo.create_run(
+        WorkflowRunRecord(
+            id="wfrun_1", tenant_id="ten_1", workflow_id=w["id"],
+            trigger={"type": "manual", "graph_json": GRAPH_OK}, status="succeeded",
+        )
+    )
+    r = client.delete(f"/v1/workflows/{w['id']}", headers=_auth())
+    assert r.status_code == 409
+    err = r.json()["error"]
+    assert err["details"]["reason"] == "has_runs"
+    assert "停止のまま" in err["message"]
+    assert client.get(f"/v1/workflows/{w['id']}", headers=_auth()).status_code == 200
+    assert not any(a["action"] == "workflow.delete" for a in repo.audits)
+
+
+def test_削除は他テナントとadmin以外は不可(client: TestClient) -> None:
+    w = _create(client)
+    assert client.delete(f"/v1/workflows/{w['id']}", headers=_auth(tenant="ten_2")).status_code == 400
+    assert client.delete(f"/v1/workflows/{w['id']}", headers=_auth(role="reviewer")).status_code == 403
+    assert client.get(f"/v1/workflows/{w['id']}", headers=_auth()).status_code == 200
+
+
 # ---------- activate / pause ----------
 
 
