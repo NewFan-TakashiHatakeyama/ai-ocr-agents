@@ -8,20 +8,24 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
-import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
 from newfan_metrics import current_tenant, webhook_delivery_failures_total
 
-# SSRF ガードの実体は newfan-netguard。gateway（配信先の登録時）も同じ判定を使うが、
-# gateway が export を import すると層が逆転するため共有パッケージへ置いた。
-# ここは既存の import（newfan_export.webhook.is_blocked_url）を保つ再エクスポート。
-from newfan_netguard import Resolver, default_resolver, is_blocked_url
+# SSRF ガードと署名の実体は newfan-netguard。gateway（配信先の登録時・疎通テスト）も
+# 同じ判定・同じ署名を使うが、gateway が export を import すると層が逆転するため
+# 共有パッケージへ置いた。ここは既存の import
+# （newfan_export.webhook.is_blocked_url / sign）を保つ再エクスポート。
+from newfan_netguard import (
+    Resolver,
+    default_resolver,
+    encode_event,
+    is_blocked_url,
+    sign,
+    signed_headers,
+)
 
 from newfan_export.errors import ExportError
 
@@ -44,11 +48,6 @@ def next_retry_delay(attempt: int) -> Optional[int]:
     if 0 <= attempt < len(RETRY_SCHEDULE_SEC):
         return RETRY_SCHEDULE_SEC[attempt]
     return None
-
-
-def sign(body: bytes, secret: str) -> str:
-    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return f"sha256={digest}"
 
 
 def build_event(
@@ -85,12 +84,9 @@ class WebhookSender:
         """1 回送信して成否を返す。ブロック URL は ExportError。"""
         if is_blocked_url(url, resolver=self._resolver):
             raise ExportError("E5001", f"配信先 URL が拒否されました: {url}")
-        body = json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "X-NF-Signature": sign(body, secret),
-            "X-NF-Timestamp": str(int(time.time())),
-        }
+        # 本文の符号化と署名ヘッダは gateway の疎通テストと同じ関数（newfan_netguard）
+        body = encode_event(event)
+        headers = signed_headers(body, secret)
         try:
             resp = self._client.post(url, content=body, headers=headers)
         except httpx.HTTPError:

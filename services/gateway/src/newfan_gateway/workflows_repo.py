@@ -98,12 +98,16 @@ class WorkflowsRepository(Protocol):
 
 
 class InMemoryWorkflowsRepository:
-    def __init__(self) -> None:
+    def __init__(self, *, admin: Any = None) -> None:
         self._rows: dict[str, WorkflowRecord] = {}
         self._runs: dict[str, WorkflowRunRecord] = {}
         self._node_runs: dict[str, list[WorkflowNodeRunRecord]] = {}
         self._schemas: set[tuple[str, str]] = set()
         self._connections: set[tuple[str, str]] = set()
+        # 接続の実体（AdminRepository）を渡すと connection_ok が Pg 実装と同じ規則
+        # （status IN ('active','tested')）で判定する。seed_connection は従来どおり
+        # 無条件 OK（既存テストの互換）
+        self._admin = admin
         self.audits: list[dict[str, Any]] = []
 
     # --- テスト/dev 用 seed ---
@@ -165,7 +169,13 @@ class InMemoryWorkflowsRepository:
         return (tenant_id, schema_id) in self._schemas
 
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool:
-        return (tenant_id, connection_id) in self._connections
+        if (tenant_id, connection_id) in self._connections:
+            return True
+        if self._admin is None:
+            return False
+        # 疎通未確認（untested）の接続は有効化に使わせない（Pg の connection_ok と同じ）
+        rec = self._admin.get_connection(tenant_id, connection_id)
+        return rec is not None and rec.status in ("active", "tested")
 
     # --- 実行（P3） ---
     def create_run(self, rec: WorkflowRunRecord) -> WorkflowRunRecord:

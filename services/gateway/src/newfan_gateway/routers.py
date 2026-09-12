@@ -22,6 +22,12 @@ from newfan_gateway.auth import Principal
 from newfan_gateway.chat import ChatAgent
 from newfan_gateway.chat_tools import field_validation_message
 from newfan_gateway.config import Settings
+from newfan_gateway.conntest import (
+    ConnectionTestError,
+    build_test_event,
+    check_s3,
+    check_webhook,
+)
 from newfan_gateway.admin import AdminRepository, is_activatable
 from newfan_gateway.deps import (
     get_admin,
@@ -50,6 +56,7 @@ from newfan_gateway.ports import Ingestor, OrchestratorClient
 from newfan_gateway.queue import Queue
 from newfan_gateway.workflows_repo import IMPLEMENTED_NODE_TYPES, WorkflowsRepository
 from newfan_gateway.records import (
+    ConnectionRecord,
     CorrectionRecord,
     DocumentRecord,
     JobRecord,
@@ -1731,16 +1738,41 @@ def test_connection(
     wf: WorkflowsRepository = Depends(get_workflows),
     secret_store: Any = Depends(get_secret_store),
 ) -> dto.ConnectionTestResult:
-    """疎通テスト（DB は SELECT 1 のみ, §16.5 / P6）。成功で status='tested' になる。
+    """疎通テスト（§16.5 / P6）。成功で status='tested' になる。
 
-    sink/トリガーは tested/active の接続しか使わないため、これを通すまで実行に乗らない。
+    sink/トリガーは tested/active の接続しか使わないため、これを通すまで実行に乗らない
+    （lint L010）。種別ごとの実体:
+    - postgres: SELECT 1（失敗は従来どおり 200 + ok=false で理由を返す）
+    - webhook: 本配信と同じ署名・ヘッダで {"event":"test"} を 1 回送る。SSRF ガードを
+      通し、2xx で成功。失敗（非 2xx・ネットワーク・URL 拒否）は 422 で理由を返す
+    - s3: sink と同じ作り方のクライアントで HeadBucket。失敗は 422 で理由を返す
+    - フォルダ監視系（gdrive/m365/box）は「今すぐ同期」が疎通テストを兼ねる
+      （同期成功で worker が tested に上げる）
     """
     rec = admin.get_connection(principal.tenant_id, connection_id)
     if rec is None:
         raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
+    if rec.type in ("webhook", "s3"):
+        try:
+            if rec.type == "webhook":
+                _ping_webhook_connection(rec, secret_store)
+            else:
+                _ping_s3_connection(rec)
+        except ConnectionTestError as exc:
+            wf.record_audit(
+                principal.tenant_id, actor_id=principal.sub, action="connection.test",
+                target_id=connection_id, detail={"ok": False, "reason": exc.message},
+            )
+            raise ApiError(
+                "E4001", exc.message, details={"type": rec.type, **exc.details}
+            ) from exc
+        return _mark_connection_tested(admin, wf, principal, connection_id)
     if rec.type != "postgres":
         raise ApiError(
-            "E1005", "疎通テストは type=postgres のみ対応です", details={"type": rec.type}
+            "E1005",
+            "疎通テストは postgres / webhook / s3 のみ対応です"
+            "（フォルダ監視系は「今すぐ同期」が疎通テストを兼ねます）",
+            details={"type": rec.type, "supported": ["postgres", "webhook", "s3"]},
         )
 
     from newfan_workflow.dbsink import DbSinkError, build_dsn
@@ -1767,12 +1799,56 @@ def test_connection(
         )
         return dto.ConnectionTestResult(ok=False, status=rec.status, message=msg[:500])
 
+    return _mark_connection_tested(admin, wf, principal, connection_id)
+
+
+def _mark_connection_tested(
+    admin: AdminRepository, wf: WorkflowsRepository, principal: Principal, connection_id: str
+) -> dto.ConnectionTestResult:
+    """疎通成功の共通末尾: status='tested'（connection_ok / L010 が要求する状態）+ 監査。"""
     admin.set_connection_status(principal.tenant_id, connection_id, "tested")
     wf.record_audit(
         principal.tenant_id, actor_id=principal.sub, action="connection.test",
         target_id=connection_id, detail={"ok": True},
     )
     return dto.ConnectionTestResult(ok=True, status="tested")
+
+
+def _ping_webhook_connection(rec: ConnectionRecord, secret_store: Any) -> None:
+    """webhook 接続へ署名付き test イベントを 1 回送る（失敗は ConnectionTestError）。
+
+    署名鍵は本配信（orchestrator の get_webhook_connection）と同じ優先順で解決する:
+    secret_ref（Secrets Manager）→ 旧行の config.secret。
+    """
+    from datetime import datetime, timezone
+
+    url = str(rec.config.get("url") or "")
+    if not url:
+        raise ConnectionTestError("config.url（配信先 URL）が未設定です")
+    if rec.secret_ref:
+        if secret_store is None:
+            raise ConnectionTestError("secret_ref があるのに秘密の保管先が未配線です")
+        try:
+            secret = str(secret_store.get(rec.secret_ref))
+        except Exception as exc:  # noqa: BLE001 - 保管先の例外文言（ARN 等）を外に出さない
+            raise ConnectionTestError(
+                "secret_ref の秘密を取得できません（Secrets Manager の名前・権限を確認）",
+                details={"secret_ref": rec.secret_ref},
+            ) from exc
+    else:
+        secret = str(rec.config.get("secret") or "")
+    event = build_test_event(
+        rec.id, tenant_id=rec.tenant_id,
+        occurred_at=datetime.now(timezone.utc).isoformat(),
+    )
+    check_webhook(url, secret, event)
+
+
+def _ping_s3_connection(rec: ConnectionRecord) -> None:
+    bucket = str(rec.config.get("bucket") or "")
+    if not bucket:
+        raise ConnectionTestError("config.bucket（バケット名）が未設定です")
+    check_s3(bucket)
 
 
 # 「今すぐ同期」のプロセス内デバウンス。連打で q.sync が無制限に滞留すると、

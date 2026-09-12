@@ -128,7 +128,7 @@ def test_未対応typeと不正なallowed_tablesは拒否(env) -> None:
     assert r.status_code == 422
 
 
-def test_疎通テストはpostgresのみで失敗理由を返す(env) -> None:
+def test_疎通テストはpostgresの失敗理由を200で返す(env) -> None:
     client, _, _, store = env
     c = _create_conn(client)
     # FakeSecretStore に接続不能な DSN を入れる → ok=false（status は untested のまま）
@@ -138,9 +138,11 @@ def test_疎通テストはpostgresのみで失敗理由を返す(env) -> None:
     assert r.json()["ok"] is False
     assert client.get("/v1/connections", headers=_auth()).json()["items"][0]["status"] == "untested"
 
-    w = _create_conn(client, type="webhook", config={}, allowed_tables=[])
+    # webhook / s3 は test_connection_test_webhook_s3.py（失敗は 422 で理由）。
+    # フォルダ監視系は「今すぐ同期」が疎通テストを兼ねるため E1005
+    w = _create_conn(client, type="gdrive", config={"folder_id": "f1"}, allowed_tables=[])
     r = client.post(f"/v1/connections/{w['id']}/test", headers=_auth())
-    assert r.status_code == 409  # E1005: DB のみ対応
+    assert r.status_code == 409  # E1005
 
 
 # ---------- dry-run ----------

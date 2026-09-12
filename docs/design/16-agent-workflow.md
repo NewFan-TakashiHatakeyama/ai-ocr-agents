@@ -406,6 +406,20 @@ resume → finalize）が完了したとき、ワーカーの完了 notify が `
 - 既存 `POST /webhooks/endpoints` は connections(type=webhook) へ書いており、§16 の
   接続管理と**既に同一テーブル**。残作業は `config.secret` → `secret_ref` への移行のみ
   （P6。旧 Q5 はこれで実質解消）
+- 疎通テスト `POST /connections/{id}/test`。sink/トリガーと lint L010 は
+  status が tested/active の接続しか使わないため、登録直後（untested）の接続は
+  これを通すまでワークフローを有効化できない。種別ごとの実体:
+
+  | type | 実体 | 失敗時 |
+  |---|---|---|
+  | postgres | `SELECT 1`（secret_ref → DSN。§P6） | 200 + `ok=false` + 理由（従来どおり） |
+  | webhook | 本配信と**同じ署名・同じヘッダ**（`newfan_netguard.signed_headers`）で `{"event":"test","connection_id":…}` を 1 回 POST。SSRF ガード（`is_blocked_url`）経由・5 秒。2xx で成功 | 422（E4001）+ 理由（HTTP ステータス／接続不可／タイムアウト／URL 拒否）。内部例外の文言は出さない |
+  | s3 | sink（`S3FileWriter`）と同じ `boto3.client("s3")` で `HeadBucket(config.bucket)` | 422（E4001）+ 理由（バケット不在／権限不足 s3:ListBucket／認証情報なし） |
+  | gdrive / m365 / box | 対象外（409 E1005）。「今すぐ同期」が兼ね、同期成功で worker が tested に上げる | — |
+
+  受信側は本配信と同じ検証コードでテスト署名を検証できる（署名の実装は gateway と
+  export で `newfan_netguard.webhook_sig` を共有し、ずれない）。UI（接続管理）は
+  各行の「疎通テスト」ボタンから叩き、結果を行内に出す。
 
 ---
 
