@@ -31,7 +31,6 @@ from newfan_workflow.classify import (
     canonical_doc_type,
     classify_text,
 )
-from newfan_workflow.title_zone import title_zone_text
 from newfan_workflow.dbsink import (
     LEDGER_COLUMN,
     build_db_write_sql,
@@ -51,6 +50,7 @@ from newfan_workflow.models import (
     NotifyNode,
     WebhookSinkNode,
 )
+from newfan_workflow.title_zone import title_zone_text
 
 from newfan_orchestrator.workflow_store import WorkflowRunStore
 
