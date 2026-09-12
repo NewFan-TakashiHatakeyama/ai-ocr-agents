@@ -197,3 +197,25 @@ def test_前回の出力がある_out_には_resume_を付けたときだけ回�
     assert r.stdout.count("[skip] 前回の出力に欠けた対はありません") == 2  # S3 / S2 は回さない
     assert h.report("s1")["extracted"] == N_DOCS["s1"] * 2
     assert h.report("s1")["trials"] == 3
+
+
+def test_arms_で回すアームを絞る(tmp_path: Path) -> None:
+    """--arms s3: S3 だけ回す（決定論で S3 にしか届かない変更の測り直し）。他のアームは
+    領域も起こさず出力も作らない。不明なアームは止める。"""
+    h = _Harness(tmp_path)
+    r = h.run("--arms", "s3")
+    assert r.returncode == 0, r.stderr
+    ab = h.calls("region_ab")
+    assert len(ab) == 1 and "--gold golden/data/region_ab_s3.jsonl" in ab[0]
+    assert len(h.calls("region_from_gold")) == 1
+    assert (h.out / "s3_ab.json").exists()
+    assert not (h.out / "s2_ab.json").exists() and not (h.out / "s1_ab.json").exists()
+    # 同じ --out に --arms s2 は「前回の出力」に当たらない（S2 の出力は無い）ので回る
+    r = h.run("--arms", "s2")
+    assert r.returncode == 0, r.stderr
+    assert len(h.calls("region_ab")) == 2
+    # S3 をもう一度は止まる（前回の出力がある）
+    r = h.run("--arms", "s3")
+    assert r.returncode == 2 and "前回の出力があります" in r.stderr
+    r = h.run("--arms", "s4")
+    assert r.returncode == 2 and "不明なアーム" in r.stderr

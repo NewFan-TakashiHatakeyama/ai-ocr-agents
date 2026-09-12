@@ -1,0 +1,569 @@
+{
+ "_about": "読取領域ヒントの例示値の回帰フィクスチャ。第 4 回計測（2026-09-12、golden/out/phase4r4/c1）で region_from_gold が S2 / S3 の正解値の位置から起こした example_value の全件。placeholder_example（記入例語）の検出器が、記入例の帳票 sample13 由来の 3 件以外を落とさないことを services/orchestrator/tests/test_llm_nodes.py が検査する。",
+ "items": [
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample5",
+   "field": "issuer_name",
+   "example_value": "ABCモータース"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample5",
+   "field": "issuer_address",
+   "example_value": "〒100-0014 東京都千代田区永田町1丁目7-1"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample5",
+   "field": "customer_name",
+   "example_value": "伊達 政宗様"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample5",
+   "field": "customer_address",
+   "example_value": "宮城県仙台市青葉区川内1-1-1"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample5",
+   "field": "total_amount",
+   "example_value": "3,680,000円"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample5",
+   "field": "document_date",
+   "example_value": "2026-06-25"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample5",
+   "field": "document_no",
+   "example_value": "299"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample18",
+   "field": "issuer_name",
+   "example_value": "ABCモータース"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample18",
+   "field": "issuer_address",
+   "example_value": "〒100-0014 東京都千代田区永田町1丁目7-1"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample18",
+   "field": "customer_name",
+   "example_value": "伊達 政宗様"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample18",
+   "field": "customer_address",
+   "example_value": "宮城県仙台市青葉区川内1-1-1"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample18",
+   "field": "total_amount",
+   "example_value": "3,680,000円"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample18",
+   "field": "document_date",
+   "example_value": "2026-06-25"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample18",
+   "field": "document_no",
+   "example_value": "299"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample8",
+   "field": "customer_name",
+   "example_value": "株式会社千曲川ホーム"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample8",
+   "field": "customer_address",
+   "example_value": "神奈川県川崎市高津区坂戸 X-XX-XXXX"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample8",
+   "field": "total_amount",
+   "example_value": "￥2,475,000-"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample8",
+   "field": "document_date",
+   "example_value": "令和 5年 5月 1日"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample8",
+   "field": "document_no",
+   "example_value": "南北銀行 高田馬場支店(普)1234567"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample15",
+   "field": "customer_name",
+   "example_value": "株式会社千曲川ホーム"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample15",
+   "field": "customer_address",
+   "example_value": "神奈川県川崎市高津区坂戸 X-XX-XXXX"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample15",
+   "field": "total_amount",
+   "example_value": "￥2,475,000-"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample15",
+   "field": "document_date",
+   "example_value": "令和 5年 5月 1日"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample15",
+   "field": "document_no",
+   "example_value": "南北銀行高田馬場支店(普）1234567"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample21",
+   "field": "customer_name",
+   "example_value": "大熊和一様"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample21",
+   "field": "customer_address",
+   "example_value": "神奈川県横浜市青葉区美しが丘 18丁目5番地2号"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample21",
+   "field": "total_amount",
+   "example_value": "￥395,217-"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample21",
+   "field": "document_date",
+   "example_value": "令和 5年 5月 1日"
+  },
+  {
+   "arm": "s2",
+   "doc_type": "s2_sample21",
+   "field": "document_no",
+   "example_value": "15"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample12_from_sample17",
+   "field": "issuer_name",
+   "example_value": "わくわくファッション株式会社"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample12_from_sample17",
+   "field": "customer_name",
+   "example_value": "鈴木邦夫様"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample12_from_sample17",
+   "field": "total_amount",
+   "example_value": "11,870"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample12_from_sample17",
+   "field": "document_date",
+   "example_value": "纳品日付令和02年01月15日"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample12_from_sample17",
+   "field": "document_no",
+   "example_value": "纳品番号NH0001"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample17_from_sample12",
+   "field": "issuer_address",
+   "example_value": "東京都新宿区四谷0-0-0 四ツ谷ビル 12F"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample17_from_sample12",
+   "field": "customer_name",
+   "example_value": "山田太郎様"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample17_from_sample12",
+   "field": "total_amount",
+   "example_value": "￥2,200,000-"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample17_from_sample12",
+   "field": "document_date",
+   "example_value": "见積日付令和02年03月03日"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample17_from_sample12",
+   "field": "document_no",
+   "example_value": "見積番号MI0001"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample16_from_sample19",
+   "field": "issuer_name",
+   "example_value": "ビズリフォーム株式会社"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample16_from_sample19",
+   "field": "customer_name",
+   "example_value": "グランドコート浦和美園 管理組合理事長駒林次郎様"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample16_from_sample19",
+   "field": "total_amount",
+   "example_value": "御見積額¥60,500-"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample16_from_sample19",
+   "field": "document_date",
+   "example_value": "2023年4月17日"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample16_from_sample19",
+   "field": "document_no",
+   "example_value": "15082"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample16",
+   "field": "issuer_name",
+   "example_value": "ビズリフォーム株式会社"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample16",
+   "field": "issuer_address",
+   "example_value": "東京都新宿区高田馬場XX-X-XX 新宿ビルX階"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample16",
+   "field": "customer_name",
+   "example_value": "グランドコート浦和美園"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample16",
+   "field": "total_amount",
+   "example_value": "¥49,500-"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample16",
+   "field": "document_date",
+   "example_value": "2023年4月17日"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample16",
+   "field": "document_no",
+   "example_value": "No 15082"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample2_from_sample13",
+   "field": "issuer_name",
+   "example_value": "自社名（ロゴや社判も登録できます)"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample2_from_sample13",
+   "field": "issuer_address",
+   "example_value": "東京都千代田区住所1 住所2ビル名等"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample2_from_sample13",
+   "field": "customer_name",
+   "example_value": "得意先の会社名"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample2_from_sample13",
+   "field": "document_date",
+   "example_value": "見積日付令和02年02月01日"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample2_from_sample13",
+   "field": "document_no",
+   "example_value": "見積番号 MI0001"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample13_from_sample2",
+   "field": "issuer_name",
+   "example_value": "わくわく物産株式会社"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample13_from_sample2",
+   "field": "issuer_address",
+   "example_value": "東京都新宿区四谷9-9-9 サプライビル2F"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample13_from_sample2",
+   "field": "total_amount",
+   "example_value": "￥7,003-"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample13_from_sample2",
+   "field": "document_date",
+   "example_value": "請求日付令和02年01月31日"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample13_from_sample2",
+   "field": "document_no",
+   "example_value": "請求番号 GS0001"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample27_from_sample29",
+   "field": "issuer_name",
+   "example_value": "サンプル商事株式会社"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample27_from_sample29",
+   "field": "issuer_address",
+   "example_value": "テ000-0000東京都サンプル区サンプル1-2-3"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample27_from_sample29",
+   "field": "customer_name",
+   "example_value": "株式会社山田製作所"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample27_from_sample29",
+   "field": "total_amount",
+   "example_value": "¥985,600"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample27_from_sample29",
+   "field": "document_date",
+   "example_value": "発行日：2026/06/15"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample27_from_sample29",
+   "field": "document_no",
+   "example_value": "見積番号：EST-2026-0042"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample29_from_sample27",
+   "field": "issuer_name",
+   "example_value": "サンプル商事株式会社"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample29_from_sample27",
+   "field": "issuer_address",
+   "example_value": "東京都品川区北品川5-10-20 サンプルビル2F"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample29_from_sample27",
+   "field": "customer_name",
+   "example_value": "矢部隆司"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample29_from_sample27",
+   "field": "total_amount",
+   "example_value": "75,916"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample29_from_sample27",
+   "field": "document_date",
+   "example_value": "2019年3月27日"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample29_from_sample27",
+   "field": "document_no",
+   "example_value": "見積No.24"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample6_from_sample",
+   "field": "issuer_name",
+   "example_value": "SystemBase"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample6_from_sample",
+   "field": "customer_name",
+   "example_value": "A AA食品株式会社 AAA支社 御中"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample6_from_sample",
+   "field": "total_amount",
+   "example_value": "¥136,998"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample6_from_sample",
+   "field": "document_date",
+   "example_value": "2014年04月01日"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample6_from_sample",
+   "field": "document_no",
+   "example_value": "00000101"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample_from_sample6",
+   "field": "issuer_name",
+   "example_value": "東日本東京商社株式会社"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample_from_sample6",
+   "field": "issuer_address",
+   "example_value": "本社 981-3205 仙台市泉区紫山3-1-4"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample_from_sample6",
+   "field": "customer_name",
+   "example_value": "長崎カントリーフーズ"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample_from_sample6",
+   "field": "total_amount",
+   "example_value": "895,860円"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample_from_sample6",
+   "field": "document_date",
+   "example_value": "2003 年 09 月 30 日 締切分"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample4_from_sample19",
+   "field": "issuer_name",
+   "example_value": "ビズリフォーム株式会社"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample4_from_sample19",
+   "field": "customer_name",
+   "example_value": "グランドコート浦和美園 管理組合理事長駒林次郎様"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample4_from_sample19",
+   "field": "total_amount",
+   "example_value": "御見積額¥60,500-"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample4_from_sample19",
+   "field": "document_date",
+   "example_value": "2023年4月17日"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample4_from_sample19",
+   "field": "document_no",
+   "example_value": "15082"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample4",
+   "field": "issuer_name",
+   "example_value": "ABCモータース"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample4",
+   "field": "issuer_address",
+   "example_value": "東京都千代田区永田町1丁目7-1"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample4",
+   "field": "customer_name",
+   "example_value": "伊達政宗様"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample4",
+   "field": "customer_address",
+   "example_value": "宮城県仙台市青葉区川内1-1-1"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample4",
+   "field": "total_amount",
+   "example_value": "50,228"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample4",
+   "field": "document_date",
+   "example_value": "発行日 2024-07-24"
+  },
+  {
+   "arm": "s3",
+   "doc_type": "s3_sample19_from_sample4",
+   "field": "document_no",
+   "example_value": "599"
+  }
+ ]
+}

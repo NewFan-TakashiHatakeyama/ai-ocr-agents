@@ -415,11 +415,19 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     overlaps_exclude: "除外領域と重なっている",
     type_mismatch: "その位置の文字が項目の型に合わない",
     kind_conflict: "前回その位置にあった値と種類が合わない",
+    placeholder_example:
+      "テンプレートの例示値が記入例の語（自社名・住所1 など）で、値として使えない。記入例ではない帳票で領域を引き直してください",
     page_out_of_range: "テンプレートのページがこの帳票に無い",
     page_unprojectable: "ページ寸法が取れない",
   };
   const withEvidence = (n: string, reason: string, r: string) => {
-    // 種類・型の不一致は「例示 / 候補」を並べると一目で分かる。他の理由は候補が無いか無関係
+    // 種類・型の不一致は「例示 / 候補」を並べると一目で分かる。記入例語は例示値だけ見せれば
+    // 何が悪いか分かる（候補はこの帳票の別項目なので並べても意味が無い）。他の理由は候補が
+    // 無いか無関係
+    if (r === "placeholder_example") {
+      const ev = hintExample(n);
+      return ev ? `${reason}（例示: ${ev}）` : reason;
+    }
     if (r !== "kind_conflict" && r !== "type_mismatch") return reason;
     const ev = hintExample(n);
     const cands = hintCandidates(n);
