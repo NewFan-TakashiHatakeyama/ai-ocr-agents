@@ -2,6 +2,8 @@
 
 // 接続管理（⑤⑥ SaaS連携）。GDrive/S3/DB/Webhook の接続を一覧・作成し、
 // gdrive は「今すぐ同期」で監視フォルダを即時に差分検知できる。
+// postgres/webhook/s3 は「疎通テスト」で tested にする（ワークフローの有効化に必要。
+// フォルダ監視系は「今すぐ同期」の成功が疎通テストを兼ねる）。
 // 秘密は config に入れず secret_ref（Secrets Manager / env:）で渡す（§16.5）。
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -190,6 +192,29 @@ export default function ConnectionsPage() {
   // 1行の同期中に他の行まで「同期中…」表示・無効化される）
   const syncingId = sync.isPending ? (sync.variables as string) : null;
 
+  // 疎通テスト（postgres/webhook/s3）。結果は行内に残す（トーストだと消えて
+  // どの接続が落ちたか分からない）。postgres の失敗は 200 + ok=false、webhook/s3 の
+  // 失敗は 422（ApiError）で理由が返るので両方を同じ表示に寄せる
+  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>(
+    {},
+  );
+  const test = useMutation({
+    mutationFn: (id: string) => api.testConnection(id),
+    onSuccess: (r, id) => {
+      setTestResults((prev) => ({
+        ...prev,
+        [id]: r.ok
+          ? { ok: true, message: "テスト済" }
+          : { ok: false, message: r.message || "疎通テストに失敗しました" },
+      }));
+      if (r.ok) qc.invalidateQueries({ queryKey: ["connections"] });
+    },
+    onError: (e, id) => {
+      setTestResults((prev) => ({ ...prev, [id]: { ok: false, message: (e as Error).message } }));
+    },
+  });
+  const testingId = test.isPending ? (test.variables as string) : null;
+
   if (error instanceof ApiError && error.status === 403) return <AdminDenied />;
 
   const items = data?.items ?? [];
@@ -260,7 +285,8 @@ export default function ConnectionsPage() {
                       )}
                     </td>
                     <td>
-                      {(FOLDER_TYPES as readonly string[]).includes(c.type) && (
+                      {(FOLDER_TYPES as readonly string[]).includes(c.type) ? (
+                        // フォルダ監視系は「今すぐ同期」の成功が疎通テストを兼ねる
                         <button
                           className="btn sm"
                           disabled={syncingId === c.id}
@@ -268,6 +294,37 @@ export default function ConnectionsPage() {
                         >
                           {syncingId === c.id ? "同期中…" : "今すぐ同期"}
                         </button>
+                      ) : (
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <button
+                            className="btn sm"
+                            disabled={testingId === c.id}
+                            onClick={() => test.mutate(c.id)}
+                            title={
+                              c.type === "webhook"
+                                ? "本配信と同じ署名で {\"event\":\"test\"} を 1 回送ります（2xx で成功）"
+                                : c.type === "s3"
+                                  ? "バケットの存在と権限（HeadBucket）を確かめます"
+                                  : "SELECT 1 で接続を確かめます"
+                            }
+                          >
+                            {testingId === c.id ? "テスト中…" : "疎通テスト"}
+                          </button>
+                          {testResults[c.id] &&
+                            (testResults[c.id].ok ? (
+                              <span className="sub" style={{ color: "var(--green, #2e9e6b)" }}>
+                                ✓ {testResults[c.id].message}
+                              </span>
+                            ) : (
+                              <span
+                                className="sub"
+                                style={{ color: "var(--red, #c0392b)", maxWidth: 320 }}
+                                title={testResults[c.id].message}
+                              >
+                                ✗ {testResults[c.id].message}
+                              </span>
+                            ))}
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -289,6 +346,8 @@ export default function ConnectionsPage() {
         取り込みは環境稼働中のみ・定期ポーリング（既定5分、ローカルは15秒）。停止中に追加された
         ファイルは次回起動時にまとめて取り込まれます。秘密（トークン等）は config に書かず
         secret_ref で渡します（§16.5）。
+        「未テスト」の接続はワークフローの有効化に使えません。PostgreSQL / Webhook / S3 は
+        「疎通テスト」、フォルダ連携は「今すぐ同期」の成功で「テスト済」になります。
       </p>
     </AppShell>
   );

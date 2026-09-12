@@ -4,6 +4,7 @@ import type {
   CatalogDto,
   ClassifyResult,
   ConnectionDto,
+  ConnectionTestResult,
   DryRunResultDto,
   ExtractAccepted,
   ExtractBatchResponse,
@@ -241,6 +242,11 @@ export const api = {
   // 「今すぐ同期」: gdrive 接続の監視フォルダを即時に差分検知する（worker が実行）
   syncConnection: (connectionId: string) =>
     request<{ queued: boolean }>(`/connections/${connectionId}/sync`, { method: "POST" }),
+  // 疎通テスト（postgres: SELECT 1 / webhook: 署名付き test イベント / s3: HeadBucket）。
+  // 成功で status='tested'（ワークフローの有効化に使える）。postgres の失敗は
+  // 200 + ok=false、webhook/s3 の失敗は 422（ApiError）で理由が返る
+  testConnection: (connectionId: string) =>
+    request<ConnectionTestResult>(`/connections/${connectionId}/test`, { method: "POST" }),
   listRules: (status?: string) =>
     request<{ items: RuleDto[] }>(`/rules${status ? `?status=${status}` : ""}`),
   patchRule: (ruleId: string, status: string) =>

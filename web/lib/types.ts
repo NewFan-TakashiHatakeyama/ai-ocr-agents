@@ -284,6 +284,14 @@ export interface ConnectionDto {
   last_sync_error?: string | null;
 }
 
+// POST /connections/{id}/test の応答。成功で status='tested'。
+// postgres は失敗も 200 + ok=false + message、webhook/s3 の失敗は 422（ApiError）
+export interface ConnectionTestResult {
+  ok: boolean;
+  status: string;
+  message?: string | null;
+}
+
 export interface RuleDto {
   id: string;
   doc_type?: string | null;
