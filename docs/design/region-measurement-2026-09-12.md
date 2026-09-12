@@ -396,3 +396,8 @@ PYTHONPATH=golden/src python -m newfan_golden.region_ab \
 uv run python golden/scripts/eval_gates_v2.py \
   --s1 out/s1_ab.json --s2 out/s2_ab.json --s3 out/s3_ab.json
 ```
+
+**今回（第 3 回）の出力は次回の `--resume` に渡せない。** ADR-0007 で住所の採点規則が
+変わり（郵便番号・見出し語を落としてから比べる）、出力 JSON に採点規則の印 `scoring` が
+入るようになった。印が無い今回の出力から欠けた対だけ埋めると 1 つの McNemar 表に 2 つの
+規則が混ざるので、`region_ab` は拒む。次回は全件を回し直す。

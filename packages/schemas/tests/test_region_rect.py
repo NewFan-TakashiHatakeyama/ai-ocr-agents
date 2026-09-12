@@ -19,7 +19,9 @@ from newfan_schemas import (
     FieldDef,
     FieldSchema,
     RegionRect,
+    FieldType,
     check_field_name,
+    check_field_type,
 )
 
 RECT = [0.30, 0.02, 0.72, 0.09]
@@ -178,6 +180,21 @@ def test_check_field_name_rejects_reserved(name: str) -> None:
 def test_check_field_name_allows_ordinary_names(name: str) -> None:
     """先頭 ``__`` だけが予約。末尾や途中の ``__``・単独の ``_`` は通す（過剰拒否しない）。"""
     check_field_name(name)
+
+
+@pytest.mark.parametrize("type_", ["addres_jp", "text", "ADDRESS_JP", ""])
+def test_check_field_type_rejects_unknown(type_: str) -> None:
+    """FieldType に無い型は書き込み側で拒む。
+
+    実行時に orchestrator が FieldSchema で落とすと、その doc_type の抽出が全部 failed に
+    なって初めて分かる（ADR-0007 の address_jp の展開順の事故）。"""
+    with pytest.raises(ValueError, match="型"):
+        check_field_type(type_)
+
+
+@pytest.mark.parametrize("type_", [t.value for t in FieldType])
+def test_check_field_type_allows_every_field_type(type_: str) -> None:
+    check_field_type(type_)
 
 
 @pytest.mark.parametrize("name", ["__pages__", "__region__", "__x"])

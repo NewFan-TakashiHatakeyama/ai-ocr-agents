@@ -161,7 +161,7 @@
   "gold": {
    "issuer_name": "DEMO.co.,ltd",
    "customer_name": "sample.Inc",
-   "customer_address": "A-123Sample.BLD,1-2-3,sample-city",
+   "customer_address": "A-123 Sample.BLD,1-2-3,sample-city",
    "total_amount": "15608.40",
    "document_date": "31-MAY-24",
    "document_no": "sample-001"

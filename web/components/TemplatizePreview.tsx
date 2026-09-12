@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { RegionCanvas, type CanvasGhost, type CanvasRegion, type Px } from "@/components/RegionCanvas";
 import { ApiError, api } from "@/lib/api";
-import { guessFieldType } from "@/lib/fieldTypes";
+import { TYPE_OPTIONS, guessFieldType } from "@/lib/fieldTypes";
 // 保存 body の生成・検査・ゴースト解決・例示値の計算は純粋関数（lib/templatize）に
 // 置き、ここでは state とイベントだけを持つ。単体テストはそちらにだけ付ける。
 import {
@@ -36,21 +36,7 @@ import {
 import { newUuid } from "@/lib/uuid";
 import type { ExtractedField, PageDim, RegionRect, RunSpans } from "@/lib/types";
 
-export const TYPE_OPTIONS = [
-  ["string", "文字列"],
-  ["date", "日付"],
-  ["money_jpy", "金額(円)"],
-  ["number", "数値"],
-  ["tax_rate_jp", "税率"],
-  ["jp_invoice_reg_no", "登録番号(T+13桁)"],
-  ["jp_bank_account", "銀行口座"],
-  // 住所（ADR-0007）: 郵便番号・見出し語を落とし、都道府県〜建物名/階を値にする
-  ["address_jp", "住所(日本)"],
-  // table 型は新規作成では選べないが、編集モードで既存の明細定義が来たときに
-  // select が値を表示できずに壊れるため選択肢としては持つ（当該行は読み取り専用）。
-  ["table", "明細（表）"],
-] as const;
-
+// 型の選択肢は lib/fieldTypes.ts（スキーマ管理画面と共有）。
 // この画面で足した新規行の型の選択肢（設計 v2 D7）。table を除く —— 列定義の無い
 // 表項目ができてしまう。既存行は従来どおり（読み取り専用の table 行を表示できる）。
 const NEW_ROW_TYPE_OPTIONS = TYPE_OPTIONS.filter(([v]) => v !== "table");

@@ -259,6 +259,7 @@ class Test再開:
 
         monkeypatch.setattr(ab.httpx, "Client", _Client)
         prev = {
+            "scoring": ab.SCORING,
             "control_runs": [{"document_id": "d1", "trial": 0, "hits": 0, "total": 1, "run_id": None,
                               "field_hits": {"a": False}, "hints": None}],
             "treat_runs": [{"document_id": "d1", "trial": 0, "hits": 1, "total": 1, "run_id": None,
@@ -281,9 +282,50 @@ class Test再開:
         assert rep["per_doc_net"]["d1"] == {"pairs": 2, "control_hits": 1, "treat_hits": 2, "net": 1}
 
     def test_field_hits_の無い古い出力は再利用しない(self) -> None:
-        from newfan_golden.region_ab import _done_rows
-        assert _done_rows({"control_runs": [{"document_id": "d", "trial": 0, "hits": 1}]}) == {}
+        from newfan_golden.region_ab import SCORING, _done_rows
+        assert _done_rows({"scoring": SCORING,
+                           "control_runs": [{"document_id": "d", "trial": 0, "hits": 1}]}) == {}
         assert _done_rows(None) == {}
+
+    def test_採点規則の違う出力は拒む(self) -> None:
+        """第 3 回以前の出力（印なし、郵便番号付きの住所を不正解に数えている）や、別の
+        規則の出力から欠けた対だけ埋めると、1 つの McNemar 表に 2 つの採点規則が混ざる。
+        行は field_hits しか持たず再採点できないので、拒んで全件を回し直させる。"""
+        import pytest
+
+        from newfan_golden.region_ab import SCORING, RegionAbError, _done_rows
+
+        row = {"document_id": "d", "trial": 0, "hits": 1, "total": 1, "field_hits": {"a": True}}
+        with pytest.raises(RegionAbError, match="採点規則"):
+            _done_rows({"control_runs": [row]})  # 第 3 回以前: 印なし
+        with pytest.raises(RegionAbError, match="採点規則"):
+            _done_rows({"scoring": "something-else", "control_runs": [row]})
+        assert ("d", 0, "control") in _done_rows({"scoring": SCORING, "control_runs": [row]})
+
+    def test_出力には採点規則の印が入る(self, monkeypatch, tmp_path) -> None:
+        import newfan_golden.region_ab as ab
+        from newfan_golden.dataset import GoldField, GoldenDoc
+
+        img = tmp_path / "a.png"
+        img.write_bytes(b"x")
+        doc = GoldenDoc(document_id="d1", doc_type="t1", image_uri=str(img),
+                        fields=[GoldField(name="a", value="X")])
+        monkeypatch.setattr(ab, "_put_schema", lambda c, body: {"id": body["doc_type"]})
+        monkeypatch.setattr(ab, "_upload", lambda c, p: "docid")
+        monkeypatch.setattr(ab, "_extract", lambda c, d, s, t: "succeeded")
+        monkeypatch.setattr(ab, "_result", lambda c, d: {"run_id": "r", "fields": [], "region_stats": {}})
+
+        class _Client:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def delete(self, *a, **k): pass
+
+        monkeypatch.setattr(ab.httpx, "Client", _Client)
+        rep = ab.run([doc], {"t1": {}, "_positional": {}}, "http://x", "tok", 1, 1.0)
+        assert rep["scoring"] == ab.SCORING == "address_jp"
+        # 自分の出力は --resume に渡せる
+        assert ("d1", 0, "control") in ab._done_rows(rep)
 
 
 class Testスキーマの型:

@@ -47,6 +47,15 @@ class RegionAbError(RuntimeError):
     pass
 
 
+# 採点規則の印。出力 JSON の ``scoring`` に書き、``--resume`` で前回の出力を再利用するとき
+# 一致を要求する。行には field_hits（真偽）しか無く生の値は残らないので、規則が変わった
+# 後に古い行を再採点することはできない。印が無い（第 3 回以前）か違う出力から欠けた対
+# だけ埋めると、1 つの McNemar 表に 2 つの採点規則が混ざる ── 住所は第 3 回では郵便番号
+# 付きの答えが不正解、いまは正解になるので、混ざると住所の差分の向きが読めなくなる。
+# 規則を変えたらここを変える（例: 住所の正規化を変えたら "address_jp-v2"）。
+SCORING = "address_jp"
+
+
 def field_type_for(name: str) -> str:
     """A/B の 2 版に載せる項目の型。
 
@@ -321,8 +330,22 @@ def _put_schema(client: httpx.Client, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _done_rows(resume: Optional[dict[str, Any]]) -> dict[tuple[str, int, str], dict[str, Any]]:
-    """前回の出力から (document_id, trial, arm) → 行 を引く（--resume 用）。"""
+    """前回の出力から (document_id, trial, arm) → 行 を引く（--resume 用）。
+
+    前回の出力の ``scoring`` が今の ``SCORING`` と違えば拒む。行は field_hits しか持たず
+    再採点できないので、混ぜると 1 つの表に 2 つの採点規則が入る。規則が変わったら
+    全件を回し直すこと。
+    """
     out: dict[tuple[str, int, str], dict[str, Any]] = {}
+    if resume is None:
+        return out
+    prev = resume.get("scoring")
+    if prev != SCORING:
+        raise RegionAbError(
+            f"--resume の出力は採点規則が違います（前回: {prev or 'なし（ADR-0007 より前）'} / "
+            f"今回: {SCORING}）。行は field_hits しか持たず再採点できないので混ぜられません。"
+            "全件を回し直してください"
+        )
     for arm in ("control", "treat"):
         for r in (resume or {}).get(f"{arm}_runs", []) or []:
             if isinstance(r.get("field_hits"), dict):
@@ -347,7 +370,8 @@ def run(
     ``resume`` に前回の出力を渡すと、そこに結果がある (帳票, 試行, アーム) は抽出せず
     前回の行（field_hits / hints）から集計し直し、**無いものだけ**回す。LLM 側の一時的な
     失敗で対が欠けたとき、全部を回し直さずに対を埋めるため（第 3 回計測で、対照アームの
-    3 試行が LLM 出力の欠陥で failed になった）。
+    3 試行が LLM 出力の欠陥で failed になった）。前回の出力の ``scoring`` が今と違えば
+    RegionAbError（採点規則の混在を防ぐ）。
     """
     positional_map = regions.get("_positional", {})
     done = _done_rows(resume)
@@ -472,6 +496,8 @@ def run(
 
     return {
         "trials": trials,
+        # 採点規則の印（--resume の一致検査に使う）
+        "scoring": SCORING,
         "control_exact_match": _rate(tally.control_runs),
         "treat_exact_match": _rate(tally.treat_runs),
         "control_runs": tally.control_runs,
