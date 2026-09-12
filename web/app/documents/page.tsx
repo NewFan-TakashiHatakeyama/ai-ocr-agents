@@ -10,7 +10,6 @@ import { StatusChip } from "@/components/StatusChip";
 import { api } from "@/lib/api";
 import {
   countRunning,
-  latestSchemaId,
   partitionFiles,
   partitionSelection,
   summarizeBatch,
@@ -53,7 +52,9 @@ function DocumentsInner() {
   // 取込時の種別指定。"" = 未指定（＝スキーマなしの自動発見。ADR-0006 の既定）。
   // 候補は GET /doc-types から取る。listSchemas は admin 限定で、アップロードは
   // uploader で通るため、そちらを使うと権限の低い人には選択肢が空になる。
-  // 「アップロード後に抽出を開始」もこの一覧の schema_id（種別の最新版）を使う。
+  // この一覧は**選択肢のラベルにしか使わない**。「アップロード後に抽出を開始」で使う
+  // 定義の版はサーバが帳票の種別から最新版を解く（下の uploadAll）。ここの schema_id
+  // を使うと、テンプレートを直して 5 分以内に戻ってきたときに旧版で 30 通が走る。
   const [docType, setDocType] = useState("");
   const docTypes = useQuery({
     queryKey: ["doc-types"],
@@ -85,13 +86,15 @@ function DocumentsInner() {
       return;
     }
     const type = docType || undefined;
-    const schemaId = autoExtract && type ? latestSchemaId(docTypes.data?.items, type) : undefined;
+    const startExtract = autoExtract && !!type;
     const tally: UploadTally = {
       ok: 0,
       failed: 0,
+      failedReasons: [],
       rejected: rejected.length,
       extractStarted: 0,
       extractFailed: 0,
+      extractFailedReasons: [],
     };
     let lastCreated: string | null = null;
     setProgress({ done: 0, total: accepted.length });
@@ -102,20 +105,33 @@ function DocumentsInner() {
           const created = await api.uploadDocument(accepted[i], type);
           tally.ok += 1;
           lastCreated = created.document_id;
-          if (schemaId) {
+          if (startExtract) {
+            // schema_id は送らず、サーバに帳票の種別の**最新版**を解かせる（一括再抽出と
+            // 同じ経路）。クライアントの doc-types キャッシュ（5 分）から取ると、直前に
+            // 保存した版が反映されず、領域や項目の追加が黙って効かない。
+            // 単体 /extract の schema_id 省略は「スキーマなしの自動発見」なので使えない。
             try {
-              await api.extract(created.document_id, {
-                schema_id: schemaId,
-                idempotencyKey: newUuid(),
-              });
-              tally.extractStarted += 1;
-            } catch {
+              const r = await api.extractBatch(
+                { document_ids: [created.document_id] },
+                { idempotencyKey: newUuid() },
+              );
+              if (r.accepted.length === 1) {
+                tally.extractStarted += 1;
+              } else {
+                tally.extractFailed += 1;
+                tally.extractFailedReasons.push(r.skipped[0]?.message ?? "理由不明");
+              }
+            } catch (e) {
               // アップロード自体は成功している。帳票ページから開始できる
               tally.extractFailed += 1;
+              tally.extractFailedReasons.push((e as Error).message);
             }
           }
-        } catch {
+        } catch (e) {
+          // サーバの理由（E1002 サイズ上限・E1001 非対応形式・403 権限）を要約に残す。
+          // 件数だけだと同じファイルを何度も投げ直すことになる
           tally.failed += 1;
+          tally.failedReasons.push((e as Error).message);
         }
       }
     } finally {
@@ -457,7 +473,7 @@ function DocumentsInner() {
       </div>
 
       {/* 一括再抽出の確認（設計 bulk-processing §3）。種別の無い帳票はスキップされること、
-          確定済みは置き換わらないことを押す前に伝える */}
+          確定済み・確定処理中・他の利用者が確認中の帳票は置き換わらないことを押す前に伝える */}
       {confirmOpen && (
         <div className="tpl-overlay" role="dialog" aria-modal="true" aria-label="選択した帳票を再抽出">
           <div className="tpl-card bulk-dialog">
@@ -475,6 +491,7 @@ function DocumentsInner() {
             <p className="sub">
               いまの抽出結果と、それに対して入力済みの修正は新しい結果へ引き継がれません。
               確定済み（確定 / 連携済）の帳票はチェックに関係なく置き換えません。
+              確定処理中の帳票と、他の利用者が検証画面で確認中の帳票もスキップされます。
             </p>
             <label className="sub">
               <input

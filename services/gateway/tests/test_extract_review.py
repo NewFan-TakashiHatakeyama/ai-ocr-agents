@@ -301,7 +301,75 @@ def test_extract_rejects_confirmed_document(ctx: SimpleNamespace) -> None:
         json={"supersede_review": True},
     )
     assert r.status_code == 409 and r.json()["error"]["code"] == "E1005"
+    assert r.json()["error"]["details"]["reason"] == "confirmed"
     assert ctx.repo.get_run("ten_1", run).status == "confirmed"  # 触っていない
+
+
+def test_extract_rejects_confirmed_document_without_supersede(ctx: SimpleNamespace) -> None:
+    """確定済み（confirmed / exported）は**既定（supersede_review=false）でも**拒否する。
+
+    以前は確定済みの判定が supersede_review の分岐の中にしか無く、既定の経路は
+    has_active_run（processing + needs_review）だけを見て確定済みを queued に落として
+    いた。確定値が新しい needs_review の後ろに隠れ、2 回目の確定で会計連携が再送される。
+    """
+    for status in ("confirmed", "exported"):
+        doc_id = _upload(ctx)
+        run = RunRecord(id=f"run_{status}", tenant_id="ten_1", document_id=doc_id, status=status)
+        ctx.repo.create_run(run)
+        ctx.repo.set_document_status("ten_1", doc_id, status)
+        r = ctx.client.post(f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={})
+        assert r.status_code == 409 and r.json()["error"]["code"] == "E1005", status
+        assert r.json()["error"]["details"] == {
+            "document_id": doc_id,
+            "status": status,
+            "reason": "confirmed",
+        }
+        assert ctx.repo.get_document("ten_1", doc_id).status == status
+        assert ctx.repo.get_latest_run("ten_1", doc_id).id == run.id
+    assert ctx.queue.messages == []
+
+
+def test_extract_rejects_in_review_document(ctx: SimpleNamespace) -> None:
+    """確定処理中（documents=in_review、run=needs_review）は supersede_review でも拒否。
+    旧 run を superseded に落とすと、resume したワーカーが superseded を confirmed に
+    進めて会計連携まで流し、その確定値が新 run の後ろに隠れる。"""
+    doc_id = _upload(ctx)
+    run = _seed_needs_review_run(ctx, doc_id)
+    c = ctx.client.post(
+        f"/v1/documents/{doc_id}/confirm", headers=auth("reviewer"), json={"run_id": run}
+    )
+    assert c.status_code == 202
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract",
+        headers=auth("uploader"),
+        json={"supersede_review": True},
+    )
+    assert r.status_code == 409 and r.json()["error"]["code"] == "E1005"
+    assert r.json()["error"]["details"]["reason"] == "in_review"
+    assert ctx.repo.get_run("ten_1", run).status == "needs_review"
+
+
+def test_extract_rejects_document_locked_by_other_user(ctx: SimpleNamespace) -> None:
+    """他者がソフトロック中（検証画面で確認中）は拒否する。UI は readOnly でボタンを
+    隠すが、一覧の一括投入やスキーマ保存後の「すべて再抽出」は帳票ごとの readOnly を
+    知らないので、サーバで止める。自分のロックは通す。"""
+    from gw_helpers import make_token
+
+    doc_id = _upload(ctx)
+    other = {"Authorization": f"Bearer {make_token(role='reviewer', sub='u2')}"}
+    assert ctx.client.post(f"/v1/documents/{doc_id}/lock", headers=other).status_code == 200
+    r = ctx.client.post(f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "E1005"
+    assert r.json()["error"]["details"]["reason"] == "locked"
+    assert r.json()["error"]["details"]["holder"] == "u2"
+    assert ctx.queue.messages == []
+
+    # 本人（sub=u1）が取り直したロックなら通る
+    assert ctx.client.post(f"/v1/documents/{doc_id}/lock", headers=other).status_code == 200
+    assert ctx.client.delete(f"/v1/documents/{doc_id}/lock", headers=other).status_code == 200
+    assert ctx.client.post(f"/v1/documents/{doc_id}/lock", headers=auth("reviewer")).status_code == 200
+    r2 = ctx.client.post(f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={})
+    assert r2.status_code == 202
 
 
 def test_superseded_run_は確定できない(ctx: SimpleNamespace) -> None:

@@ -7,15 +7,29 @@ import type { ExtractBatchResponse } from "@/lib/types";
 import {
   classifySkip,
   countRunning,
-  latestSchemaId,
   partitionFiles,
   partitionSelection,
   summarizeBatch,
+  summarizeReasons,
   summarizeUploads,
+  type UploadTally,
 } from "./bulk";
 
 function res(over: Partial<ExtractBatchResponse>): ExtractBatchResponse {
   return { accepted: [], skipped: [], truncated: false, ...over };
+}
+
+function tally(over: Partial<UploadTally>): UploadTally {
+  return {
+    ok: 0,
+    failed: 0,
+    failedReasons: [],
+    rejected: 0,
+    extractStarted: 0,
+    extractFailed: 0,
+    extractFailedReasons: [],
+    ...over,
+  };
 }
 
 const acc = (id: string) => ({ document_id: id, job_id: `job_${id}`, run_id: `run_${id}` });
@@ -23,8 +37,26 @@ const CONFIRMED = {
   document_id: "d_c",
   code: "E1005",
   message: "確定済みの結果があります。再抽出すると確定値が置き換わります",
+  reason: "confirmed",
 };
-const BUSY = { document_id: "d_b", code: "E1005", message: "実行中の Run と競合しています" };
+const BUSY = {
+  document_id: "d_b",
+  code: "E1005",
+  message: "実行中の Run と競合しています",
+  reason: "active_run",
+};
+const IN_REVIEW = {
+  document_id: "d_r",
+  code: "E1005",
+  message: "確定処理中です。完了してから再抽出してください",
+  reason: "in_review",
+};
+const LOCKED = {
+  document_id: "d_l",
+  code: "E1005",
+  message: "他のユーザーが確認中です",
+  reason: "locked",
+};
 const NO_SCHEMA = {
   document_id: "d_n",
   code: "no_schema",
@@ -52,53 +84,90 @@ describe("partitionFiles", () => {
   });
 });
 
-describe("latestSchemaId", () => {
-  const types = [
-    { doc_type: "invoice", schema_id: "sch_inv_v3", version: 3 },
-    { doc_type: "receipt", schema_id: "sch_rc_v1", version: 1 },
-  ];
-  it("種別の最新版 id を返す。無ければ undefined", () => {
-    expect(latestSchemaId(types, "invoice")).toBe("sch_inv_v3");
-    expect(latestSchemaId(types, "quotation")).toBeUndefined();
-    expect(latestSchemaId(undefined, "invoice")).toBeUndefined();
+describe("summarizeReasons", () => {
+  it("同じ文言はまとめ、空は落とす", () => {
+    expect(summarizeReasons(["A", "A", " ", "B"])).toBe("A / B");
+    expect(summarizeReasons([])).toBe("");
+  });
+  it("種類が多いときは先頭 3 種類＋ほか", () => {
+    expect(summarizeReasons(["A", "B", "C", "D"])).toBe("A / B / C ほか");
+    expect(summarizeReasons(["A", "B", "C"])).toBe("A / B / C");
   });
 });
 
 describe("summarizeUploads", () => {
   it("全件成功・抽出開始なし", () => {
-    expect(
-      summarizeUploads({ ok: 3, failed: 0, rejected: 0, extractStarted: 0, extractFailed: 0 }),
-    ).toEqual({ kind: "ok", message: "3 件をアップロードしました。" });
+    expect(summarizeUploads(tally({ ok: 3 }))).toEqual({
+      kind: "ok",
+      message: "3 件をアップロードしました。",
+    });
   });
 
   it("抽出も開始した", () => {
-    expect(
-      summarizeUploads({ ok: 3, failed: 0, rejected: 0, extractStarted: 3, extractFailed: 0 }),
-    ).toEqual({ kind: "ok", message: "3 件をアップロードしました。3 件の抽出を開始しました。" });
+    expect(summarizeUploads(tally({ ok: 3, extractStarted: 3 }))).toEqual({
+      kind: "ok",
+      message: "3 件をアップロードしました。3 件の抽出を開始しました。",
+    });
   });
 
-  it("失敗・抽出不可・形式除外は warn で、それぞれ件数を出す", () => {
-    const r = summarizeUploads({ ok: 2, failed: 1, rejected: 2, extractStarted: 1, extractFailed: 1 });
+  it("失敗・抽出不可・形式除外は warn で、それぞれ件数と理由を出す", () => {
+    const r = summarizeUploads(
+      tally({
+        ok: 2,
+        failed: 1,
+        failedReasons: ["サイズ上限 20971520 バイトを超えています"],
+        rejected: 2,
+        extractStarted: 1,
+        extractFailed: 1,
+        extractFailedReasons: ["種別「invoice」の定義（スキーマ）がありません"],
+      }),
+    );
     expect(r.kind).toBe("warn");
     expect(r.message).toBe(
       "2 件をアップロードしました。1 件の抽出を開始しました。" +
-        "1 件は抽出を開始できませんでした（帳票ページから開始できます）。" +
-        "1 件は失敗しました。" +
+        "1 件は抽出を開始できませんでした（種別「invoice」の定義（スキーマ）がありません。帳票ページから開始できます）。" +
+        "1 件は失敗しました（サイズ上限 20971520 バイトを超えています）。" +
         "2 件は取り込めない形式（PDF / PNG / JPEG / TIFF 以外）のため除外しました。",
     );
   });
 
-  it("1 件も上がらなかった", () => {
+  it("理由が取れなかったときは件数だけ", () => {
+    const r = summarizeUploads(tally({ ok: 2, failed: 1, extractFailed: 1 }));
+    expect(r.message).toBe(
+      "2 件をアップロードしました。" +
+        "1 件は抽出を開始できませんでした（帳票ページから開始できます）。" +
+        "1 件は失敗しました。",
+    );
+  });
+
+  it("1 件も上がらなかったときは理由を件数の横に出す（同じ理由はまとめる）", () => {
     expect(
-      summarizeUploads({ ok: 0, failed: 2, rejected: 0, extractStarted: 0, extractFailed: 0 }),
-    ).toEqual({ kind: "warn", message: "アップロードに失敗しました（2 件）。" });
+      summarizeUploads(
+        tally({ failed: 2, failedReasons: ["非対応または不整合なファイル形式です", "非対応または不整合なファイル形式です"] }),
+      ),
+    ).toEqual({
+      kind: "warn",
+      message: "アップロードに失敗しました（2 件: 非対応または不整合なファイル形式です）。",
+    });
+    expect(summarizeUploads(tally({ failed: 2 }))).toEqual({
+      kind: "warn",
+      message: "アップロードに失敗しました（2 件）。",
+    });
   });
 });
 
 describe("classifySkip", () => {
-  it("E1005 は文言で確定済みと処理中を見分ける", () => {
+  it("E1005 はサーバの reason で見分ける（確定済み / 処理中 / 確定処理中 / 他者ロック）", () => {
     expect(classifySkip(CONFIRMED)).toBe("confirmed");
     expect(classifySkip(BUSY)).toBe("busy");
+    expect(classifySkip({ ...BUSY, reason: "processing" })).toBe("busy");
+    expect(classifySkip(IN_REVIEW)).toBe("busy");
+    expect(classifySkip(LOCKED)).toBe("locked");
+  });
+  it("reason の無い応答は文言で確定済みか否かだけ見る（「確定処理中」を確定済みにしない）", () => {
+    expect(classifySkip({ ...CONFIRMED, reason: undefined })).toBe("confirmed");
+    expect(classifySkip({ ...BUSY, reason: null })).toBe("busy");
+    expect(classifySkip({ ...IN_REVIEW, reason: undefined })).toBe("busy");
   });
   it("no_schema / E1001 / その他", () => {
     expect(classifySkip(NO_SCHEMA)).toBe("no_schema");
@@ -115,16 +184,24 @@ describe("summarizeBatch", () => {
     });
   });
 
-  it("一部スキップは内訳を固定順（確定済み → 処理中 → スキーマなし → 見つからない）で出す", () => {
+  it("一部スキップは内訳を固定順（確定済み → 処理中 → 他の利用者が確認中 → スキーマなし → 見つからない）で出す", () => {
     const r = summarizeBatch(
       res({
         accepted: [acc("a"), acc("b"), acc("c")],
-        skipped: [NO_SCHEMA, CONFIRMED, { ...CONFIRMED, document_id: "d_c2" }, MISSING, BUSY],
+        skipped: [
+          NO_SCHEMA,
+          CONFIRMED,
+          LOCKED,
+          { ...CONFIRMED, document_id: "d_c2" },
+          MISSING,
+          BUSY,
+          IN_REVIEW,
+        ],
       }),
     );
     expect(r.kind).toBe("warn");
     expect(r.message).toBe(
-      "3 件を再抽出に投入しました（5 件はスキップ: 確定済み 2 / 処理中 1 / スキーマなし 1 / 見つからない 1）。",
+      "3 件を再抽出に投入しました（7 件はスキップ: 確定済み 2 / 処理中 2 / 他の利用者が確認中 1 / スキーマなし 1 / 見つからない 1）。",
     );
   });
 

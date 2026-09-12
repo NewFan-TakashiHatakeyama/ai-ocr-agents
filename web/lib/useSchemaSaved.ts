@@ -100,9 +100,10 @@ export function useSchemaSaved({
 
   // 同じ種別の帳票をまとめて取り直す（設計 bulk-processing §3「スキーマ保存後のトースト」）。
   // 母集合はサーバの既定（uploaded / needs_review / failed を新しい順に 200 件）で、
-  // 確定済みは supersede_review でも置き換わらない（D3）。件数はサーバが決めるので
-  // 確認文言では上限だけ伝える。結果はジョブ単位で待たず、要約トーストと一覧の
-  // 自動再取得（5 秒）に任せる。
+  // 確定済みは supersede_review でも置き換わらない（D3）。他の利用者が検証画面で
+  // 確認中（ロック中）の帳票もサーバが skipped にする（D9。入力中の修正を横から
+  // 消さない）。件数はサーバが決めるので確認文言では上限だけ伝える。結果はジョブ
+  // 単位で待たず、要約トーストと一覧の自動再取得（5 秒）に任せる。
   const rerunAll = useCallback(
     (docType: string) => {
       if (
@@ -110,7 +111,7 @@ export function useSchemaSaved({
           `種別「${docType}」の帳票（未抽出・レビュー待ち・失敗。新しい順に最大 200 件）を、\n` +
             "新しい定義で取り直します。\n" +
             "レビュー待ちの結果と、それに対して入力済みの修正は引き継がれません。\n" +
-            "確定済みの帳票は置き換えません。\n" +
+            "確定済みの帳票と、他の利用者が確認中の帳票は置き換えません（スキップされます）。\n" +
             "実行してよろしいですか？",
         )
       ) {
@@ -174,8 +175,11 @@ export function useSchemaSaved({
   return useCallback(
     (r: SchemaSaved, created: boolean) => {
       qc.invalidateQueries({ queryKey: ["schemas"] });
+      // 一覧の種別セレクト（GET /doc-types、staleTime 5 分）も捨てる。作成した種別が
+      // 5 分間セレクトに出ない・版の表示が古いまま、を避ける
+      qc.invalidateQueries({ queryKey: ["doc-types"] });
       // 確定済み（会計連携済みを含む）を無警告で置き換えないため再抽出は出さない。
-      // 他者がロック中も同様（サーバも弾くが、押せない方が親切）。
+      // 他者がロック中も同様（サーバも E1005 reason=locked で弾くが、押せない方が親切）。
       const canRerun = !readOnly && runStatus !== "confirmed" && runStatus !== "exported";
       push({
         kind: "ok",

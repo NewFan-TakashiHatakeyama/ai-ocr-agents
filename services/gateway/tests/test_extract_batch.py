@@ -96,11 +96,106 @@ def test_batch_needs_review_requires_supersede(ctx: SimpleNamespace) -> None:
     assert r.status_code == 202
     assert r.json()["accepted"] == []
     assert r.json()["skipped"][0]["code"] == "E1005"
+    assert r.json()["skipped"][0]["reason"] == "active_run"
     assert ctx.repo.get_run("ten_1", old).status == "needs_review"
 
     r2 = _batch(ctx, {"document_ids": [doc], "supersede_review": True})
     assert [a["document_id"] for a in r2.json()["accepted"]] == [doc]
     assert ctx.repo.get_run("ten_1", old).status == "superseded"
+
+
+def test_batch_confirmed_rejected_without_supersede(ctx: SimpleNamespace) -> None:
+    """確定済み（confirmed / exported）は **supersede_review=false でも** skipped。
+
+    以前は確定済みの判定が supersede_review の分岐の中にしか無く、既定の一括投入は
+    has_active_run（processing + needs_review）だけを通って確定済みを queued に落とし、
+    新しい needs_review が会計連携済みの確定値を隠していた。一覧のダイアログは
+    「確定済みはチェックに関係なく置き換えない」と言っている（設計 D3 / D7）。
+    """
+    confirmed = _upload(ctx, "invoice")
+    ctx.repo.set_document_status("ten_1", confirmed, "confirmed")
+    c_run = _seed_run(ctx, confirmed, "confirmed")
+    exported = _upload(ctx, "invoice")
+    ctx.repo.set_document_status("ten_1", exported, "exported")
+    e_run = _seed_run(ctx, exported, "exported")
+
+    r = _batch(ctx, {"document_ids": [confirmed, exported], "supersede_review": False})
+    assert r.status_code == 202, r.text
+    assert r.json()["accepted"] == []
+    by_id = {s["document_id"]: s for s in r.json()["skipped"]}
+    assert set(by_id) == {confirmed, exported}
+    for did in (confirmed, exported):
+        assert by_id[did]["code"] == "E1005"
+        assert by_id[did]["reason"] == "confirmed"
+        assert "確定済み" in by_id[did]["message"]
+    # 何も触っていない: 状態も最新 run も run の本数も
+    assert ctx.repo.get_document("ten_1", confirmed).status == "confirmed"
+    assert ctx.repo.get_document("ten_1", exported).status == "exported"
+    assert ctx.repo.get_latest_run("ten_1", confirmed).id == c_run
+    assert ctx.repo.get_latest_run("ten_1", exported).id == e_run
+    assert ctx.queue.messages == []
+
+    # doc_type + statuses で確定済みを母集合に入れても同じ（大量置き換えの経路）
+    r2 = _batch(ctx, {"doc_type": "invoice", "statuses": ["confirmed", "exported"]})
+    assert r2.json()["accepted"] == []
+    assert {s["document_id"]: s["reason"] for s in r2.json()["skipped"]} == {
+        confirmed: "confirmed",
+        exported: "confirmed",
+    }
+    assert ctx.queue.messages == []
+
+
+def test_batch_in_review_document_is_skipped(ctx: SimpleNamespace) -> None:
+    """確定処理中（documents.status=in_review、run は needs_review のまま）は
+    supersede_review でも skipped。
+
+    confirm は documents を in_review にして resume を投げるだけで、run は worker が
+    finalize するまで needs_review のまま。この窓で旧 run を superseded に落とすと、
+    worker は superseded を confirmed に進めて会計連携まで流し、その確定値は新 run
+    の後ろに隠れる（削除の get_delete_blocker と同じ理由）。
+    """
+    doc = _upload(ctx, "invoice")
+    old = _seed_run(ctx, doc, "needs_review")
+    c = ctx.client.post(
+        f"/v1/documents/{doc}/confirm", headers=auth("reviewer"), json={"run_id": old}
+    )
+    assert c.status_code == 202, c.text
+    assert ctx.repo.get_document("ten_1", doc).status == "in_review"
+
+    r = _batch(ctx, {"document_ids": [doc], "supersede_review": True})
+    assert r.status_code == 202
+    assert r.json()["accepted"] == []
+    sk = r.json()["skipped"][0]
+    assert (sk["code"], sk["reason"]) == ("E1005", "in_review")
+    assert "確定処理中" in sk["message"]
+    assert ctx.repo.get_run("ten_1", old).status == "needs_review"  # superseded にしない
+    assert ctx.repo.get_document("ten_1", doc).status == "in_review"
+    assert ctx.queue.messages == []
+
+
+def test_batch_skips_documents_locked_by_another_user(ctx: SimpleNamespace) -> None:
+    """他の利用者がソフトロック中（検証画面を開いて確認中）の帳票は skipped。
+    自分のロックは通す。ロックが解放されれば通る。"""
+    mine = _upload(ctx, "invoice")
+    theirs = _upload(ctx, "invoice")
+    _seed_run(ctx, theirs, "needs_review")
+    # u1（このテストの uploader と同じ sub）が mine を、u2 が theirs を開いている
+    assert ctx.client.post(f"/v1/documents/{mine}/lock", headers=auth("reviewer")).status_code == 200
+    other = {"Authorization": f"Bearer {make_token(role='reviewer', sub='u2')}"}
+    assert ctx.client.post(f"/v1/documents/{theirs}/lock", headers=other).status_code == 200
+
+    r = _batch(ctx, {"document_ids": [mine, theirs], "supersede_review": True})
+    assert r.status_code == 202
+    assert [a["document_id"] for a in r.json()["accepted"]] == [mine]
+    sk = r.json()["skipped"][0]
+    assert (sk["document_id"], sk["code"], sk["reason"]) == (theirs, "E1005", "locked")
+    assert "他のユーザー" in sk["message"]
+    # 相手の needs_review は触っていない（入力中の修正が引き継がれずに消える事故を防ぐ）
+    assert ctx.repo.get_latest_run("ten_1", theirs).status == "needs_review"
+
+    assert ctx.client.delete(f"/v1/documents/{theirs}/lock", headers=other).status_code == 200
+    r2 = _batch(ctx, {"document_ids": [theirs], "supersede_review": True})
+    assert [a["document_id"] for a in r2.json()["accepted"]] == [theirs]
 
 
 def test_batch_explicit_schema_id_applies_to_all(ctx: SimpleNamespace) -> None:
@@ -254,19 +349,44 @@ def test_batch_requires_uploader(ctx: SimpleNamespace) -> None:
 
 
 def test_single_extract_behaviour_unchanged_after_refactor(ctx: SimpleNamespace) -> None:
-    """単体 /extract は共通化の後も同じ順序で拒否する（不在 → 冪等 → スキーマ → 競合）。"""
+    """単体 /extract は共通化の後も同じ順序で拒否する（不在 → 冪等 → スキーマ → 競合）。
+
+    冪等の位置を実際に踏む: 受理した後に同じ Idempotency-Key で再送すると、
+    schema_id が不正でも run が処理中でもキャッシュした 202 が返る（冪等がスキーマ・
+    競合より前）。一方で不在の帳票はキーがあっても E1001（不在が冪等より前）。
+    """
     doc = _upload(ctx, "invoice")
-    missing = ctx.client.post(
-        "/v1/documents/doc_nope/extract",
-        headers={**auth("uploader"), "Idempotency-Key": "k"},
-        json={},
-    )
+    keyed = {**auth("uploader"), "Idempotency-Key": "k"}
+    missing = ctx.client.post("/v1/documents/doc_nope/extract", headers=keyed, json={})
     assert missing.status_code == 400 and missing.json()["error"]["code"] == "E1001"
     bad_schema = ctx.client.post(
-        f"/v1/documents/{doc}/extract", headers=auth("uploader"), json={"schema_id": "sch_x"}
+        f"/v1/documents/{doc}/extract", headers=keyed, json={"schema_id": "sch_x"}
     )
-    assert bad_schema.status_code == 400
-    ok = ctx.client.post(f"/v1/documents/{doc}/extract", headers=auth("uploader"), json={})
+    assert bad_schema.status_code == 400 and bad_schema.json()["error"]["code"] == "E1001"
+    # 拒否はキャッシュされない（同じキーで正しく送り直せる）
+    ok = ctx.client.post(f"/v1/documents/{doc}/extract", headers=keyed, json={})
     assert ok.status_code == 202
+    payload = ok.json()
+
+    # 冪等 → スキーマ: 同じキーなら schema_id が不正でもキャッシュ応答
+    replay_bad = ctx.client.post(
+        f"/v1/documents/{doc}/extract", headers=keyed, json={"schema_id": "sch_x"}
+    )
+    assert replay_bad.status_code == 202 and replay_bad.json() == payload
+    # 冪等 → 競合: run が processing でも同じキーならキャッシュ応答（run は増えない）
+    replay_busy = ctx.client.post(f"/v1/documents/{doc}/extract", headers=keyed, json={})
+    assert replay_busy.status_code == 202 and replay_busy.json() == payload
+    assert len(ctx.queue.messages) == 1
+    # 不在 → 冪等: キーが同じでも不在の帳票にはキャッシュを返さない
+    still_missing = ctx.client.post("/v1/documents/doc_nope/extract", headers=keyed, json={})
+    assert still_missing.status_code == 400 and still_missing.json()["error"]["code"] == "E1001"
+
+    # 別キー（キー無し）なら通常どおり判定され、処理中なので競合
     again = ctx.client.post(f"/v1/documents/{doc}/extract", headers=auth("uploader"), json={})
     assert again.status_code == 409 and again.json()["error"]["code"] == "E1005"
+    other_key = ctx.client.post(
+        f"/v1/documents/{doc}/extract",
+        headers={**auth("uploader"), "Idempotency-Key": "k2"},
+        json={},
+    )
+    assert other_key.status_code == 409 and other_key.json()["error"]["code"] == "E1005"

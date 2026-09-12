@@ -4,7 +4,7 @@
 // 1 箇所に置くため。「何件投入して何件がなぜ落ちたか」を 2 つの導線で別々に組むと、
 // 片方だけ確定済みの件数を落とす、といった食い違いがすぐ起きる。DOM には触らない。
 
-import type { DocTypeDto, ExtractBatchResponse, ExtractBatchSkipped } from "./types";
+import type { ExtractBatchResponse, ExtractBatchSkipped } from "./types";
 
 // ---- アップロードするファイルの選別 ----
 
@@ -38,14 +38,6 @@ export function partitionFiles<T extends FileLike>(files: Iterable<T>): {
   return { accepted, rejected };
 }
 
-/** 種別の最新版 schema_id（GET /doc-types の一覧から）。無ければ undefined */
-export function latestSchemaId(
-  docTypes: readonly DocTypeDto[] | undefined,
-  docType: string,
-): string | undefined {
-  return docTypes?.find((t) => t.doc_type === docType)?.schema_id || undefined;
-}
-
 // ---- アップロードの要約 ----
 
 export interface UploadTally {
@@ -53,25 +45,47 @@ export interface UploadTally {
   ok: number;
   /** アップロードに失敗した件数 */
   failed: number;
+  /**
+   * 失敗したファイルごとのサーバの理由（E1002 サイズ上限・E1001 非対応形式など）。
+   * 件数だけだと「1 件失敗」を見て同じファイルを何度も投げ直すことになる。
+   */
+  failedReasons: string[];
   /** 取り込めない形式で投げる前に除外した件数 */
   rejected: number;
   /** アップロード後に抽出を開始できた件数 */
   extractStarted: number;
   /** アップロードは成功したが抽出を開始できなかった件数 */
   extractFailed: number;
+  /** 抽出を開始できなかった帳票ごとの理由（skipped の message か通信エラー） */
+  extractFailedReasons: string[];
+}
+
+/**
+ * 理由の一覧を 1 行に畳む。同じ文言はまとめ、種類が多いときは先頭 max 種類＋「ほか」。
+ * 30 件が同じ理由で落ちたときに 30 回同じ文が並ぶのを避ける。
+ */
+export function summarizeReasons(reasons: readonly string[], max = 3): string {
+  const distinct = [...new Set(reasons.map((r) => r.trim()).filter((r) => r.length > 0))];
+  if (distinct.length === 0) return "";
+  const head = distinct.slice(0, max).join(" / ");
+  return distinct.length > max ? `${head} ほか` : head;
 }
 
 export function summarizeUploads(t: UploadTally): { kind: "ok" | "warn"; message: string } {
   const parts: string[] = [];
+  const why = summarizeReasons(t.failedReasons);
   if (t.ok > 0) parts.push(`${t.ok} 件をアップロードしました。`);
-  else if (t.failed > 0) parts.push(`アップロードに失敗しました（${t.failed} 件）。`);
+  else if (t.failed > 0) {
+    parts.push(`アップロードに失敗しました（${t.failed} 件${why ? `: ${why}` : ""}）。`);
+  }
   if (t.extractStarted > 0) parts.push(`${t.extractStarted} 件の抽出を開始しました。`);
   if (t.extractFailed > 0) {
+    const ewhy = summarizeReasons(t.extractFailedReasons);
     parts.push(
-      `${t.extractFailed} 件は抽出を開始できませんでした（帳票ページから開始できます）。`,
+      `${t.extractFailed} 件は抽出を開始できませんでした（${ewhy ? `${ewhy}。` : ""}帳票ページから開始できます）。`,
     );
   }
-  if (t.ok > 0 && t.failed > 0) parts.push(`${t.failed} 件は失敗しました。`);
+  if (t.ok > 0 && t.failed > 0) parts.push(`${t.failed} 件は失敗しました${why ? `（${why}）` : ""}。`);
   if (t.rejected > 0) {
     parts.push(`${t.rejected} 件は取り込めない形式（PDF / PNG / JPEG / TIFF 以外）のため除外しました。`);
   }
@@ -81,25 +95,39 @@ export function summarizeUploads(t: UploadTally): { kind: "ok" | "warn"; message
 
 // ---- 一括再抽出の要約 ----
 
-export type SkipReason = "confirmed" | "busy" | "no_schema" | "not_found" | "other";
+export type SkipReason = "confirmed" | "busy" | "locked" | "no_schema" | "not_found" | "other";
 
 const SKIP_LABEL: Record<SkipReason, string> = {
   confirmed: "確定済み",
   busy: "処理中",
+  locked: "他の利用者が確認中",
   no_schema: "スキーマなし",
   not_found: "見つからない",
   other: "その他",
 };
 
 /**
- * skipped の理由を分類する。E1005 は「確定済み」と「処理中（競合）」の両方に使われ、
- * 応答の details は一括では返らないので、サーバの文言（「確定済みの結果があります」）で
- * 見分ける。文言を変えるときはここも直す。
+ * skipped の理由を分類する。E1005 は確定済み・処理中（競合）・確定処理中・他者ロックの
+ * 全部に使われるので、サーバが付ける reason で見分ける（文言は変わり得る）。
+ * reason の無い応答（旧 gateway）だけ、従来どおり文言で確定済みか否かを見る。
  */
 export function classifySkip(s: ExtractBatchSkipped): SkipReason {
   if (s.code === "no_schema") return "no_schema";
   if (s.code === "E1001") return "not_found";
-  if (s.code === "E1005") return s.message.includes("確定") ? "confirmed" : "busy";
+  if (s.code === "E1005") {
+    switch (s.reason) {
+      case "confirmed":
+        return "confirmed";
+      case "locked":
+        return "locked";
+      case "in_review":
+      case "processing":
+      case "active_run":
+        return "busy";
+      default:
+        return s.message.includes("確定済み") ? "confirmed" : "busy";
+    }
+  }
   return "other";
 }
 

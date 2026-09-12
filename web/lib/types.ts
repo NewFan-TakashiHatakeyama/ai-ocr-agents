@@ -223,12 +223,15 @@ export interface ExtractBatchAccepted {
 
 /**
  * 投入しなかった帳票と理由。code は単体 /extract の ApiError コード
- * （E1001 不在・E1005 競合/確定済み）か、一括固有の "no_schema"。
+ * （E1001 不在・E1005 競合/確定済み/確定処理中/他者ロック）か、一括固有の "no_schema"。
+ * E1005 は reason（confirmed / in_review / locked / processing / active_run）で
+ * 種類が分かる。要約の数え方はこれに依存し、文言には依存させない。
  */
 export interface ExtractBatchSkipped {
   document_id: string;
   code: string;
   message: string;
+  reason?: string | null;
 }
 
 export interface ExtractBatchResponse {

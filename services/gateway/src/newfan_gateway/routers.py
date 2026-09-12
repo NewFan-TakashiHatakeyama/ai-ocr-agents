@@ -387,6 +387,7 @@ def _start_extract(
     repo: Repository,
     queue: Queue,
     admin: AdminRepository,
+    locks: LockStore,
     principal: Principal,
     document_id: str,
     schema_id: Optional[str],
@@ -396,10 +397,15 @@ def _start_extract(
     """1 帳票の抽出 run を発行して (job_id, run_id) を返す。
 
     単体の POST /documents/{id}/extract と一括の /documents/extract-batch が共有する
-    本体。拒否は ApiError（E1001 不在 / E1005 競合・確定済み）で、単体はそのまま
-    HTTP エラーに、一括は帳票ごとの skipped に翻訳する。冪等キーの扱いは呼び出し側。
+    本体。拒否は ApiError（E1001 不在 / E1005）で、単体はそのまま HTTP エラーに、
+    一括は帳票ごとの skipped に翻訳する。E1005 は ``details["reason"]`` で種類を示す
+    （confirmed / in_review / locked / processing / active_run）。一括の要約はこれで
+    数えるので、文言だけ変えて reason を落とさないこと。冪等キーの扱いは呼び出し側。
+
+    判定の順: 不在 → schema_id → 確定済み → 確定処理中 → 他者ロック → run の競合。
+    帳票の状態に関する拒否は supersede_review に**依らず**先に済ませる。
     """
-    _require_document(repo, principal.tenant_id, document_id)
+    doc = _require_document(repo, principal.tenant_id, document_id)
 
     # 空文字の schema_id は「未指定」として扱う。そのまま INSERT すると
     # extraction_runs の FK 違反で 500（E2000 内部エラー）になり、利用者には
@@ -407,6 +413,37 @@ def _start_extract(
     schema_id = (schema_id or "").strip() or None
     if schema_id is not None and admin.get_schema_by_id(principal.tenant_id, schema_id) is None:
         raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
+
+    # 確定済み（会計連携済みを含む）は supersede_review に関係なく置き換えない
+    # （設計 bulk-processing D3 / region-template-editor §3.1）。以前は supersede_review
+    # の分岐の中でしか見ておらず、既定（false）の一括投入が has_active_run
+    # （processing + needs_review）だけを通って確定済みを queued に落としていた。
+    latest = repo.get_latest_run(principal.tenant_id, document_id)
+    if latest is not None and latest.status in ("confirmed", "exported"):
+        raise ApiError(
+            "E1005",
+            "確定済みの結果があります。再抽出すると確定値が置き換わります",
+            details={"document_id": document_id, "status": latest.status, "reason": "confirmed"},
+        )
+    # 確定処理中の窓。confirm は documents を in_review にするだけで run は needs_review
+    # のまま resume を投げる（get_delete_blocker と同じ理由）。ここで旧 run を superseded
+    # に落とすと、resume したワーカーは superseded を confirmed に進めて会計連携まで
+    # 流し、その確定値は新 run の後ろに隠れる。
+    if doc.status == "in_review":
+        raise ApiError(
+            "E1005",
+            "確定処理中です。完了してから再抽出してください",
+            details={"document_id": document_id, "status": doc.status, "reason": "in_review"},
+        )
+    # 他者のソフトロック（§8.2）。削除と同じく助言的だが、確認中の帳票を横から
+    # 置き換えると入力済みの修正は新 run に引き継がれず、相手の確定は E1005 で止まる。
+    info = locks.get(principal.tenant_id, document_id)
+    if info is not None and info.holder_sub != principal.sub:
+        raise ApiError(
+            "E1005",
+            "他のユーザーが確認中です",
+            details={"document_id": document_id, "reason": "locked", "holder": info.holder_name},
+        )
 
     # 再抽出で置き換える旧 run から引き継ぐ options（ワークフローの通知先など）
     inherited_options: dict[str, Any] = {}
@@ -417,15 +454,9 @@ def _start_extract(
     if supersede_review:
         if repo.has_processing_run(principal.tenant_id, document_id):
             raise ApiError(
-                "E1005", "実行中の Run と競合しています", details={"document_id": document_id}
-            )
-        latest = repo.get_latest_run(principal.tenant_id, document_id)
-        if latest is not None and latest.status in ("confirmed", "exported"):
-            # 確定済み（会計連携済みを含む）を無警告で置き換えない
-            raise ApiError(
                 "E1005",
-                "確定済みの結果があります。再抽出すると確定値が置き換わります",
-                details={"document_id": document_id, "status": latest.status},
+                "実行中の Run と競合しています",
+                details={"document_id": document_id, "reason": "processing"},
             )
         # ワークフロー起点の run は options に notify 先（hitl_gate を再開させる先）を
         # 持つ。引き継がずに置き換えると、**待機中のワークフローが永久に再開されず、
@@ -439,7 +470,11 @@ def _start_extract(
         # 削除ブロッカー・ワークフローの hitl_gate が古い run を見続ける。
         repo.supersede_review_runs(principal.tenant_id, document_id)
     elif repo.has_active_run(principal.tenant_id, document_id):
-        raise ApiError("E1005", "実行中の Run と競合しています", details={"document_id": document_id})
+        raise ApiError(
+            "E1005",
+            "実行中の Run と競合しています",
+            details={"document_id": document_id, "reason": "active_run"},
+        )
 
     run_id = new_id("run")
     job_id = new_id("job")
@@ -472,6 +507,7 @@ def extract(
     queue: Queue = Depends(get_queue),
     settings: Settings = Depends(get_settings),
     admin: AdminRepository = Depends(get_admin),
+    locks: LockStore = Depends(get_lock_store),
 ) -> dto.ExtractAccepted:
     _require_document(repo, principal.tenant_id, document_id)
 
@@ -483,6 +519,7 @@ def extract(
         repo,
         queue,
         admin,
+        locks,
         principal,
         document_id,
         body.schema_id,
@@ -513,6 +550,7 @@ def extract_batch(
     repo: Repository = Depends(get_repo),
     queue: Queue = Depends(get_queue),
     admin: AdminRepository = Depends(get_admin),
+    locks: LockStore = Depends(get_lock_store),
 ) -> dto.ExtractBatchResponse:
     """複数帳票の抽出をまとめて投入する（設計 bulk-processing §2）。
 
@@ -520,6 +558,10 @@ def extract_batch(
     **skipped に理由付きで載せて続行する**。1 件の不在や競合で一括全体を 4xx に
     しない——200 件のうち 1 件が確定済みなだけで残り 199 件が止まるのは使えない。
     応答は常に 202（全件 skipped でも。何が起きたかは本文が伝える）。
+
+    document_ids 指定は一覧の選択をそのまま受けるので、確定済み・確定処理中
+    （in_review）・他者ロック中も混ざり得る。それらの拒否は _start_extract が
+    supersede_review に依らず行い、skipped の reason で見分けられる。
     """
     tenant_id = principal.tenant_id
     # 単体 /extract と同じキャッシュを使うが、名前空間を分ける。同じキーを単体→一括で
@@ -623,6 +665,7 @@ def extract_batch(
                 repo,
                 queue,
                 admin,
+                locks,
                 principal,
                 document_id,
                 sid,
@@ -630,9 +673,13 @@ def extract_batch(
                 body.supersede_review,
             )
         except ApiError as exc:
+            reason = exc.details.get("reason")
             skipped.append(
                 dto.ExtractBatchSkippedItem(
-                    document_id=document_id, code=exc.code, message=exc.message
+                    document_id=document_id,
+                    code=exc.code,
+                    message=exc.message,
+                    reason=str(reason) if reason is not None else None,
                 )
             )
             continue
