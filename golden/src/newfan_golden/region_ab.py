@@ -20,6 +20,11 @@
   薄められて効果が見えなくなる。
 - **悪化の検出**も同じ重みで見る。ヒントが領域外の正しい値を捨てさせていないか
   （設計が最も恐れる失敗）を、項目ごとの勝敗で数える。
+- ``--resume`` は**欠けた (帳票, 試行, アーム) の対を埋める**ためのもの。片方のアームを
+  丸ごと再利用する（対照は前回のまま、介入だけ回し直す）と交互実行が崩れて時間帯の
+  交絡が入るので、既定では止める（``--allow-arm-reuse`` で通すと出力に印が残る）。
+  印は、その出力を ``--resume`` に渡した次の実行にも**引き継ぐ**（再利用した行は交絡の
+  入った計測に由来したままなので、欠けた対の埋め直しや試行の延長で印が消えてはいけない）。
 
 出力は JSON。判定は人が読んで決める（このスクリプトは出荷可否を自動で決めない）。
 """
@@ -36,6 +41,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+from newfan_normalizers import NormContext
+from newfan_normalizers.builtin import norm_address_jp
 from newfan_schemas import norm_key
 
 from newfan_golden.dataset import GoldenDoc, load_jsonl
@@ -43,6 +50,28 @@ from newfan_golden.dataset import GoldenDoc, load_jsonl
 
 class RegionAbError(RuntimeError):
     pass
+
+
+# 採点規則の印。出力 JSON の ``scoring`` に書き、``--resume`` で前回の出力を再利用するとき
+# 一致を要求する。行には field_hits（真偽）しか無く生の値は残らないので、規則が変わった
+# 後に古い行を再採点することはできない。印が無い（第 3 回以前）か違う出力から欠けた対
+# だけ埋めると、1 つの McNemar 表に 2 つの採点規則が混ざる ── 住所は第 3 回では郵便番号
+# 付きの答えが不正解、いまは正解になるので、混ざると住所の差分の向きが読めなくなる。
+# 規則を変えたらここを変える（例: 住所の正規化を変えたら "address_jp-v2"）。
+SCORING = "address_jp"
+
+
+def field_type_for(name: str) -> str:
+    """A/B の 2 版に載せる項目の型。
+
+    住所（``_address`` で終わる項目）だけ ``address_jp``、他は ``string``。第 3 回計測で
+    住所の不正解の大半が「郵便番号や『本社』を値に含めるか」という**値の慣例**の食い違い
+    だったので（ADR-0007）、プロダクト側の正規化（郵便番号・見出し語を落とす）を計測でも
+    効かせる。型は対照・介入の両版に同じく載るので、比較の公平さは崩れない。
+    金額や日付を型付きにしないのは従来どおり: 型付き項目は読取領域ヒントの ``type_mismatch``
+    判定の対象になり、第 3 回までの計測条件と変わってしまう。
+    """
+    return "address_jp" if name.endswith("_address") else "string"
 
 
 @dataclass
@@ -241,6 +270,26 @@ def _norm(v: Optional[str]) -> str:
     return norm_key(v)
 
 
+_ADDR_CTX = NormContext()
+
+
+def score_key(name: str, v: Optional[str]) -> str:
+    """項目名を見て比較用のキーを作る。住所は ``norm_address_jp`` を通してから ``_norm``。
+
+    **抽出値と正解の両方**に通す。プロダクトの正規化（郵便番号・見出し語を落とす、
+    ADR-0007）と正解の慣例（郵便番号なし・建物名まで）を同じ土俵に乗せるためで、正解側にも
+    通すのは、正解データの修正漏れで計測が歪まないための保険。``norm_key`` はハイフンを
+    落とすが郵便番号や「本社」は落とさないので、住所の正規化を先に挟まないと第 3 回で見た
+    「981-3205 仙台市泉区紫山3-1-4」が不正解のまま数えられる。
+
+    建物名を落とした値（「東京都品川区北品川5-10-20」）は正規化しても正解と一致しない。
+    それは慣例ではなく取りこぼしなので、不正解のまま残るのが正しい。
+    """
+    if v is not None and field_type_for(name) == "address_jp":
+        v = norm_address_jp(v, _ADDR_CTX).value
+    return _norm(v)
+
+
 def _wait_job(client: httpx.Client, job_id: str, timeout_sec: float) -> str:
     deadline = time.time() + timeout_sec
     status = "?"
@@ -286,13 +335,76 @@ def _put_schema(client: httpx.Client, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _done_rows(resume: Optional[dict[str, Any]]) -> dict[tuple[str, int, str], dict[str, Any]]:
-    """前回の出力から (document_id, trial, arm) → 行 を引く（--resume 用）。"""
+    """前回の出力から (document_id, trial, arm) → 行 を引く（--resume 用）。
+
+    前回の出力の ``scoring`` が今の ``SCORING`` と違えば拒む。行は field_hits しか持たず
+    再採点できないので、混ぜると 1 つの表に 2 つの採点規則が入る。規則が変わったら
+    全件を回し直すこと。
+    """
     out: dict[tuple[str, int, str], dict[str, Any]] = {}
+    if resume is None:
+        return out
+    prev = resume.get("scoring")
+    if prev != SCORING:
+        raise RegionAbError(
+            f"--resume の出力は採点規則が違います（前回: {prev or 'なし（ADR-0007 より前）'} / "
+            f"今回: {SCORING}）。行は field_hits しか持たず再採点できないので混ぜられません。"
+            "全件を回し直してください"
+        )
     for arm in ("control", "treat"):
         for r in (resume or {}).get(f"{arm}_runs", []) or []:
             if isinstance(r.get("field_hits"), dict):
                 out[(str(r["document_id"]), int(r["trial"]), arm)] = dict(r)
     return out
+
+
+def missing_pairs(
+    docs: list[GoldenDoc], trials: int, resume: Optional[dict[str, Any]]
+) -> list[tuple[str, int, str]]:
+    """前回の出力に無い (document_id, trial, arm)。空なら ``--resume`` で回すものは無い。
+
+    run_region_arms.sh はこれが空のアームを**回さない**。完全な出力を ``--resume`` に渡すと
+    region_ab は 1 件も抽出せずに同じ行を書き直し、前回の結果が新しい計測に化ける
+    （出力の mtime だけが新しくなり、コードやプロンプトを変えた後でも見分けがつかない）。"""
+    done = _done_rows(resume)
+    return [
+        (doc.document_id, i, arm)
+        for doc in docs
+        for i in range(trials)
+        for arm in ("control", "treat")
+        if (doc.document_id, i, arm) not in done
+    ]
+
+
+def arm_reuse_docs(done: dict[tuple[str, int, str], dict[str, Any]]) -> dict[str, str]:
+    """--resume で**片方のアームを丸ごと**再利用することになる帳票（帳票 → 残っているアーム）。
+
+    ある帳票について、前回の出力に一方のアームの行があり、もう一方のアームの行が
+    **全試行で 1 つも無い**なら、その帳票は「欠けた対を埋める」のではなく、片方の
+    アームだけを回し直すことになる。対照と介入を同じ試行で交互に回して時間帯の揺れを
+    両条件へ均等に散らす、という手順が崩れる（時間帯の交絡）。第 3 回の (b) で対照アームを
+    (a) から再利用してこれを踏んだ（実測記録「計測の限界」）。
+
+    両アームの行が 1 つでもある帳票は、試行が欠けていても対を埋めるだけなので対象にしない。
+    """
+    arms_by_doc: dict[str, set[str]] = {}
+    for doc_id, _trial, arm in done:
+        arms_by_doc.setdefault(doc_id, set()).add(arm)
+    return {
+        doc: next(iter(arms)) for doc, arms in sorted(arms_by_doc.items()) if len(arms) == 1
+    }
+
+
+def _arm_reuse_message(reuse: dict[str, str]) -> str:
+    return (
+        "--resume の出力は、次の帳票で片方のアームだけを再利用しようとしています"
+        f"（帳票 → 残っているアーム）: {reuse}。\n"
+        "対照と介入は同じ試行で交互に回して時間帯の揺れを両条件へ散らす手順なので、"
+        "片方のアームを丸ごと再利用すると対照と介入の時刻が離れ、時間帯の交絡が入ります"
+        "（第 3 回 (b) の限界）。--resume は欠けた (帳票, 試行, アーム) の対を埋めるための"
+        "ものです。承知の上で回すなら --allow-arm-reuse を付けてください"
+        "（出力に resume_arm_reuse: true が残り、eval_gates_v2 が警告を出します）。"
+    )
 
 
 def run(
@@ -303,6 +415,7 @@ def run(
     trials: int,
     timeout_sec: float,
     resume: Optional[dict[str, Any]] = None,
+    allow_arm_reuse: bool = False,
 ) -> dict[str, Any]:
     """対照（領域なし）と介入（領域あり）を交互に trials 回ずつ回す。
 
@@ -312,10 +425,28 @@ def run(
     ``resume`` に前回の出力を渡すと、そこに結果がある (帳票, 試行, アーム) は抽出せず
     前回の行（field_hits / hints）から集計し直し、**無いものだけ**回す。LLM 側の一時的な
     失敗で対が欠けたとき、全部を回し直さずに対を埋めるため（第 3 回計測で、対照アームの
+    3 試行が LLM 出力の欠陥で failed になった）。前回の出力の ``scoring`` が今と違えば
+    RegionAbError（採点規則の混在を防ぐ）。
     3 試行が LLM 出力の欠陥で failed になった）。
+
+    ``resume`` に、ある帳票の片方のアームしか無いときは **止める**（``arm_reuse_docs``）。
+    片方のアームを丸ごと再利用すると交互実行の手順が崩れる。``allow_arm_reuse`` で
+    通した場合は出力に ``resume_arm_reuse: true`` を残し、eval_gates_v2 が警告を出す。
+    この印は ``resume`` 側に既にあれば**そのまま引き継ぐ**。印の付いた出力を ``resume`` に
+    渡すと両アームの行が揃っているので ``arm_reuse_docs`` は何も返さないが、再利用する行は
+    交絡の入った計測に由来したままである（第 3 回の S1 延長がこの形。ここで印が消えると
+    eval_gates_v2 の警告も消えて、交互に回した計測として記録に残る）。
     """
     positional_map = regions.get("_positional", {})
     done = _done_rows(resume)
+    reuse = arm_reuse_docs(done)
+    if reuse and not allow_arm_reuse:
+        raise RegionAbError(_arm_reuse_message(reuse))
+    # 前回の出力に付いていた印（--allow-arm-reuse で回した計測）。今回の再利用と合わせて残す
+    prior_reuse_docs: dict[str, str] = {
+        str(k): str(v) for k, v in ((resume or {}).get("resume_arm_reuse_docs") or {}).items()
+    }
+    prior_reuse = bool((resume or {}).get("resume_arm_reuse")) or bool(prior_reuse_docs)
     # 位置でしか区別できない項目名の集合（doc_type をまたいで合算する）
     positional_names = {n for names in positional_map.values() for n in names}
     tally = Tally()
@@ -330,13 +461,13 @@ def run(
             image = Path(doc.image_uri)
             if not image.exists():
                 raise RegionAbError(f"画像が見つかりません: {image}")
-            gold = {f.name: _norm(f.value) for f in doc.fields}
+            gold = {f.name: score_key(f.name, f.value) for f in doc.fields}
             positional = set(positional_map.get(doc.doc_type, []))
             base_fields = [
                 {
                     "name": f.name,
                     "label": f.name,
-                    "type": "string",
+                    "type": field_type_for(f.name),
                     "required": False,
                     "critical": bool(f.critical),
                 }
@@ -395,7 +526,9 @@ def run(
                             continue
                         res = _result(client, document_id)
                         got = {
-                            f["name"]: _norm(f.get("value_normalized") or f.get("value_raw"))
+                            f["name"]: score_key(
+                                f["name"], f.get("value_normalized") or f.get("value_raw")
+                            )
                             for f in res.get("fields", [])
                         }
                         hits = 0
@@ -435,6 +568,8 @@ def run(
 
     return {
         "trials": trials,
+        # 採点規則の印（--resume の一致検査に使う）
+        "scoring": SCORING,
         "control_exact_match": _rate(tally.control_runs),
         "treat_exact_match": _rate(tally.treat_runs),
         "control_runs": tally.control_runs,
@@ -450,6 +585,11 @@ def run(
         # 帳票ごとの純増減（G2）と、ヒントの内訳（G3・G4）
         "per_doc_net": per_doc_net(tally.control_runs, tally.treat_runs),
         "hint_summary": hint_summary(tally.control_runs, tally.treat_runs),
+        # --resume で片方のアームを丸ごと再利用した計測か（時間帯の交絡あり。
+        # eval_gates_v2 が先頭に警告を出す）。どの帳票かも残す。前回の出力に付いていた
+        # 印は消さない（--resume を重ねても、再利用した行の由来は変わらない）
+        "resume_arm_reuse": bool(reuse) or prior_reuse,
+        "resume_arm_reuse_docs": {**prior_reuse_docs, **reuse},
     }
 
 
@@ -466,6 +606,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--resume", type=Path, default=None,
         help="前回の出力 JSON。結果がある (帳票, 試行, アーム) は回さず、欠けた対だけ回す",
     )
+    ap.add_argument(
+        "--allow-arm-reuse", action="store_true",
+        help="--resume に片方のアームしか無い帳票があっても止めない（交互実行の手順が崩れ、"
+             "時間帯の交絡が入る。出力に resume_arm_reuse: true が残り、その出力を --resume に"
+             "渡した実行にも引き継がれる）",
+    )
     args = ap.parse_args(argv)
 
     docs = load_jsonl(args.gold)
@@ -475,7 +621,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.resume is not None and args.resume.exists()
         else None
     )
-    report = run(docs, regions, args.api, args.token, args.trials, args.timeout_sec, resume=resume)
+    try:
+        report = run(
+            docs, regions, args.api, args.token, args.trials, args.timeout_sec,
+            resume=resume, allow_arm_reuse=args.allow_arm_reuse,
+        )
+    except RegionAbError as exc:
+        print(f"[region_ab] 中止: {exc}", file=sys.stderr, flush=True)
+        return 2
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({k: report[k] for k in

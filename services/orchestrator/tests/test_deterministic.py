@@ -29,6 +29,26 @@ def test_deterministic_normalize_sets_value_and_meta() -> None:
     assert out["norm_meta"]["invoice_date"]["type_converted"] is True
 
 
+def test_deterministic_normalize_address_jp_strips_postal_code() -> None:
+    """address_jp（ADR-0007）はレジストリから引かれ、郵便番号・見出し語を落とす。
+
+    値の形を変えるだけで導出はしないので type_converted は False（grounding を
+    0.85 に落とさない）。"""
+    schema = {
+        "doc_type": "invoice",
+        "fields": [{"name": "customer_address", "type": "address_jp"}],
+    }
+    fields = [
+        ExtractedField(
+            name="customer_address", value_raw="本社 〒981-3205 仙台市泉区紫山3-1-4", span_ids=[0]
+        )
+    ]
+    out = nodes.deterministic_normalize({"schema": schema, "fields": fields})
+    assert out["fields"][0].value_normalized == "仙台市泉区紫山3-1-4"
+    assert out["norm_meta"]["customer_address"]["type_converted"] is False
+    assert out["norm_meta"]["customer_address"]["confidence_cap"] is None
+
+
 def test_confidence_uses_type_converted_for_grounding() -> None:
     span = Span(span_id=1, page=1, text="¥128,000", conf=0.95, bbox=[0, 0, 1, 1])
     field = ExtractedField(

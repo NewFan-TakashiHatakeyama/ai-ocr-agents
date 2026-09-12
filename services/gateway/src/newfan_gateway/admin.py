@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Protocol
 
-from newfan_schemas import RegionRect, check_field_name
+from newfan_schemas import RegionRect, check_field_name, check_field_type
 
 from newfan_gateway.ids import new_id
 from newfan_gateway.records import (
@@ -20,17 +20,21 @@ from newfan_gateway.records import (
     SchemaRecord,
 )
 
-def reject_reserved_field_names(fields: list[SchemaFieldDef]) -> None:
-    """予約名（__pages__ / __region__ / 先頭 __）を含む項目列を拒む（設計 D9）。
+def check_field_defs(fields: list[SchemaFieldDef]) -> None:
+    """予約名（__pages__ / __region__ / 先頭 __。設計 D9）と、``FieldType`` に無い型を拒む。
 
     **書き込み側の共通入口。** InMemory / Pg 両方の put_schema がここを通るので、
-    ルータ経由でもチャット経由（admin.put_schema 直呼び）でも予約名は保存されない。
+    ルータ経由でもチャット経由（admin.put_schema 直呼び）でも予約名・未知の型は保存
+    されない。型を見るのは、orchestrator が実行時に ``FieldSchema``（``type: FieldType``）
+    で落とすのを保存時に前倒しするため ── 知らない型が保存されると、その doc_type の
+    抽出は全部 failed（E9001）になる（ADR-0007 の ``address_jp`` の展開順の事故）。
     読み出しモデル（records.SchemaFieldDef / newfan_schemas.FieldDef）には置かない ──
     検査導入前に保存された旧データを読めなくすると、同テナントの健全なスキーマまで
     巻き込んで一覧が落ちる。
     """
     for f in fields:
         check_field_name(f.name)
+        check_field_type(f.type)
 
 
 def archived_schema_message(doc_type: str, *, action: str = "使う") -> str:
@@ -272,7 +276,7 @@ class InMemoryAdminRepository:
         exclude_regions: Optional[list[RegionRect]] = None,
         source_page_count: Optional[int] = None,
     ) -> SchemaRecord:
-        reject_reserved_field_names(fields)  # D9: 書き込み側で拒む（読み出しでは拒まない）
+        check_field_defs(fields)  # 予約名（D9）と未知の型は書き込み側で拒む（読み出しでは拒まない）
         prev = self.get_schema(tenant_id, doc_type)
         if prev is not None and prev.archived:
             # 書き込み側の共通入口で拒む（D9 と同じ置き場所）。新版を足すとアーカイブが

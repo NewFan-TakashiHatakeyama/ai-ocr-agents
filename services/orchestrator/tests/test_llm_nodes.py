@@ -91,7 +91,12 @@ def test_correct_node_skips_high_confidence() -> None:
 
 # ---------- region キー除去とプロンプト同一性（設計 §5.6 / §4.7・C27/C29） ----------
 
-_KIE_RESP = json.dumps({"fields": [], "tables": [], "unmapped_required": []})
+# 「見つからなければ value=null」の契約どおり、項目を 1 つも返さない応答は E3002 で取り直される
+# ようになった（kie.py）。プロンプトの形だけを見るテストは値なしの項目 1 つを返す。
+_KIE_RESP = json.dumps(
+    {"fields": [{"name": "total_amount", "value": None, "span_ids": [], "page": 1}],
+     "tables": [], "unmapped_required": []}
+)
 _SPANS = [Span(span_id=11, page=1, text="¥128,000", conf=0.72, bbox=[0, 0, 1, 1])]
 _REGION = {"page": 1, "rect": [0.3, 0.02, 0.72, 0.09]}
 

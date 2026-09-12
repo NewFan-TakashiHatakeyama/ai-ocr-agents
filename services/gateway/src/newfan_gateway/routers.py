@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, Resp
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
-from newfan_schemas import check_field_name, resolve_regions
+from newfan_schemas import check_field_name, check_field_type, resolve_regions
 from newfan_workflow import (
     WorkflowGraph,
     build_candidate,
@@ -1322,6 +1322,9 @@ def put_schema(
         # プロジェクトのエラー封筒（E1003）にならないので、ここで明示的に検査する。
         try:
             check_field_name(f.name)
+            # FieldType に無い型は orchestrator が実行時に落とし、その doc_type の抽出が
+            # 全部 failed になる。保存時に同じ封筒で返す（ADR-0007）。
+            check_field_type(f.type)
         except ValueError as exc:
             raise ApiError("E1003", str(exc), details={"field": f.name}) from exc
         if f.region is not None and f.region.page is None:

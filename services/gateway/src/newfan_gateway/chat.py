@@ -232,7 +232,8 @@ _GEMINI_SYSTEM = (
     "要確認・レビュー・帳票確認→navigate(target=/documents?tab=queue)。"
     "ルール→navigate(/rules)。スキーマ閲覧→navigate(/schemas)。"
     "スキーマへの項目追加依頼→update_schema を呼ぶ。doc_type 不明なら invoice。"
-    "field.name は英小文字スネークケース、label は日本語、type は string/money_jpy/date 等。"
+    "field.name は英小文字スネークケース、label は日本語、"
+    "type は string/money_jpy/date/address_jp（住所） 等。"
     "prompt には確認文（例: スキーマに『X』を追加して再抽出しますか？）を入れる。"
 )
 

@@ -306,7 +306,8 @@ def _seed_admin() -> InMemoryAdminRepository:
                 SchemaFieldDef(name="customer_tel", label="取引先電話番号", type="string"),
                 SchemaFieldDef(name="customer_fax", label="取引先FAX", type="string"),
                 SchemaFieldDef(name="customer_postal", label="取引先郵便番号", type="string"),
-                SchemaFieldDef(name="customer_address", label="取引先住所", type="string"),
+                # 住所は address_jp（ADR-0007）: 郵便番号・見出し語を落とし、建物名までを値にする
+                SchemaFieldDef(name="customer_address", label="取引先住所", type="address_jp"),
                 SchemaFieldDef(name="bank_accounts", label="振込先銀行", type="string"),
             ],
         )

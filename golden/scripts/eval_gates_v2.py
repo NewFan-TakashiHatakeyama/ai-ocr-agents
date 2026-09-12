@@ -1,9 +1,12 @@
-"""第 3 回計測（設計 region-field-add-and-hint-v2 §3）の出荷ゲート G1〜G4 を判定する。
+"""読取領域ヒントの計測（設計 region-field-add-and-hint-v2 §3）の出荷ゲート G1〜G4 を判定する。
 
 region_ab の出力（S1 / S2 / S3 の JSON）を読んで、ゲートごとに **通った／落ちた** と
 その根拠の数字を出す。G5（領域なしプロンプトのスナップショット一致）は
 services/orchestrator/tests の単体テスト、G6（プロンプト長）は別計測なので、ここでは
 扱わない。実測記録に貼るための Markdown も同時に出す。
+
+G4 は第 4 回から「落とした／捨てた対で McNemar が『介入が有意に悪い』にならない」
+（第 3 回までは「正解数の差が 0 以上」。効果が無くても半分の確率で落ちる欠陥があった）。
 
 使い方:
     uv run python golden/scripts/eval_gates_v2.py --s1 out/s1_ab.json --s2 out/s2_ab.json \
@@ -15,9 +18,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
+
+from newfan_golden.region_ab import mcnemar
 
 # G2: 帳票ごとの純減（介入 − 対照、5 試行合計）の下限
 G2_MIN_DOC_NET = -2
@@ -25,6 +30,11 @@ G2_MIN_DOC_NET = -2
 G3_MIN_DEFENDED = 4
 G3_DOC = "s2_sample8"
 G3_FIELD = "customer_name"
+# 入力のどれかが region_ab --allow-arm-reuse で回した出力（resume_arm_reuse: true）なら、
+# 表の先頭にこの行を出す。再利用したのは対照とは限らない（介入を残して対照だけ回し直す
+# こともできる）ので、どちらのアームを何帳票かは resume_arm_reuse_docs から出す
+ARM_REUSE_WARNING = "⚠ 片方のアームを再利用した計測（時間帯の交絡あり）"
+ARM_LABEL = {"control": "対照", "treat": "介入"}
 
 
 def _load(p: Path | None) -> dict[str, Any] | None:
@@ -68,6 +78,17 @@ def _paired_field(report: dict[str, Any], doc: str, field: str) -> dict[str, int
         else:
             out["neither"] += 1
     return out
+
+
+def _arm_reuse_label(arm: str, report: dict[str, Any]) -> str:
+    """警告に出す「S3（対照 12 帳票）」。``resume_arm_reuse_docs`` は 帳票 → 残っている
+    （= 再利用した）アーム。帳票の内訳が無い古い出力はアーム名だけ。"""
+    docs = report.get("resume_arm_reuse_docs") or {}
+    counts = Counter(str(a) for a in docs.values())
+    if not counts:
+        return arm
+    inner = "、".join(f"{ARM_LABEL.get(a, a)} {n} 帳票" for a, n in sorted(counts.items()))
+    return f"{arm}（{inner}）"
 
 
 def _docs_in(report: dict[str, Any]) -> list[str]:
@@ -181,18 +202,44 @@ def gate_g3(s2: dict[str, Any] | None) -> tuple[bool | None, str]:
     return ok, why
 
 
+def _affected_paired(
+    rows: list[dict[str, Any]],
+) -> dict[tuple[str, str, int], dict[str, bool]]:
+    """``hint_summary.affected_rows`` を mcnemar の対応表（(帳票, 項目, 試行) → 両アームの
+    正誤）に直す。行は既に「同じ試行の対照と対にした」ものなので、両アームが必ず揃う。"""
+    return {
+        (str(r["document_id"]), str(r["field"]), int(r["trial"])): {
+            "control": bool(r["control"]),
+            "treat": bool(r["treat"]),
+        }
+        for r in rows
+    }
+
+
 def gate_g4(s3: dict[str, Any] | None) -> tuple[bool | None, str]:
+    """落とした／捨てたヒントの項目で、介入が対照より**有意に**悪くなっていないか。
+
+    第 3 回までは「正解数の差が 0 以上」で判定していた。効果が無ければ差は 0 を中心に
+    散らばるので、効果が無くても半分の確率で落ちる（設計 §3 の注記）。第 4 回から、
+    同じ対で McNemar（正確二項）を取り、「介入が有意に悪い」でなければ通す。生の差は
+    根拠に残す（設計が恐れる「落としたことで悪くなる」の大きさが読めるように）。"""
     if s3 is None:
         return None, "S3 の結果が無い"
-    a = ((s3.get("hint_summary") or {}).get("affected")) or {}
-    pairs = int(a.get("pairs", 0))
-    if pairs == 0:
+    rows = list(((s3.get("hint_summary") or {}).get("affected_rows")) or [])
+    if not rows:
         return None, "S3 で落とした／捨てたヒントが 1 つも無い（判定材料なし）"
-    delta = int(a.get("delta", 0))
-    return delta >= 0, (
-        f"S3 で落とした／捨てた項目 {pairs} 対: 対照 {a.get('control_hits')} 正解 /"
-        f" 介入 {a.get('treat_hits')} 正解（差 {delta:+d}）"
+    control_hits = sum(int(bool(r["control"])) for r in rows)
+    treat_hits = sum(int(bool(r["treat"])) for r in rows)
+    m = mcnemar(_affected_paired(rows))
+    p = m.get("p_value")
+    ptxt = f"p = {p:.3f}" if p is not None else "p = —"
+    why = (
+        f"S3 で落とした／捨てた項目 {len(rows)} 対: 対照 {control_hits} 正解 /"
+        f" 介入 {treat_hits} 正解（差 {treat_hits - control_hits:+d}）；"
+        f"McNemar: 対照のみ {m['control_only']} / 介入のみ {m['treat_only']} / {ptxt}"
+        f" → {m['verdict']}"
     )
+    return m["verdict"] != "介入が有意に悪い", why
 
 
 def _md_field_table(reports: dict[str, dict[str, Any] | None]) -> str:
@@ -282,6 +329,18 @@ def main(argv: list[str] | None = None) -> int:
     }
     all_ok = all(v[0] is True for v in gates.values())
     out: list[str] = []
+    # region_ab --allow-arm-reuse で片方のアームを丸ごと再利用した計測は、対照と介入の
+    # 時刻が離れている（交互実行の手順が崩れている）。表の先頭で目立つように断る
+    reused = [
+        _arm_reuse_label(arm, rep) for arm, rep in (("S1", s1), ("S2", s2), ("S3", s3))
+        if rep is not None and rep.get("resume_arm_reuse")
+    ]
+    if reused:
+        out.append(
+            f"{ARM_REUSE_WARNING}: {', '.join(reused)}"
+            " ── region_ab --allow-arm-reuse の出力。対照と介入を同じ試行で交互に回した計測ではない"
+        )
+        out.append("")
     out.append("| ゲート | 判定 | 根拠 |")
     out.append("|---|---|---|")
     for g, (ok, why) in gates.items():
@@ -337,7 +396,9 @@ def main(argv: list[str] | None = None) -> int:
     text = "\n".join(out)
     print(text)
     print()
-    print("総合:", "G1〜G4 すべて通過" if all_ok else "不通過あり（既定 off のまま）")
+    # ヒントは第 3 回の結果で既定 on にした。不通過があれば「off のまま」ではなく、
+    # 既定 on の根拠（第 3 回の 6 ゲート通過）を見直す
+    print("総合:", "G1〜G4 すべて通過" if all_ok else "不通過あり（既定 on の根拠を見直す）")
     if args.md:
         args.md.parent.mkdir(parents=True, exist_ok=True)
         args.md.write_text(text + "\n", encoding="utf-8")

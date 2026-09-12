@@ -19,6 +19,7 @@ REGISTRY: dict[FieldType, Normalizer] = {
     FieldType.TAX_RATE_JP: builtin.norm_tax_rate_jp,
     FieldType.JP_INVOICE_REG_NO: builtin.norm_jp_invoice_reg_no,
     FieldType.JP_BANK_ACCOUNT: builtin.norm_jp_bank_account,
+    FieldType.ADDRESS_JP: builtin.norm_address_jp,
 }
 
 

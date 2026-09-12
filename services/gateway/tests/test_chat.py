@@ -98,6 +98,10 @@ def test_chat_tools_update_schema_rejects_reserved_name_without_raising(
     # 型違い（LLM が bool 以外を渡す）も同じ経路で断る
     res = tools.update_schema("ten_1", "invoice", {"name": "memo", "required": "maybe"})
     assert res["ok"] is False and "required" in res["message"]
+    # FieldType に無い型（LLM の言い間違い）も put_schema が ValueError で拒み、ok=False で返す。
+    # 素通しすると orchestrator が実行時に落として、その doc_type の抽出が全部 failed になる
+    res = tools.update_schema("ten_1", "invoice", {"name": "memo", "type": "addres_jp"})
+    assert res["ok"] is False and "型" in res["message"]
     # 断った呼び出しは新版を作らない
     assert ctx.admin.get_schema("ten_1", "invoice").version == before
 

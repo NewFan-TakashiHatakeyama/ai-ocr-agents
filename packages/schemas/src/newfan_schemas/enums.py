@@ -44,4 +44,7 @@ class FieldType(str, Enum):
     TAX_RATE_JP = "tax_rate_jp"
     JP_INVOICE_REG_NO = "jp_invoice_reg_no"
     JP_BANK_ACCOUNT = "jp_bank_account"
+    # 日本の住所（ADR-0007）。郵便番号・見出し語を落とし、番地の区切りと空白を揃える。
+    # 建物名・階は値の一部として残す（第 3 回計測の正解の慣例）。
+    ADDRESS_JP = "address_jp"
     TABLE = "table"

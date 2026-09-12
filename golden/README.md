@@ -74,3 +74,21 @@ uv run python -m newfan_golden.cli \
 `golden/data/schemas.json` の critical は `dev.jsonl` の critical と一致させること。
 片方だけ直すと `critical_exact_match` が実態とずれる。CI の
 `golden/scripts/check_critical.py` が突き合わせる。
+
+`golden/data/samples_ground_truth.json`（読取領域の A/B 実測の正解）の住所は
+ADR-0007 の正規形（郵便番号・見出し語なし、都道府県〜建物名/階、全角英数字は半角、
+空白は半角英数字の間にあるものだけ 1 つ残す）で持つ。`golden/scripts/check_gold_addresses.py`
+が `norm_address_jp` の不動点かを検査し、`--fix` で揃える。直したら
+`build_region_fixtures.py` で派生フィクスチャ（`region_ab_s*.jsonl` / `*_goldspec.json`）を
+作り直すこと。
+
+`golden/data/schemas.json` の住所項目は `address_jp`（ADR-0007）。`seed-schemas` で投入する
+前に、**orchestrator-worker と gateway をこの型を知るイメージ（ADR-0007 のコミット以降）に
+しておくこと**。古い worker に `address_jp` のスキーマが届くと、その doc_type の抽出は
+すべて failed（E9001）になり再配信を繰り返す（スキーマは gateway が受け、型の検証は
+worker がする）。
+
+`region_ab` の出力 JSON には採点規則の印 `scoring`（今は `address_jp` ＝ ADR-0007 の
+住所の正規化を採点に通す）が入る。`--resume` に渡した前回の出力の印が違えば拒む ──
+第 3 回以前の出力（印なし、郵便番号付きの答えを不正解に数えている）から欠けた対だけ
+埋めると、1 つの McNemar 表に 2 つの採点規則が混ざる。規則が変わったら全件を回し直す。

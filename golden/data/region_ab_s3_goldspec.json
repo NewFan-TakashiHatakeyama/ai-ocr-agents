@@ -3,7 +3,7 @@
   "template_image": "samples/sample17.png",
   "gold": {
    "issuer_name": "わくわくファッション株式会社",
-   "issuer_address": "東京都新宿区四谷9-9-9 ファッションビル99F",
+   "issuer_address": "東京都新宿区四谷9-9-9ファッションビル99F",
    "customer_name": "鈴木 邦夫",
    "customer_address": "兵庫県神戸市東灘区住吉浜町",
    "total_amount": "11870",
@@ -57,7 +57,7 @@
   "template_image": "samples/sample2.png",
   "gold": {
    "issuer_name": "わくわく物産株式会社",
-   "issuer_address": "東京都新宿区四谷9－9－9サプライビル2F",
+   "issuer_address": "東京都新宿区四谷9-9-9サプライビル2F",
    "customer_name": "株式会社エイビーエム",
    "customer_address": "神奈川県横浜市港北区樽町エイビービル",
    "total_amount": "7003",
@@ -80,7 +80,7 @@
   "template_image": "samples/sample27.jpg",
   "gold": {
    "issuer_name": "サンプル商事株式会社",
-   "issuer_address": "東京都品川区北品川５－１０－２０サンプルビル２Ｆ",
+   "issuer_address": "東京都品川区北品川5-10-20サンプルビル2F",
    "customer_name": "矢部 隆司",
    "total_amount": "75916",
    "document_date": "2019年3月27日",

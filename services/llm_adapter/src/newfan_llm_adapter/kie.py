@@ -198,10 +198,33 @@ def kie_extract(
         # ある（実測: 'list' object has no attribute 'get' で run が failed）。中身が項目の
         # 配列ならそのまま fields として読む。何を返したかは調査のため先頭だけ残す。
         _log.warning("kie: JSON 配列が返った（fields 配列として読む）: %s", str(data)[:200])
+        # **スキーマの丸写し**（どの要素にも value が無い）は結果ではない。空の抽出として
+        # 通すと「成功したのに全項目 null」の run になり、計測では 0 点の試行として数えて
+        # しまう（第 4 回計測 S3: 介入アームで 2 試行が全項目外れ ── 領域ヒント付きの
+        # スキーマは丸写しされやすい）。契約違反として上げ、再配信で取り直す。
+        items = [x for x in data if isinstance(x, dict)]
+        if items and not any("value" in x for x in items):
+            raise LLMError(
+                "E3002",
+                "LLM 出力の JSON 契約違反（スキーマの丸写しで値が無い）",
+                detail=str(data)[:200],
+            )
         data = {"fields": data}
     if not isinstance(data, dict):
         raise LLMError(
             "E3002", "LLM 出力の JSON 契約違反（オブジェクトではない）", detail=str(data)[:200]
+        )
+
+    # スキーマに項目があるのに 1 つも返さない出力は結果ではない（value=null の項目すら無い）。
+    # 実測（第 4 回計測 S3）: 介入アームで 4 回に 1 回、fields が空の "成功" が返り、全項目
+    # 未抽出の run になった。自動発見（fields が空のスキーマ）では 0 件も正当なので対象外。
+    schema_fields = [
+        f for f in (schema_json.get("fields") or []) if isinstance(f, dict) and f.get("name")
+    ]
+    if schema_fields and not (data.get("fields") or []):
+        _log.warning("kie: 項目が 1 つも返らなかった（取り直す）: %s", resp.text[:200])
+        raise LLMError(
+            "E3002", "LLM 出力の JSON 契約違反（項目が 1 つも無い）", detail=resp.text[:200]
         )
 
     result = KieResult(response=resp)

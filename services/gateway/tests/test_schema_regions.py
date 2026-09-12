@@ -401,6 +401,55 @@ def test_reserved_field_name_rejected_with_error_envelope(ctx: SimpleNamespace) 
     assert ok.status == 200
 
 
+# ---------- 未知の型（ADR-0007 の展開順の事故を保存時に止める） ----------
+
+
+def test_unknown_field_type_rejected_with_error_envelope(ctx: SimpleNamespace) -> None:
+    """``FieldType`` に無い型は 422 かつ E1003 の封筒で拒み、新版を作らない。
+
+    orchestrator は保存されたスキーマを ``FieldSchema``（``type: FieldType``）で検証する
+    ので、知らない型が保存されると、その doc_type の抽出が**すべて** failed（E9001）に
+    なって初めて分かる。gateway が保存時に拒めば、画面で選んだ型を worker が知らない
+    組み合わせ（gateway だけ新しい）はその場で分かる。
+    """
+    before = _get(ctx)["version"]
+    for type_ in ("addres_jp", "text", "ADDRESS_JP"):
+        r = _put(ctx, {"doc_type": "invoice", "fields": [{"name": "memo", "type": type_}]})
+        assert r.status == 422, type_
+        assert set(r.json) == {"error"}, r.json
+        assert r.json["error"]["code"] == "E1003"
+        assert "型" in r.json["error"]["message"] and type_ in r.json["error"]["message"]
+        assert r.json["error"]["details"] == {"field": "memo"}
+    assert _get(ctx)["version"] == before
+    # 既知の型は通る（address_jp を含む）
+    ok = _put(
+        ctx,
+        {
+            "doc_type": "invoice",
+            "fields": [
+                {"name": "customer_address", "type": "address_jp"},
+                {"name": "bank", "type": "jp_bank_account"},
+            ],
+        },
+    )
+    assert ok.status == 200
+
+
+def test_legacy_unknown_field_type_is_readable_but_not_writable(ctx: SimpleNamespace) -> None:
+    """型の拒否も書き込み側だけ。読み出しは旧データを通す（予約名と同じ理由）。"""
+    from newfan_gateway.records import SchemaFieldDef, SchemaRecord
+
+    ctx.admin.seed_schema(
+        SchemaRecord(
+            id="sch_legacy_type", tenant_id="ten_1", doc_type="legacy_type", version=1,
+            fields=[SchemaFieldDef(name="memo", label="メモ", type="text")],
+        )
+    )
+    assert ctx.client.get("/v1/schemas/legacy_type", headers=auth("admin")).status_code == 200
+    r = _put(ctx, {"doc_type": "legacy_type", "fields": [{"name": "memo", "type": "text"}]})
+    assert r.status == 422 and r.json["error"]["code"] == "E1003"
+
+
 # ---------- JSONB 直列化（プロンプト同一性の土台） ----------
 
 

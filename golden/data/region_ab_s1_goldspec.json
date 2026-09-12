@@ -68,7 +68,7 @@
   "template_image": "samples/sample17.png",
   "gold": {
    "issuer_name": "わくわくファッション株式会社",
-   "issuer_address": "東京都新宿区四谷9-9-9 ファッションビル99F",
+   "issuer_address": "東京都新宿区四谷9-9-9ファッションビル99F",
    "customer_name": "鈴木 邦夫",
    "customer_address": "兵庫県神戸市東灘区住吉浜町",
    "total_amount": "11870",
@@ -102,7 +102,7 @@
   "template_image": "samples/sample2.png",
   "gold": {
    "issuer_name": "わくわく物産株式会社",
-   "issuer_address": "東京都新宿区四谷9－9－9サプライビル2F",
+   "issuer_address": "東京都新宿区四谷9-9-9サプライビル2F",
    "customer_name": "株式会社エイビーエム",
    "customer_address": "神奈川県横浜市港北区樽町エイビービル",
    "total_amount": "7003",
@@ -116,7 +116,7 @@
    "issuer_name": "【サンプル】ビズリフォーム株式会社",
    "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
    "customer_name": "ワイスホルン・リノベート株式会社",
-   "customer_address": "東京都中央区八丁堀XXX-X新臨海タワー１５F",
+   "customer_address": "東京都中央区八丁堀XXX-X新臨海タワー15F",
    "total_amount": "58300",
    "document_date": "令和5年5月1日",
    "document_no": "125"
@@ -138,7 +138,7 @@
   "template_image": "samples/sample27.jpg",
   "gold": {
    "issuer_name": "サンプル商事株式会社",
-   "issuer_address": "東京都品川区北品川５－１０－２０サンプルビル２Ｆ",
+   "issuer_address": "東京都品川区北品川5-10-20サンプルビル2F",
    "customer_name": "矢部 隆司",
    "total_amount": "75916",
    "document_date": "2019年3月27日",
@@ -218,7 +218,7 @@
    "issuer_name": "【サンプル】ビズリフォーム株式会社",
    "issuer_address": "東京都新宿区高田馬場XX-X-XX新宿ビルX階",
    "customer_name": "大熊 和一",
-   "customer_address": "神奈川県横浜市青葉区美しが丘１８丁目５番地２号",
+   "customer_address": "神奈川県横浜市青葉区美しが丘18丁目5番地2号",
    "total_amount": "395217",
    "document_date": "令和5年5月1日",
    "document_no": "15"
@@ -228,9 +228,9 @@
   "template_image": "samples/sample9.jpg",
   "gold": {
    "issuer_name": "株式会社アイディディ・トラベル",
-   "issuer_address": "東京都千代田区大手町１－７－２東京サンケイビル",
+   "issuer_address": "東京都千代田区大手町1-7-2東京サンケイビル",
    "customer_name": "小川産業株式会社",
-   "customer_address": "大阪府大阪市中央区森ノ宮中央１－４－５２森ノ宮ビル１Ｆ",
+   "customer_address": "大阪府大阪市中央区森ノ宮中央1-4-52森ノ宮ビル1F",
    "total_amount": "1261580",
    "document_date": "2023年06月15日",
    "document_no": "KY0001116-001-0"

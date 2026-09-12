@@ -9,11 +9,13 @@ import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
 import { chatHrefForSchema, schemaAddRequest } from "@/lib/schemaChat";
 import { schemaSaveErrorToast } from "@/lib/schemaSaveError";
+import { TYPE_OPTIONS } from "@/lib/fieldTypes";
 import { useToasts } from "@/lib/toast";
 import type { SchemaDto, SchemaFieldDto, WorkflowRefDto } from "@/lib/types";
 
 // SCR-06 スキーマ管理（§5.5）。座標は登場せず、意味定義（名前・型・重要度）だけを版管理。
-const TYPES = ["string", "money_jpy", "date", "number", "jp_invoice_reg_no", "tax_rate_jp", "table"];
+// 型の選択肢とラベル（「住所(日本)」等）はテンプレート化プレビューと共有する
+// （lib/fieldTypes.ts）。ここだけ生の値を並べると、型を足したときに表示が食い違う。
 
 /** 409(E1005) の details.workflows を「名前」の並びにする。無ければ空文字 */
 function workflowNames(details?: Record<string, unknown>): string {
@@ -391,9 +393,9 @@ export default function SchemasPage() {
               onChange={(e) => setField(i, { type: e.target.value })}
               aria-label={`${f.name} の型`}
             >
-              {TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t}
+              {TYPE_OPTIONS.map(([v, l]) => (
+                <option key={v} value={v}>
+                  {l}
                 </option>
               ))}
             </select>

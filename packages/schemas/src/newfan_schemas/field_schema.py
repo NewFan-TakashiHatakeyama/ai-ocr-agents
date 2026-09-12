@@ -53,6 +53,25 @@ def check_field_name(name: str) -> None:
         )
 
 
+_FIELD_TYPE_VALUES: frozenset[str] = frozenset(t.value for t in FieldType)
+
+
+def check_field_type(type_: str) -> None:
+    """スキーマ項目の型が ``FieldType`` に無ければ ValueError。
+
+    型の検証は本来 orchestrator（``FieldSchema``、``type: FieldType``）がするが、それは
+    **抽出の実行時**で、知らない型が保存されていると、その doc_type の抽出が全部
+    failed（E9001）になって初めて分かる（ADR-0007 で ``address_jp`` を足したときの
+    展開順の事故）。gateway の書き込み側（``put_schema``）がここで先に拒めば、画面や
+    チャットで選んだ型を worker が知らない組み合わせは**保存時**に分かる。
+    ``check_field_name`` と同じく書き込み側だけで呼び、読み出しモデルには置かない。
+    """
+    if type_ not in _FIELD_TYPE_VALUES:
+        raise ValueError(
+            f"項目の型「{type_}」は使えません（{'/'.join(sorted(_FIELD_TYPE_VALUES))} のいずれか）"
+        )
+
+
 def sanitize_example_value(v: Optional[str]) -> Optional[str]:
     """例示値の消毒（設計 region-field-add-and-hint-v2 §2.3）。
 

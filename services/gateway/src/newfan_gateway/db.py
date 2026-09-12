@@ -881,10 +881,10 @@ class PgAdminRepository:
         import json as _json
         import uuid as _uuid
 
-        from newfan_gateway.admin import SchemaArchivedError, reject_reserved_field_names
+        from newfan_gateway.admin import SchemaArchivedError, check_field_defs
         from newfan_gateway.records import SchemaRecord
 
-        reject_reserved_field_names(fields)  # D9: 書き込み側で拒む（読み出しでは拒まない）
+        check_field_defs(fields)  # 予約名（D9）と未知の型は書き込み側で拒む（読み出しでは拒まない）
         payload = _json.dumps(schema_fields_payload(fields), ensure_ascii=False)
         with self._engine.begin() as c:
             self._rls(c, tenant_id)

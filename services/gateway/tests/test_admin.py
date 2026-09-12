@@ -37,6 +37,26 @@ def test_put_schema_creates_new_version(ctx: SimpleNamespace) -> None:
     assert any(f["name"] == "payment_method" for f in r.json()["fields"])
 
 
+def test_put_schema_address_jp_roundtrips(ctx: SimpleNamespace) -> None:
+    """住所の型 address_jp（ADR-0007）が PUT → 応答 → GET で落ちずに往復する。
+
+    orchestrator は FieldSchema（type: FieldType）で検証するので、gateway が受けた型が
+    そのまま保存されないと、正規化器レジストリが string に落ちて慣例が効かない。"""
+    body = {
+        "doc_type": "invoice",
+        "fields": [
+            {"name": "total_amount", "label": "合計金額(税込)", "type": "money_jpy", "critical": True},
+            {"name": "customer_address", "label": "取引先住所", "type": "address_jp"},
+        ],
+    }
+    r = ctx.client.put("/v1/schemas", headers=auth("admin"), json=body)
+    assert r.status_code == 200
+    got = ctx.client.get("/v1/schemas/invoice", headers=auth("admin")).json()
+    for payload in (r.json(), got):
+        by_name = {f["name"]: f for f in payload["fields"]}
+        assert by_name["customer_address"]["type"] == "address_jp"
+
+
 def test_schemas_require_admin(ctx: SimpleNamespace) -> None:
     assert ctx.client.get("/v1/schemas", headers=auth("reviewer")).status_code == 403
 

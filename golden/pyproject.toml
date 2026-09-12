@@ -11,9 +11,10 @@ dependencies = []
 # collect（実系に流して予測を採る）と、領域の実測（region_ab / region_from_doc /
 # region_from_gold）だけが HTTP と他パッケージを使う。CI の採点側には要らない。
 # newfan-schemas は表記揺れの正規化（textnorm.norm_key）、newfan-paddle-client は
-# 正解値の位置探索（structure-svc の span 構築）のため。workspace 内の参照は
-# ルートの [tool.uv.sources] で解決される。
-collect = ["httpx>=0.27", "newfan-schemas", "newfan-paddle-client"]
+# 正解値の位置探索（structure-svc の span 構築）、newfan-normalizers は住所の慣例を
+# 揃える正規化（norm_address_jp、ADR-0007。region_ab の採点と正解データの検査）のため。
+# workspace 内の参照はルートの [tool.uv.sources] で解決される。
+collect = ["httpx>=0.27", "newfan-schemas", "newfan-paddle-client", "newfan-normalizers"]
 
 [build-system]
 requires = ["hatchling"]
