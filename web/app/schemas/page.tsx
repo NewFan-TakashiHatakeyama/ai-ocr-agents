@@ -13,7 +13,8 @@ import { useToasts } from "@/lib/toast";
 import type { SchemaDto, SchemaFieldDto, WorkflowRefDto } from "@/lib/types";
 
 // SCR-06 スキーマ管理（§5.5）。座標は登場せず、意味定義（名前・型・重要度）だけを版管理。
-const TYPES = ["string", "money_jpy", "date", "number", "jp_invoice_reg_no", "tax_rate_jp", "table"];
+// address_jp は住所（ADR-0007: 郵便番号・見出し語を落とし、建物名までを値にする）。
+const TYPES = ["string", "money_jpy", "date", "number", "jp_invoice_reg_no", "tax_rate_jp", "address_jp", "table"];
 
 /** 409(E1005) の details.workflows を「名前」の並びにする。無ければ空文字 */
 function workflowNames(details?: Record<string, unknown>): string {
