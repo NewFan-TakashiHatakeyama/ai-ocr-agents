@@ -54,7 +54,7 @@ uv run mypy packages          # 型チェック（strict）
 |---|---|
 | packages/schemas | ドメインモデル実装済み |
 | packages/paddle_client | 応答型・クライアント・span 抽出・契約テスト実装済み（fixture は実サービング録画で置換予定） |
-| packages/normalizers | §5.6 正規化器レジストリ実装済み（string/date/money_jpy/number/tax_rate_jp/reg_no/bank） |
+| packages/normalizers | §5.6 正規化器レジストリ実装済み（string/date/money_jpy/number/tax_rate_jp/reg_no/bank/address_jp ── 住所は ADR-0007） |
 | packages/validators | §5.7.3 V-* 実装済み（法人番号チェックディジット含む。V-DUP は dup_lookup 注入待ち） |
 | inference/* | サービング設定 YAML・compose 実装済み |
 | deploy/ecs | ECS(Option A) Terraform IaC 実装済み（terraform validate は要 CI 実行） |

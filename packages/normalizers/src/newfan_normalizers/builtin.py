@@ -176,3 +176,64 @@ def norm_jp_bank_account(value: str, ctx: NormContext) -> NormalizationResult:
     return NormalizationResult(
         value="/".join(parts) if parts else None, type_converted=True, extra=extra
     )
+
+
+# ---------------- 住所（ADR-0007） ----------------
+
+# 先頭の郵便番号。〒 は有っても無くてもよい。後ろに数字や "-" が続くものは郵便番号では
+# ない（"1234567-8" のような番地の頭を食わない）。
+_ADDR_POSTAL_HEAD = re.compile(r"^(?:〒\s*)?\d{3}-?\d{4}(?![\d-])\s*")
+# 末尾の郵便番号。**本文と空白か 〒 で切れているものだけ**を落とす。"…町123-4567" のように
+# 番地が 3+4 桁で終わる住所を郵便番号と誤認して削らないための番人。
+_ADDR_POSTAL_TAIL = re.compile(r"(?:\s+(?:〒\s*)?|〒\s*)\d{3}-?\d{4}$")
+# 〒 だけ（OCR が数字を落とした／郵便番号が別項目で読まれた）。
+_ADDR_POSTAL_MARK_HEAD = re.compile(r"^〒\s*")
+_ADDR_POSTAL_MARK_TAIL = re.compile(r"\s*〒$")
+# 先頭の見出し語。帳票の住所欄はラベルと値が同じ行に並ぶことが多く、span を連結した
+# value_raw に「本社 〒…」「住所：…」の形で混ざる。**先頭だけ**を見る（「住所1住所2」の
+# ようにダミー住所の途中に出る語には触らない）。
+_ADDR_LABEL_HEAD = re.compile(
+    r"^(?:住所|所在地|本社|本店|支社|支店|営業所|事業所|(?i:address))[:：]?\s*"
+)
+# 番地の区切りに使われるハイフン類。**数字と数字の間にあるものだけ** "-" に揃える。
+# 長音「ー」は「タワー」「ビルディング」の一部でもあるので、無条件に置換してはならない。
+# 全角ハイフン "－"（U+FF0D）は NFKC が "-" にするのでここには含めない。
+_ADDR_DASH_BETWEEN_DIGITS = re.compile(r"(?<=\d)[‐‑‒–—―−ー](?=\d)")
+_ADDR_WS = re.compile(r"\s+")
+
+
+def norm_address_jp(value: str, ctx: NormContext) -> NormalizationResult:
+    """日本の住所を「郵便番号なし・見出し語なし・都道府県〜建物名/階まで」の形に揃える。
+
+    第 3 回計測（docs/design/region-measurement-2026-09-12.md）で住所の不正解の多くが
+    「郵便番号や『本社』を値に含めるか」という**値の慣例**の食い違いだった。慣例を
+    正規化器で 1 つに決め、正解データも同じ形で持つ（ADR-0007）。
+
+    規則（順に適用）:
+      1. NFKC（全角英数字・全角ハイフン・全角空白を揃える）
+      2. 先頭の見出し語（住所／所在地／本社／本店／支社／支店／営業所／事業所／Address）と
+         先頭・末尾の郵便番号（〒 は任意。〒 だけのものも）を、剥がれなくなるまで剥がす
+         ── 「本社 981-3205 仙台市…」は見出し語の後ろに郵便番号が続くので 1 回では足りない
+      3. 空白（全角含む）をすべて除く
+      4. 数字と数字の間のハイフン類（‐ ‑ ‒ – — ― − ー）を "-" に揃える
+      5. 何も残らなければ None
+
+    **建物名・階は削らない**（正解の慣例）。「東京都品川区北品川5-10-20」のように建物名が
+    落ちた抽出値は、慣例の問題ではなく本当の取りこぼしなので、正規化で隠さない。
+    値の形を変えるだけで導出はしないので type_converted は False（grounding の 0.85 に
+    落とさない）。confidence_cap も付けない。
+    """
+    s = _nfkc(value).strip()
+    while True:
+        before = s
+        s = _ADDR_LABEL_HEAD.sub("", s, count=1)
+        s = _ADDR_POSTAL_HEAD.sub("", s, count=1)
+        s = _ADDR_POSTAL_MARK_HEAD.sub("", s, count=1)
+        s = _ADDR_POSTAL_TAIL.sub("", s, count=1)
+        s = _ADDR_POSTAL_MARK_TAIL.sub("", s, count=1)
+        s = s.strip()
+        if s == before:
+            break
+    s = _ADDR_WS.sub("", s)
+    s = _ADDR_DASH_BETWEEN_DIGITS.sub("-", s)
+    return NormalizationResult(value=s or None, type_converted=False)
