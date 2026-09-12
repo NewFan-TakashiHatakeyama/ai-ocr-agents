@@ -298,14 +298,18 @@ export default function ConnectionsPage() {
                         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                           <button
                             className="btn sm"
-                            disabled={testingId === c.id}
+                            // 無効（disabled）は運用側が止めた印。API も 409 で断る
+                            // （テストの成功で tested に戻し配信を再開させない）
+                            disabled={testingId === c.id || c.status === "disabled"}
                             onClick={() => test.mutate(c.id)}
                             title={
-                              c.type === "webhook"
-                                ? "本配信と同じ署名で {\"event\":\"test\"} を 1 回送ります（2xx で成功）"
-                                : c.type === "s3"
-                                  ? "バケットの存在と権限（HeadBucket）を確かめます"
-                                  : "SELECT 1 で接続を確かめます"
+                              c.status === "disabled"
+                                ? "無効化された接続は疎通テストできません"
+                                : c.type === "webhook"
+                                  ? "本配信と同じ署名で {\"event\":\"test\",\"text\":…} を 1 回送ります（2xx で成功。Slack 互換の通知先にはテスト投稿として届きます）"
+                                  : c.type === "s3"
+                                    ? "バケットの存在と権限（HeadBucket）を確かめます"
+                                    : "SELECT 1 で接続を確かめます"
                             }
                           >
                             {testingId === c.id ? "テスト中…" : "疎通テスト"}

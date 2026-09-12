@@ -8,9 +8,21 @@ POST /connections/{id}/test の type 別の実体。routers はここを呼び�
   通し、本文の符号化と署名ヘッダも本配信（newfan_export.webhook.WebhookSender）と
   同じ関数（newfan_netguard.encode_event / signed_headers）で作る。受信側が署名検証を
   テストで通せば本配信も通る（逆も同じ）
-- s3 は sink（orchestrator の S3FileWriter）と同じ作り方のクライアントで HeadBucket。
+- type=webhook の接続は sink.webhook（署名付き JSON イベント）だけでなく sink.notify
+  （Slack incoming webhook 互換。orchestrator の NotifySender が {"text": …} を送る）
+  にも使われる。Slack は text / blocks / attachments の無い本文を 400（no_text）で
+  断るため、test イベントには **text も含める**。HMAC 検証する受信側は余分なキーを
+  無視し（署名は本文全体に掛かる）、Slack 互換の通知先にはテスト投稿として届く。
+  どちらの受信側でも 2xx が返り、tested に上げられる（L010 が解ける）
+- s3 は sink（orchestrator の S3FileWriter）と同じ `boto3.client("s3")` で HeadBucket。
+  ただし同期 API の中で待つので、タイムアウトと再試行は短く固定する（botocore の既定は
+  接続 60 秒・読取 60 秒・最大 5 回で、到達不能なら 1 クリックが数分スレッドを掴む）。
   バケットの実在と、タスクロールに s3:ListBucket があることが分かる（PutObject 権限は
   書いてみるまで分からないが、バケット名の typo と権限ゼロは登録直後に潰せる）
+- URL の妥当性は httpx の厳格なパーサでも見る（is_blocked_url の urllib.parse は
+  ポートが数字でない・制御文字入りの URL も通す。httpx.InvalidURL は HTTPError の
+  派生ではないので、拾わないと 500 になる）。登録時（POST /connections）と送信前の
+  両方で同じ関数（invalid_url_reason）を使う
 - 失敗理由は利用者向けの文言だけを返す。内部例外の文字列（DSN・トークン・スタック等の
   断片が混ざり得る）はそのまま外に出さない
 """
@@ -30,6 +42,10 @@ from newfan_netguard import (
 
 # 疎通テストは同期 API の中で待つので短めに（本配信は 10 秒）
 WEBHOOK_TIMEOUT_SEC = 5.0
+# S3 も同じ理由で短く（接続・読取とも 5 秒、再試行なし = 合計 1 回）。sink 側は
+# worker で動くので botocore の既定（60 秒 × 最大 5 回）で構わないが、ここは
+# スレッドプールの worker を掴んだまま待つ
+S3_TIMEOUT_SEC = 5
 
 
 class ConnectionTestError(Exception):
@@ -47,19 +63,50 @@ def new_http_client(timeout: float) -> httpx.Client:
 
 
 def new_s3_client() -> Any:
-    """sink（S3FileWriter）と同じ作り方。認証はタスクロール / 環境変数に任せる。"""
-    import boto3  # 遅延 import（runtime extra）
+    """sink（S3FileWriter）と同じ boto3.client("s3")（認証はタスクロール / 環境変数）。
 
-    return boto3.client("s3")
+    ただしタイムアウトと再試行は同期 API 向けに短く固定する（S3_TIMEOUT_SEC）。
+    """
+    import boto3  # 遅延 import（runtime extra）
+    from botocore.config import Config
+
+    return boto3.client(
+        "s3",
+        config=Config(
+            connect_timeout=S3_TIMEOUT_SEC,
+            read_timeout=S3_TIMEOUT_SEC,
+            retries={"total_max_attempts": 1},
+        ),
+    )
+
+
+def invalid_url_reason(url: str) -> Optional[str]:
+    """httpx が受け付けない URL なら利用者向けの理由、受け付けるなら None。
+
+    is_blocked_url（urllib.parse 由来）は「:abc」のようなポートや改行入りの URL も
+    通してしまう。httpx.InvalidURL は HTTPError の派生ではないため、送信で初めて
+    落ちると 500（内部エラー）になる。登録時と送信前の両方でここを通す。
+    """
+    try:
+        httpx.URL(url)
+    except httpx.InvalidURL:
+        return "配信先 URL が不正です（ポートは数字、改行や制御文字は不可）"
+    return None
 
 
 def build_test_event(connection_id: str, *, tenant_id: str, occurred_at: str) -> dict[str, Any]:
-    """疎通テストの本文。受信側が本配信と区別できるよう event='test' を名乗る。"""
+    """疎通テストの本文。受信側が本配信と区別できるよう event='test' を名乗る。
+
+    text は Slack incoming webhook 互換の通知先（sink.notify）向け。無いと Slack が
+    400（no_text）を返し、その URL は永久に tested になれない。署名検証する受信側
+    （sink.webhook）は本文全体の HMAC を見るだけなので、余分なキーがあっても通る。
+    """
     return {
         "event": "test",
         "connection_id": connection_id,
         "tenant_id": tenant_id,
         "occurred_at": occurred_at,
+        "text": f"[NewFan AI-OCR] 接続テスト: この通知先への疎通を確認しました（{connection_id}）",
     }
 
 
@@ -77,6 +124,9 @@ def check_webhook(
             "配信先 URL が拒否されました（http(s) 以外・内部ネットワーク宛て・名前解決不能）",
             details={"url": url},
         )
+    bad = invalid_url_reason(url)
+    if bad is not None:
+        raise ConnectionTestError(bad, details={"url": url})
     body = encode_event(event)
     headers = signed_headers(body, secret)
     try:
@@ -89,6 +139,11 @@ def check_webhook(
     except httpx.ConnectError as exc:
         raise ConnectionTestError(
             "配信先に接続できません（名前解決・接続拒否・TLS のいずれか）", details={"url": url}
+        ) from exc
+    except httpx.InvalidURL as exc:
+        # invalid_url_reason で弾けなかった形（httpx の版差）も 500 にはしない
+        raise ConnectionTestError(
+            "配信先 URL が不正です（ポートは数字、改行や制御文字は不可）", details={"url": url}
         ) from exc
     except httpx.HTTPError as exc:
         # 例外文言には URL 以外（プロキシ設定等）の断片が混ざり得るため型名だけ返す

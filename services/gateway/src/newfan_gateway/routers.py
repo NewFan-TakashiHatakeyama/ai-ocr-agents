@@ -27,6 +27,7 @@ from newfan_gateway.conntest import (
     build_test_event,
     check_s3,
     check_webhook,
+    invalid_url_reason,
 )
 from newfan_gateway.admin import AdminRepository, is_activatable
 from newfan_gateway.deps import (
@@ -1711,6 +1712,19 @@ def create_connection(
                 details={"folder_id_length": len(folder_id)},
             )
         body.config = {**body.config, "folder_id": folder_id}
+    # webhook の config.url は /webhooks/endpoints と同じ二段の一段目をここで見る:
+    # 内部ネットワーク宛て（SSRF）と httpx が受け付けない形（「:abc」のようなポート・
+    # 改行入り）は登録時に断る。後者は is_blocked_url（urllib.parse）が通してしまい、
+    # 疎通テストで初めて httpx.InvalidURL（HTTPError ではない）が出て 500 になっていた。
+    # url 自体の有無は従来どおり疎通テストで「config.url が未設定」と返す
+    if body.type == "webhook":
+        hook_url = str(body.config.get("url") or "")
+        if hook_url:
+            bad = invalid_url_reason(hook_url)
+            if bad is not None:
+                raise ApiError("E4001", bad, details={"url": hook_url})
+            if is_blocked_url(hook_url):
+                raise ApiError("E5001", "配信先 URL が拒否されました", details={"url": hook_url})
     table_re = r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$"
     bad_tables = [t for t in body.allowed_tables if not re.match(table_re, t)]
     if bad_tables:
@@ -1743,15 +1757,25 @@ def test_connection(
     sink/トリガーは tested/active の接続しか使わないため、これを通すまで実行に乗らない
     （lint L010）。種別ごとの実体:
     - postgres: SELECT 1（失敗は従来どおり 200 + ok=false で理由を返す）
-    - webhook: 本配信と同じ署名・ヘッダで {"event":"test"} を 1 回送る。SSRF ガードを
-      通し、2xx で成功。失敗（非 2xx・ネットワーク・URL 拒否）は 422 で理由を返す
-    - s3: sink と同じ作り方のクライアントで HeadBucket。失敗は 422 で理由を返す
+    - webhook: 本配信と同じ署名・ヘッダで {"event":"test", "text": …} を 1 回送る
+      （text は Slack incoming webhook 互換の通知先 = sink.notify 向け。無いと 400
+      no_text で断られ tested になれない）。SSRF ガードを通し、2xx で成功。失敗
+      （非 2xx・ネットワーク・URL 拒否／不正）は 422 で理由を返す
+    - s3: sink と同じ boto3.client("s3")（ただし 5 秒・再試行なし）で HeadBucket。
+      失敗は 422 で理由を返す
     - フォルダ監視系（gdrive/m365/box）は「今すぐ同期」が疎通テストを兼ねる
       （同期成功で worker が tested に上げる）
+
+    status='disabled' は運用側が API 外で止めた印（同期も断る）。成功で無条件に
+    tested に書き戻すと、テナント管理者の 1 クリックで配信が再開してしまうため断る。
     """
     rec = admin.get_connection(principal.tenant_id, connection_id)
     if rec is None:
         raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
+    if rec.status == "disabled":
+        raise ApiError(
+            "E1005", "無効化された接続は疎通テストできません", details={"status": rec.status}
+        )
     if rec.type in ("webhook", "s3"):
         try:
             if rec.type == "webhook":
