@@ -80,6 +80,26 @@ def test_kie_fields_の配列だけが返っても読む(bundle: PromptBundle) -
     assert result.fields[0].span_ids == [11]
 
 
+def test_kie_スキーマの丸写し_値の無い配列_は_E3002(bundle: PromptBundle) -> None:
+    """モデルがスキーマの fields をそのまま返す（value が 1 つも無い）ことがある。空の抽出として
+    通すと全項目 null の「成功」run になるので、契約違反として再配信に委ねる。"""
+    import pytest
+
+    from newfan_llm_adapter.errors import LLMError
+
+    echo = json.dumps([{"name": "total_amount", "type": "money_jpy", "label": "合計", "required": False}])
+    adapter = LLMAdapter(FakeProvider([echo]))
+    with pytest.raises(LLMError) as exc:
+        kie_extract(adapter, bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA)
+    assert exc.value.code == "E3002"
+    # value キーがあれば（null でも）丸写しではなく「読んだが無かった」
+    blank = json.dumps([{"name": "total_amount", "value": None, "span_ids": []}])
+    result = kie_extract(
+        LLMAdapter(FakeProvider([blank])), bundle, spans=_SPANS, layout_markdown="", schema_json=_SCHEMA
+    )
+    assert [f.name for f in result.fields] == ["total_amount"]
+
+
 def test_kie_オブジェクトでも配列でもなければ_E3002(bundle: PromptBundle) -> None:
     import pytest
 
