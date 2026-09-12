@@ -184,12 +184,15 @@ def test_rerun_extract_runs_after_confirmation() -> None:
     """承認後（chat/confirm 経路）はツールが実際に Run を発行する。
 
     seed した run は needs_review。チャット再抽出の主用途が「レビュー中の帳票を
-    スキーマを直して取り直す」なので、needs_review は競合として弾かない（§4.5）。
+    スキーマを直して取り直す」なので、needs_review は競合として弾かず、旧 run を
+    superseded に終端させて取り直す（REST の supersede_review=true と同じ）。
     """
-    tools, _repo, _admin, queue = _tools()
+    tools, repo, _admin, queue = _tools()
     res = tools.rerun_extract("ten_1", "doc_1")
     assert res["ok"] is True and res["job_id"]
     assert len(queue.messages) == 1 and queue.messages[0][0] == "q.extract"
+    assert repo.get_run("ten_1", "run_1").status == "superseded"
+    assert repo.get_run("ten_1", res["run_id"]).status == "processing"
 
 
 def test_rerun_extract_rejects_while_processing() -> None:

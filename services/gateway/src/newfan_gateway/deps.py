@@ -9,6 +9,7 @@ from fastapi import Depends, Header, Request
 from newfan_gateway.admin import AdminRepository
 from newfan_gateway.auth import Principal, check_min_role, decode_principal
 from newfan_gateway.chat import ChatAgent
+from newfan_gateway.chat_tools import ChatTools
 from newfan_gateway.config import Settings
 from newfan_gateway.locks import LockStore
 from newfan_gateway.ports import Ingestor, OrchestratorClient
@@ -57,6 +58,16 @@ def get_workflows(request: Request) -> WorkflowsRepository:
 
 def get_chat_agent(request: Request) -> ChatAgent:
     return request.app.state.chat_agent  # type: ignore[no-any-return]
+
+
+def get_chat_tools(request: Request) -> ChatTools:
+    """承認実行（POST /chat/confirm）が使うツール実体（§4.5）。
+
+    supervisor が提案に使うのと同じ ChatTools を、同じ repo / admin / queue で組む。
+    状態を持たない薄い層なのでリクエストごとに作ってよい。
+    """
+    state = request.app.state
+    return ChatTools(repo=state.repo, admin=state.admin, queue=state.queue)
 
 
 def get_lock_store(request: Request) -> LockStore:

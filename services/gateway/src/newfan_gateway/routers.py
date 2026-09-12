@@ -6,7 +6,7 @@ import json
 import re
 import secrets
 import uuid
-from typing import Any, Optional
+from typing import Any, Optional, TypeVar
 
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
@@ -15,12 +15,12 @@ from newfan_netguard import is_blocked_url
 from newfan_schemas import check_field_name, resolve_regions
 from newfan_workflow import WorkflowGraph, build_candidate, catalog, classify_text, has_errors, lint
 from newfan_workflow.lint import Finding
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from newfan_gateway import dto
-from newfan_gateway.auth import Principal
+from newfan_gateway.auth import Principal, check_min_role
 from newfan_gateway.chat import ChatAgent
-from newfan_gateway.chat_tools import field_validation_message
+from newfan_gateway.chat_tools import WRITE_TOOL_MIN_ROLE, ChatTools
 from newfan_gateway.config import Settings
 from newfan_gateway.conntest import (
     ConnectionTestError,
@@ -29,15 +29,17 @@ from newfan_gateway.conntest import (
     check_webhook,
     invalid_url_reason,
 )
-from newfan_gateway.admin import AdminRepository, is_activatable
+from newfan_gateway.admin import ACTIVATION_BLOCKED_MESSAGE, AdminRepository, can_activate
 from newfan_gateway.deps import (
     get_admin,
     get_secret_store,
     get_chat_agent,
+    get_chat_tools,
     get_ingestor,
     get_lock_store,
     get_object_store,
     get_orchestrator,
+    get_principal,
     get_queue,
     get_repo,
     get_settings,
@@ -1088,12 +1090,9 @@ def _rule_dto(rec: Any) -> dto.RuleDto:
         validation_report=rec.validation_report,
         source_correction_ids=rec.source_correction_ids,
         created_by=rec.created_by,
-        # llm_hint の検証免除は「人が明示的に書いた指示」に限る。学習エージェント生成の
-        # llm_hint（created_by="agent"）まで免除すると、検証不合格のルールが1クリックで
-        # 全 KIE プロンプトに注入される（レビュー保留所見）。regex/vocab は従来どおり
-        # 再現率ゲートが必要。
-        activatable=(rec.rule_type == "llm_hint" and rec.created_by != "agent")
-        or is_activatable(rec.validation_report),
+        # 判定は can_activate（PATCH /rules・チャット承認と共通）。llm_hint の検証免除は
+        # 「人が明示的に書いた指示」に限る（レビュー保留所見）。
+        activatable=can_activate(rec),
     )
 
 
@@ -2087,17 +2086,10 @@ def patch_rule(
     rec = admin.get_rule(principal.tenant_id, rule_id)
     if rec is None:
         raise ApiError("E1001", "ルールが見つかりません", details={"rule_id": rule_id})
-    # 有効化は検証合格（再現率≥90%・回帰0件）が条件（§5.8.4）。ただし「人が明示的に
-    # 書いた」llm_hint は決定論変換の検証対象ではないため、この条件を課さない。
-    # 学習エージェント生成の llm_hint（created_by="agent"）は従来どおりゲート対象
-    # （無検証ルールの1クリック注入を防ぐ。レビュー保留所見）。
-    human_hint = rec.rule_type == "llm_hint" and rec.created_by != "agent"
-    if (
-        body.status == "active"
-        and not human_hint
-        and not is_activatable(rec.validation_report)
-    ):
-        raise ApiError("E1006", "検証未達のため有効化できません（再現率≥90%・回帰0件が必要）")
+    # 有効化は検証合格（再現率≥90%・回帰0件）が条件（§5.8.4）。判定はチャット承認
+    # （manage_rules）と共通の can_activate（人が書いた llm_hint だけ免除）。
+    if body.status == "active" and not can_activate(rec):
+        raise ApiError("E1006", ACTIVATION_BLOCKED_MESSAGE)
     updated = admin.set_rule_status(principal.tenant_id, rule_id, body.status)
     assert updated is not None
     return _rule_dto(updated)
@@ -2130,34 +2122,86 @@ def chat(
     return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
+_ParamsT = TypeVar("_ParamsT", bound=BaseModel)
+
+
+def _confirm_params(model: type[_ParamsT], params: dict[str, Any]) -> _ParamsT:
+    """confirm_request 由来の params を action ごとの DTO で検証する（不正は E1003）。
+
+    LLM が組んだ引数を UI がそのまま返してくるので、欠落や語彙違いは起こり得る。
+    未捕捉 500 ではなく、どのキーが悪いかを details で返す。
+    """
+    try:
+        return model.model_validate(params)
+    except ValidationError as exc:
+        raise ApiError(
+            "E1003",
+            "承認内容（params）が不正です",
+            details={
+                "errors": [
+                    {"loc": ".".join(str(p) for p in e.get("loc", ())), "msg": str(e.get("msg", ""))}
+                    for e in exc.errors(include_url=False)
+                ]
+            },
+        ) from exc
+
+
 @router.post("/chat/confirm", response_model=dto.ChatConfirmResult)
 def chat_confirm(
     body: dto.ChatConfirmRequest,
-    principal: Principal = Depends(require_role("admin")),
-    admin: AdminRepository = Depends(get_admin),
+    principal: Principal = Depends(get_principal),
+    tools: ChatTools = Depends(get_chat_tools),
 ) -> dto.ChatConfirmResult:
-    """confirm_request の承認実行。書込み系ツールは本 API で承認後に実行（§4.5）。"""
+    """confirm_request の承認実行。書込み系ツールは本 API で承認後に実行（§4.5）。
+
+    supervisor が提案した書込みツール（update_schema / rerun_extract / manage_rules）を
+    **同じ ChatTools** で実行する。必要ロールは同じ操作の非チャット API と揃える
+    （WRITE_TOOL_MIN_ROLE: rerun_extract=uploader、他は admin）。以前は update_schema しか
+    受けず、rerun_extract / manage_rules の承認カードは必ず E1003 で失敗していた。
+    """
+    min_role = WRITE_TOOL_MIN_ROLE.get(body.action)
+    if min_role is None:
+        raise ApiError("E1003", f"未対応のアクションです: {body.action}")
+    check_min_role(principal, min_role)
+    tenant_id = principal.tenant_id
+
     if body.action == "update_schema":
-        doc_type = str(body.params.get("doc_type", "invoice"))
-        fld = body.params.get("field") or {}
-        cur = admin.get_schema(principal.tenant_id, doc_type)
-        fields = list(cur.fields) if cur else []
-        if any(f.name == fld.get("name") for f in fields):
-            return dto.ChatConfirmResult(ok=False, message="同名の項目が既に存在します。")
-        # LLM 由来の dict なので予約名（D9）や型違いが来る。素通しすると ValidationError
-        # が未捕捉 500 になり、会話が「内部エラー」で途切れる。
-        try:
-            fields.append(SchemaFieldDef(**fld))
-        except ValidationError as exc:
-            return dto.ChatConfirmResult(ok=False, message=field_validation_message(exc))
-        try:
-            rec = admin.put_schema(principal.tenant_id, doc_type, fields)
-        except ValueError as exc:
-            # 予約名（D9）は put_schema（書き込み側の共通入口）が ValueError で拒む
-            return dto.ChatConfirmResult(ok=False, message=str(exc))
+        us = _confirm_params(dto.ChatUpdateSchemaParams, body.params)
+        res = tools.update_schema(tenant_id, us.doc_type, us.field)
+        if not res["ok"]:
+            return dto.ChatConfirmResult(ok=False, message=res["message"])
+        label = us.field.get("label", us.field.get("name"))
         return dto.ChatConfirmResult(
             ok=True,
-            message=f"スキーマ「{doc_type}」に「{fld.get('label', fld.get('name'))}」を追加し、v{rec.version} として保存しました。",
-            detail={"doc_type": rec.doc_type, "version": rec.version},
+            message=f"スキーマ「{us.doc_type}」に「{label}」を追加し、v{res['version']} として保存しました。",
+            detail={"doc_type": res["doc_type"], "version": res["version"]},
         )
-    raise ApiError("E1003", f"未対応のアクションです: {body.action}")
+
+    if body.action == "rerun_extract":
+        re_ = _confirm_params(dto.ChatRerunExtractParams, body.params)
+        res = tools.rerun_extract(
+            tenant_id,
+            re_.document_id,
+            schema_id=re_.schema_id,
+            supersede_review=re_.supersede_review,
+        )
+        if not res["ok"]:
+            return dto.ChatConfirmResult(
+                ok=False, message=res["message"], detail={"document_id": re_.document_id}
+            )
+        return dto.ChatConfirmResult(
+            ok=True,
+            message=f"再抽出を開始しました（{re_.document_id}）。完了までしばらくお待ちください。",
+            detail={"document_id": re_.document_id, "job_id": res["job_id"], "run_id": res["run_id"]},
+        )
+
+    mr = _confirm_params(dto.ChatManageRulesParams, body.params)
+    res = tools.manage_rules(tenant_id, mr.rule_id, mr.status)
+    if not res["ok"]:
+        return dto.ChatConfirmResult(ok=False, message=res["message"], detail={"rule_id": mr.rule_id})
+    verb = "有効化" if mr.status == "active" else "退役"
+    return dto.ChatConfirmResult(
+        ok=True,
+        message=f"ルール {mr.rule_id} を{verb}しました。",
+        detail={"rule_id": res["rule_id"], "status": res["status"]},
+    )

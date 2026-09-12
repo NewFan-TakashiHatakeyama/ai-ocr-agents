@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -538,11 +538,56 @@ class ChatRequest(BaseModel):
 
 
 class ChatConfirmRequest(BaseModel):
-    action: str  # "update_schema" 等
+    """承認カードの実行要求（§4.5）。
+
+    action は書込みツール名（update_schema / rerun_extract / manage_rules）。
+    params は SSE の confirm_request から action / prompt を除いた残りを UI がそのまま
+    返したもので、action ごとに下の Chat*Params で検証する（未知の action と不正な
+    params は E1003）。
+    """
+
+    action: str
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatUpdateSchemaParams(BaseModel):
+    """update_schema: スキーマに項目を 1 つ追加する。"""
+
+    doc_type: str = "invoice"
+    field: dict[str, Any]
+
+
+class ChatRerunExtractParams(BaseModel):
+    """rerun_extract: 新しい Run を発行する。
+
+    supersede_review は REST POST /documents/{id}/extract と同名・同義。チャットの
+    主用途が「レビュー中の帳票を取り直す」なので既定 True（needs_review を superseded に
+    終端させて取り直す）。False にすると REST 既定と同じく needs_review も競合として断る。
+    """
+
+    document_id: str
+    schema_id: Optional[str] = None
+    supersede_review: bool = True
+
+
+class ChatManageRulesParams(BaseModel):
+    """manage_rules: ルールを有効化（active）/ 退役（retired）する。
+
+    語彙は PATCH /rules/{id} と同じ。操作名を "action" にしないのは、confirm_request が
+    平坦な dict で "action" をツール名に使っているため。
+    """
+
+    rule_id: str
+    status: Literal["active", "retired"]
+
+
 class ChatConfirmResult(BaseModel):
+    """承認実行の結果。action によらず同じ形。
+
+    ok=False は「実行しなかった」（重複項目・競合・検証未達など、利用者に見せる理由が
+    message にある）。権限不足・未知の action・params 不正は HTTP エラー（E5001 / E1003）。
+    """
+
     ok: bool
     message: str
     detail: dict[str, Any] = Field(default_factory=dict)

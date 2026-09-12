@@ -69,7 +69,10 @@ TOOL_SPECS: list[dict[str, Any]] = [
     },
     {
         "name": "rerun_extract",
-        "description": "ドキュメントを再抽出する（新しい Run を発行。書込み操作・承認が必要）。",
+        "description": (
+            "ドキュメントを再抽出する（新しい Run を発行。レビュー待ちの結果は置き換える。"
+            "書込み操作・承認が必要）。"
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -102,12 +105,14 @@ TOOL_SPECS: list[dict[str, Any]] = [
     },
     {
         "name": "manage_rules",
-        "description": "ルールを承認/却下する（書込み操作・承認が必要）。",
+        "description": "ルールを有効化（active）または退役（retired）する（書込み操作・承認が必要）。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "rule_id": {"type": "string"},
-                "status": {"type": "string", "enum": ["active", "rejected", "disabled"]},
+                # PATCH /rules/{id} と同じ語彙。confirm_request は平坦な dict で "action" を
+                # ツール名に使うので、操作は status で運ぶ（"action" とは衝突させない）
+                "status": {"type": "string", "enum": ["active", "retired"]},
                 "prompt": {"type": "string"},
             },
             "required": ["rule_id", "status"],
@@ -194,6 +199,11 @@ def build_chat_graph(*, supervisor: SupervisorFn, tools: ChatTools, max_steps: i
 
         実行は承認後に POST /v1/chat/confirm が行う。ここで実行してしまうと
         「実行前にユーザー確認」という要件（§3.3）を破る。
+
+        形（SSE の confirm_request と同一）: ``{"action": <ツール名>, **ツール引数, "prompt"}``。
+        UI は action / prompt を除いた残りを **そのまま** ``params`` として /chat/confirm に
+        返す。したがってツール引数の名前は dto.Chat*Params と一致していなければならない
+        （test_chat_confirm の end-to-end テストが両者のずれを検出する）。
         """
         args = dict(state.get("tool_args") or {})
         prompt = args.pop("prompt", None)

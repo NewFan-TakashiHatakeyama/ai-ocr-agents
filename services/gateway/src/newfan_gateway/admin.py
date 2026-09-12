@@ -44,6 +44,24 @@ def is_activatable(report: Optional[dict[str, Any]]) -> bool:
     return repro >= MIN_REPRODUCTION and regressions == 0
 
 
+ACTIVATION_BLOCKED_MESSAGE = "検証未達のため有効化できません（再現率≥90%・回帰0件が必要）"
+
+
+def can_activate(rec: RuleRecord) -> bool:
+    """ルールを active にしてよいか（§5.8.4）。
+
+    決定論変換（regex/vocab 等）は検証合格（再現率≥90%・回帰0件）が条件。ただし
+    「人が明示的に書いた」llm_hint は検証対象ではないため条件を課さない。学習
+    エージェント生成の llm_hint（created_by="agent"）は従来どおりゲート対象
+    （無検証ルールの1クリック注入を防ぐ）。
+
+    PATCH /rules/{id} とチャット承認（manage_rules）の**共通判定**。片方だけ緩むと
+    チャットが検証ゲートの抜け道になる。
+    """
+    human_hint = rec.rule_type == "llm_hint" and rec.created_by != "agent"
+    return human_hint or is_activatable(rec.validation_report)
+
+
 class AdminRepository(Protocol):
     # スキーマ（§5.5）
     def list_schemas(self, tenant_id: str) -> list[SchemaRecord]: ...
