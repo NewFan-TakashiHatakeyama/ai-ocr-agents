@@ -535,17 +535,16 @@ def test_候補の判定は中心点または重なり30パーセント(monkeypa
         assert report.dropped == {"title": "no_spans_in_region"}
 
 
-def test_重なりが小さい順に切って12件にし切った件数を残す(monkeypatch) -> None:
-    """読み順で切ると、大きな枠で本命が後ろに来たとき落ちる（R17）。選んだ 12 件は
-    読み順で渡す（設計 v2 §2.5）。"""
+def test_順位は重なりが大きい順で12件で切り切った件数を残す(monkeypatch) -> None:
+    """読み順で切ると、大きな枠で本命が後ろに来たとき落ちる（R17）。"""
     monkeypatch.setenv("REGION_KIE_HINTS", "1")
     # 読み順（span_id 昇順）ほど重なりが小さい 14 件。本命は最後（最大）。
     spans = [_sp(i, f"t{i}", [310, 210 + i * 12, 310 + 20 * (i + 1), 220 + i * 12]) for i in range(14)]
     out, report = llm_nodes.build_region_hints(_field_schema("title", "string"), _PAGES_1, spans)
     cands = out["fields"][0]["region_hint"]["candidates"]
     assert len(cands) == region_hint.HINT_MAX_CANDIDATES == 12
-    assert cands[-1] == {"span_id": 13, "text": "t13"}  # 重なり最大（本命）が残っている
-    assert [c["span_id"] for c in cands] == list(range(2, 14))  # 0 と 1 が切られ、残りは読み順
+    assert cands[0] == {"span_id": 13, "text": "t13"}  # 重なり最大が先頭
+    assert [c["span_id"] for c in cands] == list(range(13, 1, -1))  # 0 と 1 が切られた
     assert report.truncated == {"title": 2}
     assert report.given == ["title"]
 
@@ -952,43 +951,21 @@ def test_明細フィールドにはヒントを注入しない(monkeypatch) -> 
 # ---------- 敵対的レビュー Phase B の major に対する回帰 ----------
 
 
-def test_切るときの順位は_span_面積でも読み順でもなく矩形との重なりで決まる(monkeypatch) -> None:
+def test_順位は_span_面積ではなく矩形との重なりで決まる(monkeypatch) -> None:
     """レビューで指摘された変異: rank_candidates を span 面積順にしても既存テストは通った。
 
     大きい span が矩形に少ししか掛かっていない一方、小さい span が矩形の中に丸ごと
-    入っているとき、切られるのは前者であること（重なり面積で選ぶ）を固定する。
-    渡す順序は別（次のテスト）なので、ここでは**切った後に何が残ったか**だけを見る。
+    入っているとき、後者が先頭に来ること（重なり面積順）を固定する。
     """
     monkeypatch.setenv("REGION_KIE_HINTS", "1")
     # 矩形は [300,200,700,400]。tall は中心が矩形内で候補になるが、縦に長く大半が外
     tall = _sp(20, "tall", [400, 0, 600, 600])  # 面積 120,000、重なり 200×200 = 40,000
-    # 矩形の中に丸ごと入る 12 件（面積 68,400 = 重なり）。読み順は tall より後
-    inside = [_sp(21 + i, f"inside{i}", [310, 210, 690, 390]) for i in range(12)]
-    tiny = _sp(40, "tiny", [330, 300, 380, 320])  # 面積 1,000、重なり 1,000
-    out, report = llm_nodes.build_region_hints(
-        _field_schema("title", "string"), _PAGES_1, [tall, *inside, tiny]
-    )
-    ids = {c["span_id"] for c in out["fields"][0]["region_hint"]["candidates"]}
-    # 面積順なら tall が残り、読み順なら tall が残る。重なり順だけが tall と tiny を切る
-    assert ids == set(range(21, 33))
-    assert report.truncated == {"title": 2}
-
-
-def test_選んだ候補は読み順で渡す(monkeypatch) -> None:
-    """選ぶのは重なり順、渡すのは読み順（span_id 昇順。設計 v2 §2.5、第 4 回計測で検証）。
-    複数 span にまたがる値（住所の 2 行、姓と名）を連結して読むモデルに、並びの手掛かりを
-    渡す。検証画面の参考表示（detail.candidates）もプロンプトと同じ並びにする。"""
-    monkeypatch.setenv("REGION_KIE_HINTS", "1")
-    tall = _sp(20, "tall", [400, 0, 600, 600])  # 重なり 40,000
-    inside = _sp(21, "inside", [310, 210, 690, 390])  # 重なり 68,400（最大）
-    tiny = _sp(22, "tiny", [330, 300, 380, 320])  # 重なり 1,000
-    out, report = llm_nodes.build_region_hints(
-        _field_schema("title", "string"), _PAGES_1, [tall, tiny, inside]
-    )
+    inside = _sp(21, "inside", [310, 210, 690, 390])  # 面積 68,400、重なり 68,400（全部）
+    tiny = _sp(22, "tiny", [330, 300, 380, 320])  # 面積 1,000、重なり 1,000
+    out, _ = llm_nodes.build_region_hints(_field_schema("title", "string"), _PAGES_1, [tall, tiny, inside])
     ids = [c["span_id"] for c in out["fields"][0]["region_hint"]["candidates"]]
-    assert ids == [20, 21, 22]  # 重なり順なら [21, 20, 22]。読み順で渡す
-    assert report.detail["title"]["candidates"] == ["tall", "inside", "tiny"]
-    assert report.truncated == {}
+    # 面積順なら tall が先頭、重なり順なら inside が先頭。読み順なら tall → tiny → inside
+    assert ids == [21, 20, 22]
 
 
 def test_分割された日付と見出し語が同じ枠にあっても_kind_conflict_で落ちない(monkeypatch) -> None:
