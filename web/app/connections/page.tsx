@@ -255,15 +255,15 @@ export default function ConnectionsPage() {
     mutationFn: (v: { c: ConnectionDto; status: "active" | "disabled" }) =>
       api.patchConnectionStatus(v.c.id, v.status),
     onSuccess: (r) => {
-      // postgres の再有効化は untested に戻る（疎通テストを踏むまでワークフローに
-      // 使えない）。サーバの着地点をそのまま伝える
+      // 疎通テストのある型（postgres / webhook / s3）の再有効化は untested に戻る
+      //（テストを踏むまでワークフローに使えない）。サーバの着地点をそのまま伝える
       push({
         kind: r.status === "untested" ? "warn" : "ok",
         message:
           r.status === "disabled"
             ? `「${r.name}」を無効化しました。再有効化すれば元に戻ります。`
             : r.status === "untested"
-              ? `「${r.name}」を再有効化しました。疎通テスト（POST /connections/${r.id}/test）を通すまでワークフローの有効化には使えません。`
+              ? `「${r.name}」を再有効化しました。この行の「疎通テスト」を通すまでワークフローの有効化には使えません。`
               : `「${r.name}」を再有効化しました。`,
       });
       qc.invalidateQueries({ queryKey: ["connections"] });

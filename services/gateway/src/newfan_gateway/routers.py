@@ -210,10 +210,17 @@ def _require_usable_schema(admin: AdminRepository, tenant_id: str, schema_id: st
     if rec is None:
         raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
     if rec.archived:
+        # reason は一括（/extract-batch）が skipped に写す。無いと web の要約が「処理中」に
+        # 数える（種別の最新版がアーカイブ済みの帳票は、この経路でしか断れない）
         raise ApiError(
             "E1005",
             archived_schema_message(rec.doc_type),
-            details={"schema_id": schema_id, "doc_type": rec.doc_type, "archived": True},
+            details={
+                "schema_id": schema_id,
+                "doc_type": rec.doc_type,
+                "archived": True,
+                "reason": "archived",
+            },
         )
     return rec
 
@@ -473,7 +480,7 @@ def _start_extract(
     単体の POST /documents/{id}/extract と一括の /documents/extract-batch が共有する
     本体。拒否は ApiError（E1001 不在 / E1005）で、単体はそのまま HTTP エラーに、
     一括は帳票ごとの skipped に翻訳する。E1005 は ``details["reason"]`` で種類を示す
-    （confirmed / in_review / locked / processing / active_run）。一括の要約はこれで
+    （confirmed / in_review / locked / processing / active_run / archived）。一括の要約はこれで
     数えるので、文言だけ変えて reason を落とさないこと。冪等キーの扱いは呼び出し側。
 
     判定の順: 不在 → schema_id → 確定済み → 確定処理中 → 他者ロック → run の競合。
@@ -1836,8 +1843,10 @@ _CONNECTION_TYPES = {"postgres", "webhook", "s3", "gdrive", "m365", "box"}
 # フォルダ監視系（⑤⑥）。config.folder_id と「今すぐ同期」を同型で扱う
 _FOLDER_SOURCE_TYPES = {"gdrive", "m365", "box"}
 # gateway に疎通テスト経路（POST /connections/{id}/test → tested）がある型。これらは
-# 再有効化（PATCH status=active）で疎通確認済み（active）に格上げしない（untested に戻す）
-_TESTABLE_CONNECTION_TYPES = {"postgres"}
+# 再有効化（PATCH status=active）で疎通確認済み（active）に格上げしない（untested に戻す）。
+# postgres は SELECT 1、webhook は署名付き test イベント、s3 は HeadBucket（test_connection）。
+# フォルダ監視系（gdrive/m365/box）だけは経路が無く、「今すぐ同期」の成功で worker が上げる
+_TESTABLE_CONNECTION_TYPES = {"postgres", "webhook", "s3"}
 # secret_ref の秘密を gateway 自身が作る型（add_webhook_endpoint の署名鍵）。接続の削除で
 # 一緒に消す。それ以外の型の secret_ref は利用者が登録した秘密で、gateway は触らない
 _GATEWAY_OWNED_SECRET_TYPES = {"webhook"}
@@ -1925,8 +1934,11 @@ def patch_connection_status(
     通常操作で起きる）が疎通確認済みに格上げされ、初回の実行が接続エラーで落ちるか、
     検証されていない DSN へ書き込む。無効化前の状態は持っていない（列が無い）ので、
     postgres の再有効化は常に untested に戻し、テストを踏ませる（SELECT 1 だけ）。
+    webhook（署名付き test イベント）と s3（HeadBucket）も疎通テストで tested になる型
+    なので同じ扱い（_TESTABLE_CONNECTION_TYPES）。
     untested/tested のまま active を求められても格上げしない（既に有効なので no-op）。
-    webhook / s3 / フォルダ監視系は gateway にテスト経路が無く、active が有効化そのもの。
+    フォルダ監視系（gdrive/m365/box）は gateway にテスト経路が無く（「今すぐ同期」の
+    成功で worker が tested に上げる）、active が有効化そのもの。
     """
     rec = admin.get_connection(principal.tenant_id, connection_id)
     if rec is None:

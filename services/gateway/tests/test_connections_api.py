@@ -312,8 +312,12 @@ def test_dry_runはdb_write直前のmapが複数だと拒否する(env) -> None:
 
 def test_接続を無効化して再有効化できる(env) -> None:
     client, admin, workflows, _ = env
-    # webhook / s3 等は gateway に疎通テスト経路が無く、active が有効化そのもの
-    c = _create_conn(client, type="webhook", config={}, allowed_tables=[])
+    # フォルダ監視系は gateway に疎通テスト経路が無く（「今すぐ同期」の成功で worker が
+    # tested に上げる）、active が有効化そのもの
+    c = _create_conn(
+        client, type="gdrive", config={"folder_id": "f1"}, secret_ref="env:GDRIVE_SA",
+        allowed_tables=[],
+    )
     r = client.patch(f"/v1/connections/{c['id']}", json={"status": "disabled"}, headers=_auth())
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "disabled"
@@ -358,6 +362,29 @@ def test_postgresの再有効化は疎通確認済みに格上げしない(env) 
     wf_id = _create_wf(client, GRAPH_DB)
     body = client.post(f"/v1/workflows/{wf_id}/dry-run", headers=_auth()).json()
     assert body["ok"] is False and "疎通未確認" in body["sinks"][0]["error"]
+
+
+def test_webhookとs3の再有効化も疎通テストを踏み直す(env) -> None:
+    # C9-A で webhook（署名付き test イベント）と s3（HeadBucket）にも疎通テスト経路が
+    # できたので、postgres と同じく再有効化は untested に戻す（テストを踏むまで L010 が断る）
+    client, admin, workflows, _ = env
+    rows = [
+        _create_conn(
+            client, type="webhook", config={"url": "https://example.com/hook"},
+            allowed_tables=[],
+        ),
+        _create_conn(client, type="s3", config={"bucket": "b"}, allowed_tables=[]),
+    ]
+    for c in rows:
+        r = client.patch(f"/v1/connections/{c['id']}", json={"status": "disabled"}, headers=_auth())
+        assert r.status_code == 200, r.text
+        r = client.patch(f"/v1/connections/{c['id']}", json={"status": "active"}, headers=_auth())
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "untested"
+        assert admin.get_connection("ten_1", c["id"]).status == "untested"
+        assert workflows.audits[-1]["detail"] == {
+            "type": c["type"], "from": "disabled", "to": "untested",
+        }
 
 
 def test_tested済みpostgresも再有効化後は疎通テストを踏み直す(env) -> None:

@@ -46,6 +46,7 @@ export const UPLOAD_FORMATS_LABEL: string = ACCEPTED_UPLOAD_TYPES.map((t) => t.l
 /** 対応形式の説明文。取込に失敗したときの案内に使う */
 export const UPLOAD_FORMATS_HINT = `対応形式は ${UPLOAD_FORMATS_LABEL} です。`;
 
-// 送る前にクライアント側で拡張子を弾く関数は**置かない**。ingest は拡張子の無い
-// ファイルでもマジックバイトで受理するので、ここで弾くと正（サーバ）より厳しくなる。
-// 受理判定は常に ingest に任せ、拒否されたら UPLOAD_FORMATS_HINT を添える。
+// 単体の受理判定は ingest に任せ、拒否されたら UPLOAD_FORMATS_HINT を添える（ingest は
+// 拡張子の無いファイルでもマジックバイトで受理するので、ここで弾くと正より厳しくなる）。
+// 複数ファイルの一括投入だけは、件数を先に伝えるために lib/bulk.ts の partitionFiles が
+// 投げる前に MIME / 拡張子で選別する。その一覧もここから作る（別のリテラルを置かない）。
