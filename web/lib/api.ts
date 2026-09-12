@@ -261,6 +261,8 @@ export const api = {
     request<ConnectionTestResult>(`/connections/${connectionId}/test`, { method: "POST" }),
   // 接続の無効化 / 再有効化（C9-D）。有効なワークフローが使っている接続の無効化は
   // 409(E1005, details.workflows) で断られる（先にワークフローを停止する）。
+  // 再有効化の着地点は型で違う: postgres は untested に戻る（疎通テストを通すまで
+  // ワークフローに使えない）。webhook / s3 / フォルダ監視系は active。応答の status を見る
   patchConnectionStatus: (connectionId: string, status: "active" | "disabled") =>
     request<ConnectionDto>(`/connections/${connectionId}`, {
       method: "PATCH",
@@ -268,6 +270,7 @@ export const api = {
     }),
   // 接続の削除。どのワークフロー版（定義・実行のスナップショット）からも参照されて
   // いない接続だけ消せる。参照があれば 409(E1005, details.reason="referenced")。
+  // Webhook は gateway が作った署名鍵も保管先から消す（secret_deleted）
   deleteConnection: (connectionId: string) =>
     request<ConnectionDeleted>(`/connections/${connectionId}`, { method: "DELETE" }),
   listRules: (status?: string) =>

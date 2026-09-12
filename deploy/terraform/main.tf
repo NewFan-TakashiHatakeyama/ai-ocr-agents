@@ -135,7 +135,8 @@ resource "aws_iam_role_policy" "task_s3" {
 
 # 接続の秘密（§16.5 / P6）。connections は secret_ref（ARN）だけを DB に持ち、
 # 実体は ai-ocr/<env>/conn/ 配下の Secrets Manager にある。gateway が webhook 署名鍵を
-# 作成し、orchestrator が sink.db_write / webhook 配信時に実行時解決する。
+# 作成し（接続の削除で一緒に消す。C9-D）、orchestrator が sink.db_write / webhook
+# 配信時に実行時解決する。
 # 名前プレフィクスでスコープし、LLM キーや DB URL 等の他 secret には触れない。
 data "aws_iam_policy_document" "task_conn_secrets" {
   statement {
@@ -144,6 +145,7 @@ data "aws_iam_policy_document" "task_conn_secrets" {
       "secretsmanager:DescribeSecret",
       "secretsmanager:CreateSecret",
       "secretsmanager:PutSecretValue",
+      "secretsmanager:DeleteSecret",
     ]
     resources = ["arn:aws:secretsmanager:${var.aws_region}:*:secret:ai-ocr/${var.env}/conn/*"]
   }

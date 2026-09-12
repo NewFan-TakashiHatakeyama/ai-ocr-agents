@@ -8,6 +8,7 @@ import { AppShell } from "@/components/AppShell";
 import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
 import { chatHrefForSchema, schemaAddRequest } from "@/lib/schemaChat";
+import { schemaSaveErrorToast } from "@/lib/schemaSaveError";
 import { useToasts } from "@/lib/toast";
 import type { SchemaDto, SchemaFieldDto, WorkflowRefDto } from "@/lib/types";
 
@@ -95,13 +96,26 @@ export default function SchemasPage() {
       qc.invalidateQueries({ queryKey: ["doc-types"] });
     },
     onError: (e) => {
-      const status = (e as { status?: number })?.status;
+      const docTypeTried = creating ? newDocType.trim() : (current?.doc_type ?? "");
+      const t = schemaSaveErrorToast(e, { creating, docType: docTypeTried });
+      if (!t.archived) {
+        push({ kind: t.kind, message: t.message });
+        return;
+      }
+      // 同名がアーカイブ済み（C9-D）。既定の一覧に出ていないので「既存を選んで」では
+      // 行き止まり。サーバの文言（復元の案内）に、その場で「アーカイブ済みを表示」して
+      // 該当スキーマ（復元ボタン付き）を開く操作を付ける
       push({
-        kind: "err",
-        message:
-          creating && status === 409
-            ? "同名のスキーマが既に存在します。既存スキーマを選んで編集してください。"
-            : `保存に失敗しました（${(e as Error).message}）。`,
+        kind: t.kind,
+        message: t.message,
+        action: {
+          label: "アーカイブ済みを表示",
+          onClick: () => {
+            setShowArchived(true);
+            setCreating(false);
+            setDocType(docTypeTried);
+          },
+        },
       });
     },
   });

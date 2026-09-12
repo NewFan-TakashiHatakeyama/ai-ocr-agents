@@ -299,6 +299,8 @@ export interface ConnectionDeleted {
   connection_id: string;
   deleted: boolean;
   cursors_deleted: number;
+  /** gateway が作った秘密（Webhook の署名鍵）を保管先からも消せたか。対象外は null */
+  secret_deleted?: boolean | null;
 }
 
 /** 409(E1005) の details.workflows に載る「参照しているワークフロー」 */

@@ -137,6 +137,21 @@ def test_参照の無い接続は削除されsource_cursorsも一緒に消える
     assert admin.delete_connection(TENANT, _CON) is None
 
 
+def test_connection_okはuntestedと無効化を弾きtestedだけ通す(repos, owner) -> None:
+    # ルータの再有効化（postgres → untested に戻す）が拠り所にする L010 の意味論。
+    # active/tested が「疎通確認済み」で、untested/disabled は有効化に使えない
+    admin, wf = repos
+    _insert_connection(owner, status="untested")
+    assert wf.connection_ok(TENANT, _CON) is False
+    admin.set_connection_status(TENANT, _CON, "disabled")
+    assert wf.connection_ok(TENANT, _CON) is False
+    admin.set_connection_status(TENANT, _CON, "untested")  # 再有効化の着地点
+    assert wf.connection_ok(TENANT, _CON) is False
+    admin.set_connection_status(TENANT, _CON, "tested")  # 疎通テスト成功
+    assert wf.connection_ok(TENANT, _CON) is True
+    assert wf.connection_ok(OTHER, _CON) is False  # RLS
+
+
 def test_定義が参照する接続はDELETE文のガードで消えない(repos, owner) -> None:
     admin, wf = repos
     _insert_connection(owner)

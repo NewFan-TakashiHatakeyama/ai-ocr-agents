@@ -103,3 +103,13 @@ class BotoSecretStore:
 
     def get(self, ref: str) -> str:
         return self._cli().get_secret_value(SecretId=ref)["SecretString"]
+
+    def delete(self, ref: str) -> None:
+        # 既定の復旧期間（30 日）付きで消す。期間中は GetSecretValue が失敗する（鍵は
+        # 即座に使えなくなる）一方、誤削除なら restore_secret で戻せる。名前は
+        # webhook-<uuid> で一意なので、復旧期間中の名前予約が新規作成と衝突しない。
+        # IAM は terraform の task_conn_secrets（ai-ocr/<env>/conn/* に限定）
+        try:
+            self._cli().delete_secret(SecretId=ref)
+        except self._cli().exceptions.ResourceNotFoundException:
+            return  # 既に無い（手で消した・二重削除）。冪等に扱う

@@ -33,6 +33,12 @@ def reject_reserved_field_names(fields: list[SchemaFieldDef]) -> None:
         check_field_name(f.name)
 
 
+def archived_schema_message(doc_type: str, *, action: str = "使う") -> str:
+    """アーカイブ済みスキーマを断るときの文言（C9-D）。REST（E1005）と chat（ok=False）で
+    同じ言葉にする——「先に復元してください」が次の一手で、画面のバッジと対応する。"""
+    return f"スキーマ「{doc_type}」はアーカイブ済みです。{action}には先に復元してください"
+
+
 class SchemaArchivedError(ValueError):
     """アーカイブ済み doc_type への書き込み（新版作成）を put_schema が拒む（C9-D）。
 
@@ -44,9 +50,7 @@ class SchemaArchivedError(ValueError):
     """
 
     def __init__(self, doc_type: str) -> None:
-        super().__init__(
-            f"スキーマ「{doc_type}」はアーカイブ済みです。編集するには先に復元してください"
-        )
+        super().__init__(archived_schema_message(doc_type, action="編集する"))
         self.doc_type = doc_type
 
 

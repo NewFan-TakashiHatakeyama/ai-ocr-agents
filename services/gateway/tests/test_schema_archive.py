@@ -8,6 +8,7 @@
 - PUT /schemas（新規作成・編集の両方）は E1005。chat 経路も ok=False
 - 有効なワークフローの extract.schema_id が（どの版でも）指していればアーカイブは E1005
 - アーカイブ済みスキーマを指すワークフローは有効化できない（L009）
+- アーカイブ済みの schema_id で新しい抽出 run は始められない（/extract・chat rerun_extract）
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from gw_helpers import auth
+from gw_helpers import PDF, auth
 
 from newfan_gateway.records import SchemaFieldDef, SchemaRecord
 
@@ -136,6 +137,52 @@ def test_有効なワークフローが旧版を指していればアーカイ�
     # 復元すれば有効化できる
     ctx.client.post("/v1/schemas/invoice/unarchive", headers=auth("admin"))
     assert ctx.client.post(f"/v1/workflows/{wid}/activate", headers=auth("admin")).status_code == 200
+
+
+def _upload(ctx: SimpleNamespace) -> str:
+    r = ctx.client.post(
+        "/v1/documents",
+        headers=auth("uploader"),
+        files={"file": ("invoice.pdf", PDF, "application/pdf")},
+    )
+    assert r.status_code == 201, r.text
+    return str(r.json()["document_id"])
+
+
+def test_アーカイブ済みのschema_idでは新しい抽出を始められない(ctx: SimpleNamespace) -> None:
+    # 一覧から隠すだけでは、document 画面の「再抽出」（run.schema_id を明示送信）や
+    # API 直叩き・chat の rerun_extract で、アーカイブ済みの定義に新しい run が積める
+    # （レビュー確定）。get_schema_by_id はアーカイブ済みも返す（過去の run から定義を
+    # 辿るため）ので、抽出の入口で archived を見る
+    from newfan_gateway.chat_tools import ChatTools
+
+    doc_id = _upload(ctx)
+    ctx.client.post("/v1/schemas/invoice/archive", headers=auth("admin"))
+
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={"schema_id": "sch_1"}
+    )
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["code"] == "E1005" and err["details"]["archived"] is True
+    assert err["details"]["doc_type"] == "invoice" and "復元" in err["message"]
+    assert ctx.queue.messages == []  # run も job も積まれていない
+    assert ctx.repo.get_latest_run("ten_1", doc_id) is None
+
+    tools = ChatTools(repo=ctx.repo, admin=ctx.admin, queue=ctx.queue)
+    out = tools.rerun_extract("ten_1", doc_id, schema_id="sch_1")
+    assert out["ok"] is False and "復元" in out["message"]
+    assert ctx.queue.messages == []
+    # 存在しない id は従来どおり
+    assert tools.rerun_extract("ten_1", doc_id, schema_id="sch_nope")["ok"] is False
+
+    # 復元すれば通る
+    ctx.client.post("/v1/schemas/invoice/unarchive", headers=auth("admin"))
+    r = ctx.client.post(
+        f"/v1/documents/{doc_id}/extract", headers=auth("uploader"), json={"schema_id": "sch_1"}
+    )
+    assert r.status_code == 202, r.text
+    assert len(ctx.queue.messages) == 1
 
 
 def test_無いdoc_typeとadmin以外(ctx: SimpleNamespace) -> None:

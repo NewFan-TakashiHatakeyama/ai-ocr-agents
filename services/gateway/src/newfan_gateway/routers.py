@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import secrets
 import uuid
@@ -33,6 +34,7 @@ from newfan_gateway.admin import (
     ACTIVATION_BLOCKED_MESSAGE,
     AdminRepository,
     SchemaArchivedError,
+    archived_schema_message,
     can_activate,
 )
 from newfan_gateway.deps import (
@@ -72,6 +74,7 @@ from newfan_gateway.records import (
     RuleRecord,
     RunRecord,
     SchemaFieldDef,
+    SchemaRecord,
     WorkflowRecord,
     WorkflowRunRecord,
 )
@@ -79,6 +82,7 @@ from newfan_gateway.repository import DocumentGoneError, Repository
 from newfan_ingest import IngestError, UploadInput
 
 router = APIRouter(prefix="/v1")
+logger = logging.getLogger(__name__)
 
 
 def _idempotency_hit(request: Request, key: Optional[str], tenant_id: str) -> Optional[Any]:
@@ -184,6 +188,26 @@ def _require_document(repo: Repository, tenant_id: str, document_id: str) -> Doc
     if doc is None:
         raise ApiError("E1001", "ドキュメントが見つかりません", details={"document_id": document_id})
     return doc
+
+
+def _require_usable_schema(admin: AdminRepository, tenant_id: str, schema_id: str) -> SchemaRecord:
+    """新しい抽出 run に使える schema_id か（存在し、アーカイブ済みでない）。
+
+    get_schema_by_id はアーカイブ済みの行も返す（過去の run から定義を辿るため）。
+    ここで archived を見ないと、一覧から隠しても「再抽出」（document 画面は run.schema_id
+    を明示送信する）や API 直叩きでアーカイブ済みの定義に新しい run が積める（C9-D）。
+    chat の rerun_extract も同じ判定を持つ（chat_tools.usable_schema_error）。
+    """
+    rec = admin.get_schema_by_id(tenant_id, schema_id)
+    if rec is None:
+        raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
+    if rec.archived:
+        raise ApiError(
+            "E1005",
+            archived_schema_message(rec.doc_type),
+            details={"schema_id": schema_id, "doc_type": rec.doc_type, "archived": True},
+        )
+    return rec
 
 
 def _document_meta(repo: Repository, tenant_id: str, doc: DocumentRecord) -> dto.DocumentMeta:
@@ -428,8 +452,8 @@ def _start_extract(
     # extraction_runs の FK 違反で 500（E2000 内部エラー）になり、利用者には
     # 原因が一切見えない（API 直叩きで実際に発生）。存在しない ID も 404 で明示する。
     schema_id = (schema_id or "").strip() or None
-    if schema_id is not None and admin.get_schema_by_id(principal.tenant_id, schema_id) is None:
-        raise ApiError("E1001", "スキーマが見つかりません", details={"schema_id": schema_id})
+    if schema_id is not None:
+        _require_usable_schema(admin, principal.tenant_id, schema_id)
 
     # 確定済み（会計連携済みを含む）は supersede_review に関係なく置き換えない
     # （設計 bulk-processing D3 / region-template-editor §3.1）。以前は supersede_review
@@ -1758,6 +1782,12 @@ def pause_workflow(
 _CONNECTION_TYPES = {"postgres", "webhook", "s3", "gdrive", "m365", "box"}
 # フォルダ監視系（⑤⑥）。config.folder_id と「今すぐ同期」を同型で扱う
 _FOLDER_SOURCE_TYPES = {"gdrive", "m365", "box"}
+# gateway に疎通テスト経路（POST /connections/{id}/test → tested）がある型。これらは
+# 再有効化（PATCH status=active）で疎通確認済み（active）に格上げしない（untested に戻す）
+_TESTABLE_CONNECTION_TYPES = {"postgres"}
+# secret_ref の秘密を gateway 自身が作る型（add_webhook_endpoint の署名鍵）。接続の削除で
+# 一緒に消す。それ以外の型の secret_ref は利用者が登録した秘密で、gateway は触らない
+_GATEWAY_OWNED_SECRET_TYPES = {"webhook"}
 # 秘密らしいキーの部分一致判定に使う（完全一致だと passwd/secret_access_key 等が抜ける）
 _SECRETY_SUBSTRINGS = ("secret", "password", "passwd", "pwd", "token", "api_key", "apikey",
                        "credential")
@@ -1834,11 +1864,26 @@ def patch_connection_status(
     そのワークフローの実行が「接続が無い」で失敗し始め、利用者は接続画面の操作と
     結び付けられない。先にワークフローを停止させる（E1005 に一覧を載せる）。
     draft/paused からの参照は止めない——有効化時に L010 が「疎通未確認/無効」で断る。
+
+    **再有効化の着地点は型で違う。** L010（connection_ok）・dry-run・orchestrator の
+    sink は active/tested を「疎通確認済み」として扱う。postgres は疎通テスト
+    （POST /connections/{id}/test）で tested になる型なので、disabled → active を
+    素通しすると、一度もテストしていない接続（untested → 無効化 → 再有効化。UI の
+    通常操作で起きる）が疎通確認済みに格上げされ、初回の実行が接続エラーで落ちるか、
+    検証されていない DSN へ書き込む。無効化前の状態は持っていない（列が無い）ので、
+    postgres の再有効化は常に untested に戻し、テストを踏ませる（SELECT 1 だけ）。
+    untested/tested のまま active を求められても格上げしない（既に有効なので no-op）。
+    webhook / s3 / フォルダ監視系は gateway にテスト経路が無く、active が有効化そのもの。
     """
     rec = admin.get_connection(principal.tenant_id, connection_id)
     if rec is None:
         raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
-    if rec.status == body.status:
+    target: str = body.status
+    if body.status == "active" and rec.type in _TESTABLE_CONNECTION_TYPES:
+        if rec.status != "disabled":
+            return _connection_dto(rec)  # untested/tested は既に有効。tested を巻き戻さない
+        target = "untested"
+    if rec.status == target:
         return _connection_dto(rec)
     if body.status == "disabled":
         active = wf.workflows_referencing_connection(
@@ -1850,14 +1895,14 @@ def patch_connection_status(
                 "有効なワークフローがこの接続を使っています。先にワークフローを停止してください",
                 details={"reason": "workflow_active", "workflows": _workflow_refs(active)},
             )
-    updated = admin.set_connection_status(principal.tenant_id, connection_id, body.status)
+    updated = admin.set_connection_status(principal.tenant_id, connection_id, target)
     if updated is None:  # 取得と更新の間で消えた
         raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
     wf.record_audit(
         principal.tenant_id, actor_id=principal.sub,
         action="connection.disable" if body.status == "disabled" else "connection.enable",
         target_id=connection_id, target_type="connection",
-        detail={"type": rec.type, "from": rec.status, "to": body.status},
+        detail={"type": rec.type, "from": rec.status, "to": target},
     )
     return _connection_dto(updated)
 
@@ -1868,12 +1913,20 @@ def delete_connection(
     principal: Principal = Depends(require_role("admin")),
     admin: AdminRepository = Depends(get_admin),
     wf: WorkflowsRepository = Depends(get_workflows),
+    secret_store: Any = Depends(get_secret_store),
 ) -> dto.ConnectionDeleted:
     """接続の削除（C9-D）。**どのワークフロー版からも参照されていない接続だけ**消せる。
 
     「版」には現在の定義（status を問わない）と、run が持つスナップショット
     （§11.1 版固定。retry の再開先・履歴の再現に要る）の両方を含める。参照が
     残っている接続は削除ではなく無効化（PATCH status=disabled）で止める。
+
+    **gateway が作った秘密は一緒に消す。** webhook の署名鍵は add_webhook_endpoint が
+    Secrets Manager に置き、DB には secret_ref しか無い。行だけ消すと、鍵が生きたまま
+    参照する物が無くなり（保管料も掛かり続け）、監査にも残らないので突き合わせが
+    できない。行を消した後に秘密を消し（逆順だと、参照の競合で行が消せなかったときに
+    生きている接続の鍵を壊す）、結果を監査（secret_ref / secret_deleted）に残す。
+    postgres の secret_ref は利用者が登録した秘密なので触らない。
     """
     rec = admin.get_connection(principal.tenant_id, connection_id)
     if rec is None:
@@ -1905,13 +1958,32 @@ def delete_connection(
             "使わなくするには無効化してください",
             details={"reason": "referenced"},
         )
+    # gateway 所有の秘密（webhook の署名鍵）だけ消す。失敗しても行の削除は戻さない
+    # （既に消えている）。secret_deleted=false と secret_ref を監査に残し、後から
+    # Secrets Manager 側を突き合わせられるようにする
+    secret_deleted: Optional[bool] = None
+    if rec.type in _GATEWAY_OWNED_SECRET_TYPES and rec.secret_ref:
+        secret_deleted = False
+        if secret_store is not None:
+            try:
+                secret_store.delete(rec.secret_ref)
+                secret_deleted = True
+            except Exception:  # noqa: BLE001 - 行は消えている。監査に残して返す
+                logger.exception(
+                    "接続 %s の秘密 %s を削除できませんでした", connection_id, rec.secret_ref
+                )
     wf.record_audit(
         principal.tenant_id, actor_id=principal.sub, action="connection.delete",
         target_id=connection_id, target_type="connection",
-        detail={"type": rec.type, "name": rec.name, "status": rec.status, **counts},
+        detail={
+            "type": rec.type, "name": rec.name, "status": rec.status,
+            "secret_ref": rec.secret_ref, "secret_deleted": secret_deleted, **counts,
+        },
     )
     return dto.ConnectionDeleted(
-        connection_id=connection_id, cursors_deleted=counts.get("cursors_deleted", 0)
+        connection_id=connection_id,
+        cursors_deleted=counts.get("cursors_deleted", 0),
+        secret_deleted=secret_deleted,
     )
 
 
@@ -2028,13 +2100,17 @@ def test_connection(
 
     status='disabled' は運用側が API 外で止めた印（同期も断る）。成功で無条件に
     tested に書き戻すと、テナント管理者の 1 クリックで配信が再開してしまうため断る。
+    無効化した接続で成功を tested にすると、再有効化を踏まずに無効化が黙って解けて
+    しまう。再有効化（PATCH status=active → untested）してからテストする（C9-D）。
     """
     rec = admin.get_connection(principal.tenant_id, connection_id)
     if rec is None:
         raise ApiError("E1001", "接続が見つかりません", details={"connection_id": connection_id})
     if rec.status == "disabled":
         raise ApiError(
-            "E1005", "無効化された接続は疎通テストできません", details={"status": rec.status}
+            "E1005",
+            "無効化された接続は疎通テストできません。先に再有効化してください",
+            details={"status": rec.status},
         )
     if rec.type in ("webhook", "s3"):
         try:
@@ -2051,7 +2127,7 @@ def test_connection(
                 "E4001", exc.message, details={"type": rec.type, **exc.details}
             ) from exc
         return _mark_connection_tested(admin, wf, principal, connection_id)
-    if rec.type != "postgres":
+    if rec.type != "postgres":  # 対応型を増やすときは _TESTABLE_CONNECTION_TYPES も更新する
         raise ApiError(
             "E1005",
             "疎通テストは postgres / webhook / s3 のみ対応です"

@@ -67,9 +67,18 @@ function confirmDisable(c: ConnectionDto): boolean {
 }
 
 function confirmDelete(c: ConnectionDto): boolean {
+  // 秘密の扱いは型で違う: Webhook の署名鍵は gateway が作ったので保管先からも消す。
+  // それ以外（DB のパスワード等）は利用者が登録した秘密で、参照が消えるだけ
+  const secretNote =
+    c.type === "webhook"
+      ? "署名鍵は保管先（Secrets Manager）からも削除されます。"
+      : c.secret_ref
+        ? "secret_ref が指す秘密そのものは保管先に残ります。"
+        : "";
   return window.confirm(
     `接続「${c.name}」を削除します。\n` +
       "接続の設定（フォルダ・宛先・secret_ref）は消え、元に戻せません。" +
+      secretNote +
       "ワークフローから参照されている接続は削除できません（代わりに無効化してください）。\n\n" +
       "よろしいですか？",
   );
@@ -246,12 +255,16 @@ export default function ConnectionsPage() {
     mutationFn: (v: { c: ConnectionDto; status: "active" | "disabled" }) =>
       api.patchConnectionStatus(v.c.id, v.status),
     onSuccess: (r) => {
+      // postgres の再有効化は untested に戻る（疎通テストを踏むまでワークフローに
+      // 使えない）。サーバの着地点をそのまま伝える
       push({
-        kind: "ok",
+        kind: r.status === "untested" ? "warn" : "ok",
         message:
           r.status === "disabled"
             ? `「${r.name}」を無効化しました。再有効化すれば元に戻ります。`
-            : `「${r.name}」を再有効化しました。`,
+            : r.status === "untested"
+              ? `「${r.name}」を再有効化しました。疎通テスト（POST /connections/${r.id}/test）を通すまでワークフローの有効化には使えません。`
+              : `「${r.name}」を再有効化しました。`,
       });
       qc.invalidateQueries({ queryKey: ["connections"] });
     },

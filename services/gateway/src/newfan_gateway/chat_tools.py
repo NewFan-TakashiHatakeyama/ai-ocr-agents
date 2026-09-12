@@ -14,7 +14,12 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 
-from newfan_gateway.admin import ACTIVATION_BLOCKED_MESSAGE, AdminRepository, can_activate
+from newfan_gateway.admin import (
+    ACTIVATION_BLOCKED_MESSAGE,
+    AdminRepository,
+    archived_schema_message,
+    can_activate,
+)
 from newfan_gateway.ids import new_id
 from newfan_gateway.queue import Queue
 from newfan_gateway.records import JobRecord, RunRecord, SchemaFieldDef
@@ -33,6 +38,22 @@ WRITE_TOOL_MIN_ROLE: dict[str, str] = {
     "update_schema": "admin",
     "manage_rules": "admin",
 }
+
+
+def usable_schema_error(admin: AdminRepository, tenant_id: str, schema_id: str) -> Optional[str]:
+    """新しい抽出 run に schema_id を使えないときの文言。使えれば None。
+
+    存在しない id と、アーカイブ済み（C9-D）の両方を断る。get_schema_by_id は過去の run
+    から定義を辿るためにアーカイブ済みの行も返すので、ここで archived を見ないと
+    「一覧から消えたスキーマで取り直す」がチャット経由で成立する。REST の /extract
+    （routers._require_usable_schema）と同じ判定・同じ文言。
+    """
+    rec = admin.get_schema_by_id(tenant_id, schema_id)
+    if rec is None:
+        return f"スキーマが見つかりません: {schema_id}"
+    if rec.archived:
+        return archived_schema_message(rec.doc_type)
+    return None
 
 
 def field_validation_message(exc: ValidationError) -> str:
@@ -171,8 +192,10 @@ class ChatTools:
         # 実在しない schema_id を渡し得る。素通しすると extraction_runs の FK 違反で
         # 未捕捉 500 になる（REST 側で実際に起きたのと同じ経路）
         schema_id = (schema_id or "").strip() or None
-        if schema_id is not None and self._admin.get_schema_by_id(tenant_id, schema_id) is None:
-            return {"ok": False, "message": f"スキーマが見つかりません: {schema_id}"}
+        if schema_id is not None:
+            problem = usable_schema_error(self._admin, tenant_id, schema_id)
+            if problem is not None:
+                return {"ok": False, "message": problem}
 
         inherited_options: dict[str, Any] = {}
         if supersede_review:

@@ -486,6 +486,10 @@ class ConnectionDeleted(BaseModel):
     connection_id: str
     deleted: bool = True
     cursors_deleted: int = 0
+    # gateway が作った秘密（webhook の署名鍵）を保管先からも消せたか。対象外（postgres の
+    # 利用者登録の秘密・secret_ref 無し）は None。False は行だけ消えて秘密が残った状態で、
+    # 監査（connection.delete の secret_ref）から突き合わせる
+    secret_deleted: Optional[bool] = None
 
 
 class ConnectionTestResult(BaseModel):
