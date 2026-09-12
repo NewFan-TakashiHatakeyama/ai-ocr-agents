@@ -26,12 +26,11 @@ from newfan_schemas import (
 
 from newfan_orchestrator.confidence import apply_correction_confidence
 from newfan_orchestrator.region_hint import (
-    HINT_MAX_CANDIDATES,
     REASON_PAGE_OUT_OF_RANGE,
     REASON_PAGE_UNPROJECTABLE,
     example_present,
     prevalidate,
-    rank_candidates,
+    select_candidates,
     span_inside,
 )
 from newfan_orchestrator.region_mask import regions_for_page
@@ -235,10 +234,11 @@ def _clip(text: str) -> str:
     return text if len(text) <= DETAIL_MAX_CHARS else text[: DETAIL_MAX_CHARS - 1] + "…"
 
 
-def _hint_detail(example_value: Optional[str], ranked: list[Span]) -> dict[str, Any]:
+def _hint_detail(example_value: Optional[str], cands: list[Span]) -> dict[str, Any]:
+    """候補は読み順（``select_candidates`` の戻り）で先頭数件。プロンプトと同じ並びで見せる。"""
     return {
         "example_value": _clip(example_value) if example_value else None,
-        "candidates": [_clip(s.text) for s in ranked[:DETAIL_MAX_CANDIDATES]],
+        "candidates": [_clip(s.text) for s in cands[:DETAIL_MAX_CANDIDATES]],
     }
 
 
@@ -306,27 +306,27 @@ def build_region_hints(
                 continue
             page_no, rect = int(px["page"]), list(px["bbox"])
             inside = [s for s in span_list if s.page == page_no and span_inside(s.bbox, rect)]
-            ranked = rank_candidates(inside, rect)
-            if len(ranked) > HINT_MAX_CANDIDATES:
-                report.truncated[name] = len(ranked) - HINT_MAX_CANDIDATES
-                ranked = ranked[:HINT_MAX_CANDIDATES]
+            # 重なり面積で最大 HINT_MAX_CANDIDATES 件を選び、読み順で渡す（設計 v2 §2.5）
+            cands, truncated = select_candidates(inside, rect)
+            if truncated:
+                report.truncated[name] = truncated
             # 例示値は LLM プロンプトに入る。保存時と同じ規則で渡す直前にも消毒する
             # （JSONB は検査導入前のデータや手修正で規則を素通りし得る）
             ev_raw = region.get("example_value")
             ev = sanitize_example_value(ev_raw) if isinstance(ev_raw, str) else None
-            if ev or ranked:
-                report.detail[name] = _hint_detail(ev, ranked)
+            if ev or cands:
+                report.detail[name] = _hint_detail(ev, cands)
             # 事前ガードは**切った後の候補**に当てる。切り捨て件数を残すのは、
             # 「13 件目に数字があったのに type_mismatch で落ちた」を後から追えるようにするため
-            reason = prevalidate(f, ranked, ev, rect, list(exclude_by_page.get(page_no, [])))
+            reason = prevalidate(f, cands, ev, rect, list(exclude_by_page.get(page_no, [])))
             if reason is not None:
                 report.dropped[name] = reason
                 new_fields.append(stripped)
                 continue
             stripped["region_hint"] = {
-                "candidates": [{"span_id": s.span_id, "text": s.text} for s in ranked],
+                "candidates": [{"span_id": s.span_id, "text": s.text} for s in cands],
                 "example_value": ev,
-                "example_present": example_present(ev, ranked),
+                "example_present": example_present(ev, cands),
             }
             report.given.append(name)
         new_fields.append(stripped)

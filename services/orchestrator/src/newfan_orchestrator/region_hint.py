@@ -33,6 +33,9 @@ HINT_SPAN_RATIO = 0.3
 
 # プロンプトへ載せる候補の上限。切るときは読み順ではなく **矩形との重なりが大きい順**
 # （読み順で切ると、大きな枠で本命が後ろに来たとき落ちる。R17）。切った件数は metrics へ。
+# 選んだ候補は **読み順（span_id 昇順）で渡す**（第 4 回計測で検証）: 重なり順のままだと
+# 「住所 1 行目・2 行目」「姓・名」のような複数 span の値が前後して並び、連結して読む
+# モデルに順序の手掛かりを渡せない。
 HINT_MAX_CANDIDATES = 12
 
 # 型付き項目: 候補（連結にも各候補にも）にその型として解釈できるものが無ければ落とす。
@@ -76,11 +79,27 @@ def span_inside(bbox: Optional[list[int]], rect: BBox) -> bool:
 
 
 def rank_candidates(spans: list[Span], rect: BBox) -> list[Span]:
-    """矩形との重なり面積が大きい順。同点は読み順（span_id）。"""
+    """矩形との重なり面積が大きい順。同点は読み順（span_id）。**選ぶ**ための順位。"""
     return sorted(
         spans,
         key=lambda s: (-overlap_area(list(s.bbox), list(rect)) if s.bbox else 0.0, s.span_id),
     )
+
+
+def select_candidates(
+    spans: list[Span], rect: BBox, limit: int = HINT_MAX_CANDIDATES
+) -> tuple[list[Span], int]:
+    """候補を **重なり面積で最大 limit 件選び、読み順（span_id 昇順）で返す**。
+
+    戻り値は (候補, 切った件数)。選ぶ順位と渡す順序は別物:
+
+    - 選ぶのは重なり順（読み順で切ると、大きな枠で本命が後ろに来たとき落ちる。R17）
+    - 渡すのは読み順（複数 span にまたがる値を連結して読むモデルに、並びの手掛かりを渡す。
+      事前ガード ``prevalidate`` / ``example_present`` の連結も同じ読み順で見る）
+    """
+    ranked = rank_candidates(spans, rect)
+    truncated = max(0, len(ranked) - limit)
+    return sorted(ranked[:limit], key=lambda s: s.span_id), truncated
 
 
 def rect_overlaps_any(rect: BBox, others: list[BBox]) -> bool:

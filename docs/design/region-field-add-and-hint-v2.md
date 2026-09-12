@@ -293,7 +293,7 @@ class RegionRect(BaseModel):
 px = _region_px(region, pages)                       # 既存: 正規化→画素、ページ解決、範囲外は落とす
 if px is None: continue
 cands = [s for s in spans if s.page == px["page"] and _inside(s.bbox, px["bbox"])]
-cands = _rank(cands, px["bbox"])[:HINT_MAX_CANDIDATES]
+cands, truncated = _select(cands, px["bbox"])      # 重なり面積で最大 12 件を選び、読み順で返す
 reason = _prevalidate(field, cands, region.get("example_value"))
 if reason:
     dropped[name] = reason                            # metrics へ
@@ -313,9 +313,14 @@ stripped["region_hint"] = {
 0 件になるとヒントごと落ちる）。**span の中心点が矩形内**、または重なりが span 面積の
 30% 以上、のどちらかで採る。定数は `HINT_SPAN_RATIO = 0.3` として除外と分ける。
 
-**候補の順位 `_rank`** ── 読み順ではなく**矩形との重なりが大きい順**。読み順で
-先頭 N 件に切ると、大きな枠で本命が後ろに来たとき落ちる。`HINT_MAX_CANDIDATES = 12`。
-切った件数は metrics に残す。
+**候補の選び方と並び `_select`**（`select_candidates`）── **重なり面積で最大 12 件を選び、
+読み順で渡す**。選ぶ順位は読み順ではなく**矩形との重なりが大きい順**（`rank_candidates`）:
+読み順で先頭 N 件に切ると、大きな枠で本命が後ろに来たとき落ちる。`HINT_MAX_CANDIDATES = 12`。
+切った件数は metrics に残す。選んだ候補は **読み順（span_id 昇順）に並べ直して**
+`region_hint.candidates` と `metrics.region.hints.detail` に載せる: 複数 span にまたがる値
+（住所の 2 行、姓と名）を連結して読むモデルに並びの手掛かりを渡すためで、事前ガードと
+`example_present` の連結も同じ読み順で見る。第 3 回計測までは重なり順のまま渡していた
+（読み順で渡す効果は**第 4 回計測で検証する**）。
 
 **事前ガード `_prevalidate`**（落とす理由を返す。順に評価）:
 
@@ -604,7 +609,7 @@ fields 配列だけ）への耐性、`region_ab --resume`、ゲート判定ス�
 | R14 | 重大 | 同じ目的の正規化関数が既に 3 つ（golden の `metrics._norm` / `region_ab._norm` / `region_from_gold.key`）。例示値の照合で 4 つ目を書く設計になっていた | D18。`newfan_schemas.textnorm` に統合 |
 | R15 | 中 | 編集モードで項目を足すと新版になり、版固定のワークフローには自動で載らない（L012 は警告のみ）。設計に無い | §1.1 D3 の注記と §4 に明記（既存の契約どおり。本設計で変えない） |
 | R16 | 中 | KIE ノードが metrics に書く方法が未定。`metrics` は LastValue で、`region` の既存キーを潰す／再配信で二重になる穴を前に踏んでいる | §2.5 metrics。`_merge_region_metrics` と同じ規則、run ごとに書き直す |
-| R17 | 中 | 候補を読み順で 12 件に切ると、大きな枠で本命が後ろに来たとき落ちる | §2.5 `_rank`。重なり順 |
+| R17 | 中 | 候補を読み順で 12 件に切ると、大きな枠で本命が後ろに来たとき落ちる | §2.5 `_select`。重なり順で**選ぶ**（渡す並びは読み順。第 4 回から） |
 | R18 | 中 | 落とした理由を metrics に残すだけで、テンプレート作者に届かない | D17。捨てた理由を参考表示の `title` に |
 | R19 | 中 | 既定 on にするとき、いまの `region_hints_enabled()` は未設定=off の作りなので、コードで反転すると explicit off が効かない | §2.10 |
 | R20 | 中 | off の期間に引かれた領域が、on にした瞬間に初めてヒントとして使われる。作者はその意味で検証していない | D8 `created_at`、§1.5・§2.8 で「有効化前の領域」を区別 |
