@@ -33,6 +33,10 @@
 - [`task-definition.orchestrator-worker.json`](task-definition.orchestrator-worker.json)
   — 抽出ワーカー（キュー消費のため port/HTTP healthCheck なし）。secrets に ANTHROPIC_API_KEY。
   `REGION_KIE_HINTS` は読取領域ヒントの**キルスイッチ**（未設定・空文字は on、`0` で止める）。
+  `REGION_HINTS_ACTIVATED_AT` は「有効化前に引かれた領域」注記の境界（ISO 8601、Z か
+  オフセット付き。未設定・空文字はコードの定数 `2026-09-12T00:00:00Z`。解釈できない値は
+  warning を出して定数に倒す）。実運用の ECS は terraform（[`../terraform`](../terraform/)）で、
+  同じ 2 つを `region_kie_hints` / `region_hints_activated_at` 変数で渡す。
 - [`task-definition.export-worker.json`](task-definition.export-worker.json)
   — export ワーカー（q.export 消費 → canonical JSON/webhook 配信）。torch 非依存で軽量。
 - [`task-definition.migrate.json`](task-definition.migrate.json)

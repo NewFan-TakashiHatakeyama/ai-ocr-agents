@@ -104,6 +104,12 @@ resource "aws_ecs_task_definition" "orchestrator_worker" {
       { name = "S3_BUCKET", value = aws_s3_bucket.this.id },
       { name = "S3_KMS_KEY_ID", value = var.s3_kms_key_id },
       { name = "TRIGGER_SQS_URL", value = data.aws_sqs_queue.workflow_trigger.url },
+      # 読取領域ヒント（設計 region-field-add-and-hint-v2）。既定 on で、REGION_KIE_HINTS は
+      # キルスイッチ（空文字は on、"0" で止める）。REGION_HINTS_ACTIVATED_AT は「有効化前に
+      # 引かれた領域」注記の境界（空文字はコードの定数）。どちらも常に渡す ── 空文字を
+      # 渡すのと渡さないのは worker にとって同じで、tfvars で値を入れた時だけ効く
+      { name = "REGION_KIE_HINTS", value = var.region_kie_hints },
+      { name = "REGION_HINTS_ACTIVATED_AT", value = var.region_hints_activated_at },
       ], var.vl_enabled ? [
       { name = "VL_URL", value = local.vl_url },
     ] : [])

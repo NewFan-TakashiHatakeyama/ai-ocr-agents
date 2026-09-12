@@ -148,6 +148,26 @@ aws ecs run-task --cluster $(terraform output -raw cluster_name) \
 - 印章オプション: `structure_seal_enabled=true` で印章版 config に切り替わる（+2% 程度）
 - `var.structure_cpu` / `var.structure_memory` で増強できる（Fargate の有効な組み合わせに従うこと）
 
+## 読取領域ヒントのキルスイッチ（orchestrator-worker）
+
+読取領域を KIE のヒントとして渡す機能（設計 `docs/design/region-field-add-and-hint-v2.md`）は
+第 3 回計測（2026-09-12）で出荷ゲートを通し**既定 on**。worker の環境変数 2 つを tfvars の
+変数で渡す（`ecs.tf` の orchestrator-worker）。どちらも既定 `""` で、空文字は worker にとって
+未設定と同じ。
+
+| 変数 | 環境変数 | 意味 |
+|---|---|---|
+| `region_kie_hints` | `REGION_KIE_HINTS` | **キルスイッチ**。空は on、`"0"`（`false` / `no` / `off` も可）で止める。それ以外の値は on |
+| `region_hints_activated_at` | `REGION_HINTS_ACTIVATED_AT` | 「有効化前に引かれた領域」注記の境界（ISO 8601、Z かオフセット付き）。空はコードの定数 `2026-09-12T00:00:00Z`。この環境で実際に on にした時点が違うときだけ渡す。解釈できない値は worker が warning を出して定数に倒す |
+
+```bash
+# 止める（tfvars に region_kie_hints = "0" を書いて apply。一時的なら TF_VAR で）
+TF_VAR_region_kie_hints=0 scripts/aws_env.sh resume   # tfvars の値が優先。次の素の apply で on に戻る
+```
+
+止めても抽出は動く（ヒント導入前のプロンプトに戻るだけ）。metrics の `region.hints` と
+検証画面の参考バッジが出なくなる。
+
 ## スコープ外（次の IaC 増分）
 
 - **WAF** の ALB アタッチ、**Application Auto Scaling**（gateway=ALBRequestCount、worker=キュー深度）。

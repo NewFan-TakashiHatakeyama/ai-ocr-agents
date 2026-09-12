@@ -116,6 +116,31 @@ variable "cors_origins" {
   description = "gateway CORS 許可オリジン（カンマ区切り）"
 }
 
+# --- 読取領域ヒント（orchestrator-worker。設計 region-field-add-and-hint-v2 §1.5 / §2.10） ---
+# 第 3 回計測（2026-09-12）で出荷ゲートを通し既定 on。ここは**キルスイッチ**で、
+# 止めるときだけ "0" を渡す（未設定・空文字は on。"0" / "false" / "no" / "off" だけが off）。
+# 既定 "" で apply すると環境変数は空文字で渡り、worker は on と解釈する。
+variable "region_kie_hints" {
+  type        = string
+  default     = ""
+  description = "読取領域ヒントのキルスイッチ。未設定・空は on、\"0\" で止める"
+}
+
+# 「有効化前に引かれた領域」注記の境界。コードの定数（2026-09-12T00:00:00Z）が既定で、
+# この環境で実際に on にした時点が違う（止めていた期間がある等）ときだけ渡す。
+# 形式の誤記は plan の時点で止める。形式は合うが worker が解釈できない値（存在しない
+# 日付等）は worker が warning を出して定数に倒す（タスクは落ちない）。
+variable "region_hints_activated_at" {
+  type        = string
+  default     = ""
+  description = "読取領域ヒントを有効化した時点（ISO 8601、Z かオフセット付き）。空はコードの定数 2026-09-12T00:00:00Z"
+
+  validation {
+    condition     = var.region_hints_activated_at == "" || can(regex("^\\d{4}-\\d{2}-\\d{2}(T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2}))?$", var.region_hints_activated_at))
+    error_message = "region_hints_activated_at は ISO 8601（例: 2026-09-12T00:00:00Z / 2026-09-12T09:00:00+09:00 / 2026-09-12）か空文字。"
+  }
+}
+
 # 推論サービングは Service Connect の client_alias で名前解決する（service_connect.tf）。
 # URL を変数で受けると alias と食い違って解決不能になるため、locals で固定する。
 
