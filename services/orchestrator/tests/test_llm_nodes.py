@@ -469,6 +469,25 @@ def test_解釈できない上書きは既定に倒し警告を1回だけ出す(
     assert garbage in message and "2026-09-12T00:00:00Z" in message
 
 
+def test_tz_の無い上書きは_UTC_とみなし_JST_の_0_時ではない(monkeypatch) -> None:
+    """日付だけ・tz 無しの値は UTC 00:00。deploy 側の注記（compose / ecs README / 設計 §1.5）と
+    terraform の validation（日付だけを plan で弾く）はこの規則を前提にしているので、
+    ここで固定する。JST の「on にした日」を日付だけで書くと境界は JST 09:00 になる。"""
+    monkeypatch.setenv("REGION_HINTS_ACTIVATED_AT", "2026-10-01")
+    assert llm_nodes.region_hints_activated_at().isoformat() == "2026-10-01T00:00:00+00:00"
+    # JST 同日 05:00（= 2026-09-30T20:00:00Z）は境界より前に倒れる（作者が確認済みでも注記が出る）
+    assert llm_nodes._is_pre_activation("2026-10-01T05:00:00+09:00") is True
+    assert llm_nodes._is_pre_activation("2026-10-01T09:00:00+09:00") is False  # 境界ちょうど
+    # 時刻付きでも tz が無ければ同じ規則
+    monkeypatch.setenv("REGION_HINTS_ACTIVATED_AT", "2026-10-01T09:00:00")
+    assert llm_nodes.region_hints_activated_at().isoformat() == "2026-10-01T09:00:00+00:00"
+    # JST の時点として渡すならオフセットを付ける（= 2026-09-30T15:00:00Z）
+    monkeypatch.setenv("REGION_HINTS_ACTIVATED_AT", "2026-10-01T00:00:00+09:00")
+    assert llm_nodes.region_hints_activated_at().isoformat() == "2026-10-01T00:00:00+09:00"
+    assert llm_nodes._is_pre_activation("2026-10-01T05:00:00+09:00") is False
+    assert llm_nodes._is_pre_activation("2026-09-30T23:59:59+09:00") is True
+
+
 def test_空白だけの上書きは未設定と同じで警告も出ない(monkeypatch, caplog) -> None:
     monkeypatch.setenv("REGION_HINTS_ACTIVATED_AT", "   ")
     with caplog.at_level(logging.WARNING, logger="newfan_orchestrator.llm_nodes"):

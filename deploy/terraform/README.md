@@ -158,7 +158,7 @@ aws ecs run-task --cluster $(terraform output -raw cluster_name) \
 | 変数 | 環境変数 | 意味 |
 |---|---|---|
 | `region_kie_hints` | `REGION_KIE_HINTS` | **キルスイッチ**。空は on、`"0"`（`false` / `no` / `off` も可）で止める。それ以外の値は on |
-| `region_hints_activated_at` | `REGION_HINTS_ACTIVATED_AT` | 「有効化前に引かれた領域」注記の境界（ISO 8601、Z かオフセット付き）。空はコードの定数 `2026-09-12T00:00:00Z`。この環境で実際に on にした時点が違うときだけ渡す。解釈できない値は worker が warning を出して定数に倒す |
+| `region_hints_activated_at` | `REGION_HINTS_ACTIVATED_AT` | 「有効化前に引かれた領域」注記の境界（ISO 8601。**時刻と Z かオフセットまで必須**。日付だけ・tz 無しは plan で弾く ── worker は tz の無い値を UTC とみなすので、JST の日付を書くと境界が 9 時間ずれる。JST の時点は `2026-10-01T00:00:00+09:00` のように書く）。空はコードの定数 `2026-09-12T00:00:00Z`。この環境で実際に on にした時点が違うときだけ渡す。解釈できない値は worker が warning を出して定数に倒す |
 
 ```bash
 # 止める（tfvars に region_kie_hints = "0" を書いて apply。一時的なら TF_VAR で）
@@ -167,6 +167,10 @@ TF_VAR_region_kie_hints=0 scripts/aws_env.sh resume   # tfvars の値が優先�
 
 止めても抽出は動く（ヒント導入前のプロンプトに戻るだけ）。metrics の `region.hints` と
 検証画面の参考バッジが出なくなる。
+
+`region_hints_activated_at` の validation（通す形・弾く形）は
+[`tests/region_hints_activated_at.tftest.hcl`](tests/region_hints_activated_at.tftest.hcl) で固定している
+（`terraform init -backend=false && terraform test`。provider は mock で実 AWS には触らない）。
 
 ## スコープ外（次の IaC 増分）
 

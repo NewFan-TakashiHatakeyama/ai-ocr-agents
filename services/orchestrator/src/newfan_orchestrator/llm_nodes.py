@@ -84,8 +84,10 @@ def region_hints_activated_at() -> datetime:
     既定は定数 ``REGION_HINTS_ACTIVATED_AT``（コードで既定 on にした時点）。ただし
     実際に on になった時点は環境ごとにずれ得る（キルスイッチで止めていた期間があった、
     デプロイした日が違う等）。そのときは環境変数 ``REGION_HINTS_ACTIVATED_AT`` に
-    実際に on にした時点（ISO 8601。末尾 ``Z`` かオフセット付き。tz の無い値は UTC）を
-    渡すと、注記の境界がそれに合う。
+    実際に on にした時点（ISO 8601。末尾 ``Z`` かオフセット付き）を渡すと、注記の境界が
+    それに合う。tz の無い値（日付だけ ``2026-10-01`` 等）は **UTC** とみなす（JST の 0 時
+    ではない。JST の時点は ``2026-10-01T00:00:00+09:00`` のように書く。deploy 側の注記と
+    terraform の validation はこの規則を前提にしている）。
 
     - 未設定・空文字は定数（compose の ``${REGION_HINTS_ACTIVATED_AT:-}`` が渡す値）
     - 解釈できない値は**定数に倒す**。黙って倒さず warning を出す（値ごとに 1 回）。

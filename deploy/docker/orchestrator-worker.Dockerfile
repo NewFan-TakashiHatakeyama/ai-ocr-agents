@@ -46,5 +46,5 @@ SentenceTransformer('intfloat/multilingual-e5-small')" \
 ENV HF_HUB_OFFLINE=1
 # 必須 env: DATABASE_URL, REDIS_URL, STRUCTURE_URL / 任意: VL_URL, LLM_MODEL, ANTHROPIC_API_KEY,
 #   REGION_KIE_HINTS（読取領域ヒントのキルスイッチ。空は on、0 で止める）,
-#   REGION_HINTS_ACTIVATED_AT（「有効化前に引かれた領域」注記の境界。空はコードの定数）
+#   REGION_HINTS_ACTIVATED_AT（「有効化前に引かれた領域」注記の境界。ISO 8601、tz 無しは UTC。空はコードの定数）
 CMD ["python", "-m", "newfan_orchestrator.worker_main"]
