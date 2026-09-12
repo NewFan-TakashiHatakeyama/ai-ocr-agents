@@ -1945,6 +1945,154 @@ a {
   background: var(--accent, #3b6ef5); border: 2px solid var(--panel);
 }
 
+/* ---------- SCR-07「実行」タブ（C9-C 実行履歴・失敗・再実行） ----------
+   トークンは --surface / --ink2 / --brand-deep / --green / --red / --amber を使う
+  （エディタ系の旧別名 --panel / --sub / --accent / --ok / --warn / --ng は使わない） */
+.wf-tabs { margin-left: 6px; }
+.wf-tabs > button { padding: 5px 12px; font-size: 12px; }
+
+.wfrun-panel {
+  /* エディタと同じ高さで main を埋め、一覧側だけスクロールさせる */
+  height: calc(100vh - 56px);
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface);
+}
+.wfrun-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 22px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.wfrun-table td { vertical-align: top; }
+.wfrun-table tbody tr.on { background: var(--brand-soft); }
+.wfrun-nowrap { white-space: nowrap; }
+.wfrun-id { font-family: var(--mono); font-size: 11px; color: var(--ink2); word-break: break-all; }
+.wfrun-link { color: var(--brand-deep); font-family: var(--mono); font-size: 12px; }
+.wfrun-link:hover { text-decoration: underline; }
+.wfrun-failcell { max-width: 360px; }
+.wfrun-failnode { font-weight: 600; font-size: 12.5px; }
+.wfrun-errline {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--red);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wfrun-retry { display: inline-block; }
+
+/* run / node の状態チップ（tone は lib/workflowRuns.ts と 1:1） */
+.chip.wfrun-running { background: var(--violet-soft); color: #6a58e8; }
+.chip.wfrun-waiting { background: var(--amber-soft); color: var(--amber-ink); }
+.chip.wfrun-ok { background: var(--green-soft); color: var(--green); }
+.chip.wfrun-failed { background: var(--red-soft); color: var(--red); }
+.chip.wfrun-skipped { background: #eef1f5; color: var(--ink2); }
+.chip.wfrun-neutral { background: #eef1f5; color: var(--ink2); }
+
+/* 詳細ドロワー（右から。幕のクリックと Esc で閉じる） */
+.wfrun-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.32);
+  z-index: 100;
+}
+.wfrun-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: min(520px, calc(100vw - 32px));
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--sh-l);
+  padding: 16px 18px 24px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wfrun-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.wfrun-drawer-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.wfrun-drawer-title .wfrun-id { font-size: 12px; color: var(--ink); }
+.wfrun-meta {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 4px 10px;
+  margin: 0;
+  font-size: 12.5px;
+}
+.wfrun-meta dt { color: var(--ink2); font-size: 11.5px; font-weight: 700; }
+.wfrun-meta dd { margin: 0; min-width: 0; word-break: break-all; }
+.wfrun-waiting {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+  font-size: 12.5px;
+}
+.wfrun-err {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--red-soft);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wfrun-err-label { font-size: 11px; font-weight: 700; }
+.wfrun-pre {
+  margin: 0;
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  max-height: 200px;
+  overflow: auto;
+}
+.wfrun-nodes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.wfrun-node {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+}
+.wfrun-node.running { border-left-color: var(--brand-deep); }
+.wfrun-node.waiting { border-left-color: var(--amber); }
+.wfrun-node.ok { border-left-color: var(--green); }
+.wfrun-node.failed { border-left-color: var(--red); }
+.wfrun-node-head { display: flex; align-items: center; gap: 8px; }
+.wfrun-node-idx {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #eef1f5;
+  color: var(--ink2);
+  font-size: 11px;
+  font-weight: 700;
+  flex: none;
+}
+.wfrun-node-name { flex: 1; min-width: 0; font-weight: 600; font-size: 12.5px; }
+.wfrun-node-sub { display: flex; gap: 12px; margin-top: 3px; font-size: 11px; color: var(--ink2); }
+.wfrun-node .wfrun-pre { margin-top: 6px; }
+
 /* ============ テンプレート化ダイアログ（ADR-0006 スキーマレス→スキーマ化） ============ */
 .tpl-overlay {
   position: fixed;

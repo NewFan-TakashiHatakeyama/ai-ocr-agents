@@ -24,13 +24,19 @@ export function RunWorkflow({ documentId }: { documentId: string }) {
 
   const run = useMutation({
     mutationFn: () => api.startWorkflowRun(effective, documentId),
-    onSuccess: () => {
+    onSuccess: (r) => {
       setOpen(false);
+      const wfId = effective;
+      // 進み具合・失敗・再実行はワークフローの「実行」タブで追える（C9-C）。
+      // 操作つきトーストは自動で消えないので、レビューキューへ移った後でも押せる
       push({
         kind: "ok",
-        message: "ワークフローを開始しました。人手確認が要る場合はレビューキューに入ります。",
+        message:
+          "ワークフローを開始しました。人手確認が要る場合はレビューキューに入ります。" +
+          `（実行 ${r.workflow_run_id}）`,
+        action: { label: "実行履歴を見る", onClick: () => router.push(`/workflows/${wfId}?tab=runs`) },
       });
-      // 実行状況を追えるようレビューキューへ誘導
+      // 人手確認の導線としてレビューキューへ（従来どおり）
       router.push("/documents?tab=queue");
     },
     onError: (e) =>

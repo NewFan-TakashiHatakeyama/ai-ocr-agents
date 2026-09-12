@@ -14,6 +14,7 @@ import type {
   WorkflowDto,
   WorkflowGraphDto,
   WorkflowListItemDto,
+  WorkflowRunDto,
   WorkflowRunItemDto,
   ChatConfirmResult,
   CorrectionItem,
@@ -359,8 +360,18 @@ export const api = {
     request<{ workflow_id: string; deleted: boolean }>(`/workflows/${id}`, {
       method: "DELETE",
     }),
+  // 実行履歴（新しい順、既定 50 件）。running / waiting_hitl があるあいだ UI が 5 秒ごとに引く
   listWorkflowRuns: (id: string) =>
     request<{ items: WorkflowRunItemDto[] }>(`/workflows/${id}/runs`),
+  // 1 run の詳細（node_runs 付き、viewer 可）
+  getWorkflowRun: (runId: string) => request<WorkflowRunDto>(`/workflow-runs/${runId}`),
+  // failed の run を失敗セグメントから再実行する（admin）。完了済みノードは走り直さない
+  //（§6.5 の再実行境界）。failed 以外は 409(E1005)。呼ぶ前に確認を取ること
+  retryWorkflowRun: (runId: string) =>
+    request<{ workflow_run_id: string; workflow_version: number }>(
+      `/workflow-runs/${runId}/retry`,
+      { method: "POST" },
+    ),
 
   uploadDocument: (file: File, docType?: string) => {
     const fd = new FormData();

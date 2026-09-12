@@ -425,12 +425,42 @@ export interface DryRunResultDto {
   sinks: SinkPreviewDto[];
 }
 
+/** runner が射影に残すエラー。message 以外のキーを持つ場合もあるので広めに受ける */
+export type WorkflowRunError = { message?: string | null } & Record<string, unknown>;
+
+/**
+ * GET /workflows/{id}/runs の 1 件（WorkflowRunSummaryDto）。
+ * status: running / waiting_hitl / succeeded / failed / skipped（§16 設計 v0.2 §3）
+ */
 export interface WorkflowRunItemDto {
   id: string;
   workflow_id: string;
   workflow_version: number;
   document_id?: string | null;
   status: string;
+  error?: WorkflowRunError | null;
   started_at?: string | null;
   finished_at?: string | null;
+  /** 発火の出所（manual / schedule / s3_event / gdrive_event …）。旧 run や旧 gateway では無い */
+  trigger_type?: string | null;
+  /** 発火したトリガーノードの id（複数トリガーの WF で経路を示す） */
+  trigger_node_id?: string | null;
+}
+
+/** workflow_node_runs の 1 行。status: pending / running / succeeded / failed */
+export interface WorkflowNodeRunDto {
+  node_id: string;
+  node_type: string;
+  status: string;
+  attempt: number;
+  output?: Record<string, unknown> | null;
+  error?: WorkflowRunError | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** GET /workflow-runs/{id}。waiting は何を待っているか（await_extract / await_hitl） */
+export interface WorkflowRunDto extends WorkflowRunItemDto {
+  waiting?: ({ kind?: string; node_id?: string; run_id?: string } & Record<string, unknown>) | null;
+  node_runs: WorkflowNodeRunDto[];
 }
