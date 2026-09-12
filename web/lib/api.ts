@@ -1,6 +1,7 @@
 // gateway-api クライアント（§6）。認証トークンは dev では env、本番はログインフローで差し替える。
 
 import type {
+  StaleWorkflowList,
   CatalogDto,
   ClassifyResult,
   ConnectionDeleted,
@@ -213,6 +214,10 @@ export const api = {
   // doc_type の**最新版**を取る（領域編集のプリロード起点）。listSchemas でも
   // 最新版は取れるが、run.schema_id は抽出時点の旧版であり得るので id 突合は
   // できない。編集は必ず doc_type 起点で行う。
+  // 当該 doc_type の旧版を固定保持している有効ワークフロー（設計 §4.4b）。判定は
+  // サーバが**全旧版**で行う（web で直前の版だけ突合すると v1 固定が漏れる）
+  staleWorkflows: (docType: string) =>
+    request<StaleWorkflowList>(`/schemas/${encodeURIComponent(docType)}/stale-workflows`),
   getSchema: (docType: string) =>
     request<SchemaDto>(`/schemas/${encodeURIComponent(docType)}`),
   // create=true は新規作成モード: 既存 doc_type ならサーバが E1005(409) で拒否する

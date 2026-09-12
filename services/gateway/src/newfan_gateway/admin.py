@@ -11,6 +11,7 @@ from typing import Any, Optional, Protocol
 from newfan_schemas import RegionRect, check_field_name, check_field_type
 
 from newfan_gateway.ids import new_id
+from newfan_gateway.sentinels import UNSET
 from newfan_gateway.records import (
     ConnectionRecord,
     MemoryRecord,
@@ -41,6 +42,22 @@ def archived_schema_message(doc_type: str, *, action: str = "使う") -> str:
     """アーカイブ済みスキーマを断るときの文言（C9-D）。REST（E1005）と chat（ok=False）で
     同じ言葉にする——「先に復元してください」が次の一手で、画面のバッジと対応する。"""
     return f"スキーマ「{doc_type}」はアーカイブ済みです。{action}には先に復元してください"
+
+
+class SchemaVersionConflictError(ValueError):
+    """同じ doc_type への同時保存で版番号が衝突した（第 3 回敵対的レビュー 1）。
+
+    Pg 実装は advisory lock で同時保存を直列化するので通常は起きないが、ロックを
+    経由しない書き込み（seed スクリプト等）と重なった場合の最後の防波堤。ルータは
+    E1005（再読み込みしてやり直し）に翻訳する。ValueError 派生の理由は
+    SchemaArchivedError と同じ（chat 経路が ok=False で会話を続けられるように）。
+    """
+
+    def __init__(self, doc_type: str) -> None:
+        super().__init__(
+            f"スキーマ「{doc_type}」が同時に保存されました。再読み込みしてからやり直してください"
+        )
+        self.doc_type = doc_type
 
 
 class SchemaArchivedError(ValueError):
@@ -132,17 +149,20 @@ class AdminRepository(Protocol):
         fields: list[SchemaFieldDef],
         *,
         exclude_regions: Optional[list[RegionRect]] = None,
-        source_page_count: Optional[int] = None,
+        source_page_count: Optional[int] | Any = UNSET,
     ) -> SchemaRecord:
         """新版を INSERT する（常に新 version）。
 
-        exclude_regions / source_page_count は **None = 直前版から引き継ぎ**、
-        exclude_regions の明示 `[]` のみクリア（設計 §4.4）。旧編集画面と chat 経路は
-        これらを送らないため、「省略時 []」にすると旧経路の保存 1 回で除外設定が
-        全滅する。引き継ぎを呼び出し側でなく実装側に置くことで、旧経路はコード
-        無変更のまま安全になる。戻り値には**引き継ぎ後の実値**を載せる（PUT 応答が
-        直後の GET と一致しないと、旧画面が空配列で state を上書きして次の保存で
-        本物のクリアを送ってしまう）。
+        exclude_regions は **None = 直前版から引き継ぎ / 明示 [] = クリア**、
+        source_page_count は **UNSET（省略）= 引き継ぎ / 明示 None = クリア**
+        （設計 §4.4）。旧編集画面と chat 経路はこれらを送らないため、「省略時 []」に
+        すると旧経路の保存 1 回で除外設定が全滅する。引き継ぎを呼び出し側でなく
+        実装側に置くことで、旧経路はコード無変更のまま安全になる。戻り値には
+        **引き継ぎ後の実値**を載せる（PUT 応答が直後の GET と一致しないと、旧画面が
+        空配列で state を上書きして次の保存で本物のクリアを送ってしまう）。
+
+        同じ doc_type への同時保存は実装側で直列化する（Pg は advisory lock）。
+        衝突を検出したら SchemaVersionConflictError。
         """
         ...
 
@@ -274,7 +294,7 @@ class InMemoryAdminRepository:
         fields: list[SchemaFieldDef],
         *,
         exclude_regions: Optional[list[RegionRect]] = None,
-        source_page_count: Optional[int] = None,
+        source_page_count: Optional[int] | Any = UNSET,
     ) -> SchemaRecord:
         check_field_defs(fields)  # 予約名（D9）と未知の型は書き込み側で拒む（読み出しでは拒まない）
         prev = self.get_schema(tenant_id, doc_type)
@@ -288,10 +308,11 @@ class InMemoryAdminRepository:
             if exclude_regions is not None
             else (list(prev.exclude_regions) if prev else [])
         )
+        # UNSET = 引き継ぎ / None = クリア（Pg 実装と同じ意味論）
         pages = (
-            source_page_count
-            if source_page_count is not None
-            else (prev.source_page_count if prev else None)
+            (prev.source_page_count if prev else None)
+            if source_page_count is UNSET
+            else source_page_count
         )
         rec = SchemaRecord(
             id=new_id("schema"),

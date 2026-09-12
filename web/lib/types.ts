@@ -391,6 +391,24 @@ export interface WorkflowListItemDto {
   updated_at?: string | null;
 }
 
+/** 当該 doc_type の旧版を extract ノードに固定保持している有効ワークフロー
+ *  （GET /schemas/{doc_type}/stale-workflows。設計 §4.4b / D17） */
+export interface StaleWorkflowDto {
+  id: string;
+  name: string;
+  status: string;
+  version: number;
+  schema_id: string;
+  schema_version?: number | null;
+}
+
+export interface StaleWorkflowList {
+  doc_type: string;
+  latest_schema_id?: string | null;
+  latest_version?: number | null;
+  items: StaleWorkflowDto[];
+}
+
 export interface CatalogDto {
   types: Record<string, Record<string, unknown>>; // node type -> JSON Schema
   implemented: string[];

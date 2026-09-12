@@ -42,6 +42,7 @@ from newfan_gateway.admin import (
     ACTIVATION_BLOCKED_MESSAGE,
     AdminRepository,
     SchemaArchivedError,
+    SchemaVersionConflictError,
     archived_schema_message,
     can_activate,
 )
@@ -72,6 +73,7 @@ from newfan_gateway.page_images import (
 )
 from newfan_gateway.ports import Ingestor, OrchestratorClient
 from newfan_gateway.queue import Queue
+from newfan_gateway.sentinels import UNSET
 from newfan_gateway.workflows_repo import IMPLEMENTED_NODE_TYPES, WorkflowsRepository
 from newfan_gateway.records import (
     ConnectionRecord,
@@ -1337,20 +1339,86 @@ def put_schema(
     # exclude_regions / source_page_count は None のまま渡す（= 直前版から引き継ぎ）。
     # 旧編集画面・chat 経路はこれらを送らないので、ここで [] に潰すと保存 1 回で
     # 除外設定が消える（設計 §4.4）。
+    # source_page_count は「キーを送らない = 引き継ぎ / 明示 null = クリア」。
+    # pydantic の既定値 None では両者を区別できないので model_fields_set で見る
+    source_page_count = (
+        body.source_page_count if "source_page_count" in body.model_fields_set else UNSET
+    )
     try:
         rec = admin.put_schema(  # 常に新版
             principal.tenant_id,
             body.doc_type,
             fields,
             exclude_regions=body.exclude_regions,
-            source_page_count=body.source_page_count,
+            source_page_count=source_page_count,
         )
     except SchemaArchivedError as exc:
         # 上の事前チェックとは別トランザクション。その間にアーカイブされた場合
         raise ApiError(
             "E1005", str(exc), details={"doc_type": body.doc_type, "archived": True}
         ) from exc
+    except SchemaVersionConflictError as exc:
+        # 同時保存の版衝突（Pg は advisory lock で直列化するので通常は起きない）。
+        # 500 ではなく「再読み込みしてやり直す」で返す
+        raise ApiError(
+            "E1005", str(exc), details={"doc_type": body.doc_type, "reason": "version_conflict"}
+        ) from exc
     return _schema_dto(rec)
+
+
+@router.get("/schemas/{doc_type}/stale-workflows", response_model=dto.StaleWorkflowList)
+def list_stale_workflows(
+    doc_type: str,
+    principal: Principal = Depends(require_role("admin")),
+    admin: AdminRepository = Depends(get_admin),
+    wf: WorkflowsRepository = Depends(get_workflows),
+) -> dto.StaleWorkflowList:
+    """当該 doc_type の**旧版**を extract ノードに固定保持している有効ワークフロー。
+
+    ワークフローの ``process.extract`` は ``schema_id``（版 id）固定なので、テンプレート化
+    や領域編集で保存した新版は既存ワークフローに自動適用されない（設計 §4.4b / D17）。
+    web はここで得た一覧を保存後のトーストに出す。**直前の版だけでなく全旧版**を見る
+    （web 側で「直前の版の id」しか辿れず、v1 固定のワークフローが v3 保存時に警告から
+    漏れていた。第 3 回敵対的レビュー 2）。lint L012 は有効化時にしか評価されないため、
+    既に有効なワークフローにはこれが唯一の警告経路になる。
+    """
+    ids = admin.schema_ids_for_doc_type(principal.tenant_id, doc_type)
+    if not ids:
+        raise ApiError("E1001", "スキーマが見つかりません", details={"doc_type": doc_type})
+    latest_id = ids[-1]
+    stale_ids = ids[:-1]
+    latest = admin.get_schema_by_id(principal.tenant_id, latest_id)
+    items: list[dto.StaleWorkflowDto] = []
+    if stale_ids:
+        stale_set = set(stale_ids)
+        for w in wf.workflows_referencing_schema(principal.tenant_id, stale_ids, statuses=("active",)):
+            nodes = (w.graph_json or {}).get("nodes") or []
+            referenced = [
+                str(n.get("config", {}).get("schema_id"))
+                for n in nodes
+                if isinstance(n, dict)
+                and n.get("type") == "process.extract"
+                and isinstance(n.get("config"), dict)
+                and n.get("config", {}).get("schema_id") in stale_set
+            ]
+            for sid in dict.fromkeys(referenced):  # 同じ版を複数ノードが指しても 1 行
+                rec = admin.get_schema_by_id(principal.tenant_id, sid)
+                items.append(
+                    dto.StaleWorkflowDto(
+                        id=w.id,
+                        name=w.name,
+                        status=w.status,
+                        version=w.version,
+                        schema_id=sid,
+                        schema_version=rec.version if rec is not None else None,
+                    )
+                )
+    return dto.StaleWorkflowList(
+        doc_type=doc_type,
+        latest_schema_id=latest_id,
+        latest_version=latest.version if latest is not None else None,
+        items=items,
+    )
 
 
 # ---------- ワークフロー実行（§16 設計 v0.2 §11 / P3） ----------

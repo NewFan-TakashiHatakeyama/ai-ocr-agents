@@ -71,6 +71,9 @@ export function RegionCanvas({
   const imgRef = useRef<HTMLImageElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(0);
+  // pointer ハンドラは state ではなく ref の縮尺を使う。state は次のレンダーまで古く、
+  // ドラッグ中は useLayoutEffect が測り直しを止めるため、開始時点の値で確定してしまう
+  const scaleRef = useRef(0);
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
   const W = pageDim?.width ?? 0;
@@ -82,15 +85,19 @@ export function RegionCanvas({
   // しまい、誤ページ・誤座標のまま保存される。
   const measure = useCallback(() => {
     const img = imgRef.current;
+    const apply = (v: number) => {
+      scaleRef.current = v;
+      setScale(v);
+    };
     if (!img || !W || !H) {
-      setScale(0);
+      apply(0);
       return;
     }
     if (img.naturalWidth !== W || img.naturalHeight !== H) {
-      setScale(0); // このページの画像ではない → 操作を受け付けない
+      apply(0); // このページの画像ではない → 操作を受け付けない
       return;
     }
-    setScale(img.clientWidth > 0 ? img.clientWidth / W : 0);
+    apply(img.clientWidth > 0 ? img.clientWidth / W : 0);
   }, [W, H]);
 
   // 描画のたびに測り直す。キャッシュ済み画像では load がレイアウト前に発火して
@@ -109,6 +116,17 @@ export function RegionCanvas({
     return () => window.removeEventListener("resize", measure);
   }, [measure]);
 
+  // ウィンドウサイズが変わらないコンテナ幅の変化（DevTools のドック、ペインの伸縮）でも
+  // 縮尺を追随させる（設計 §3.4「img に ResizeObserver で scale 追随」。第 3 回敵対的
+  // レビュー 5）。url が変わると img が差し替わるので観測し直す
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => measure());
+    ro.observe(img);
+    return () => ro.disconnect();
+  }, [measure, url]);
+
   // ページ切替でドラッグ中なら破棄（進行中の矩形が別ページに落ちない）
   useEffect(() => {
     setDrag(null);
@@ -126,7 +144,9 @@ export function RegionCanvas({
     // ネイティブの画像ドラッグが始まると pointer capture 中でも pointercancel が
     // 飛び、進行中の矩形が消えたまま up が来ない（矩形が作れない）。
     ev.preventDefault();
-    if (!ready || ev.button !== 0) return;
+    // ここで測り直す（縮尺が古いままドラッグを始めない）。ref は同期的に更新される
+    measure();
+    if (scaleRef.current <= 0 || ev.button !== 0) return;
     const t = ev.target as HTMLElement;
     if (t.closest("[data-region]") || t.closest("[data-ghost]")) return; // 既存矩形の操作
     onBackgroundDown();
@@ -156,9 +176,10 @@ export function RegionCanvas({
     const right = Math.max(x0, x1);
     const bottom = Math.max(y0, y1);
     if (right - left < MIN_DRAG_PX || bottom - top < MIN_DRAG_PX) return; // クリック扱い
-    if (!ready) return;
-    const clampX = (v: number) => Math.max(0, Math.min(W, Math.round(v / scale)));
-    const clampY = (v: number) => Math.max(0, Math.min(H, Math.round(v / scale)));
+    const s = scaleRef.current;
+    if (s <= 0) return;
+    const clampX = (v: number) => Math.max(0, Math.min(W, Math.round(v / s)));
+    const clampY = (v: number) => Math.max(0, Math.min(H, Math.round(v / s)));
     onDraw([clampX(left), clampY(top), clampX(right), clampY(bottom)]);
   }
 

@@ -31,6 +31,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from newfan_gateway.ids import new_id
 from newfan_gateway.repository import DocumentGoneError
+from newfan_gateway.sentinels import UNSET
 from newfan_gateway.records import (
     CorrectionRecord,
     DocumentRecord,
@@ -876,18 +877,33 @@ class PgAdminRepository:
         return self.get_schema(tenant_id, doc_type)
 
     def put_schema(
-        self, tenant_id: str, doc_type: str, fields, *, exclude_regions=None, source_page_count=None
+        self, tenant_id: str, doc_type: str, fields, *, exclude_regions=None, source_page_count=UNSET
     ):
         import json as _json
         import uuid as _uuid
 
-        from newfan_gateway.admin import SchemaArchivedError, check_field_defs
+        from sqlalchemy.exc import IntegrityError
+
+        from newfan_gateway.admin import (
+            SchemaArchivedError,
+            SchemaVersionConflictError,
+            check_field_defs,
+        )
         from newfan_gateway.records import SchemaRecord
 
         check_field_defs(fields)  # 予約名（D9）と未知の型は書き込み側で拒む（読み出しでは拒まない）
         payload = _json.dumps(schema_fields_payload(fields), ensure_ascii=False)
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
+            # 同じ doc_type への同時保存を**トランザクション単位で直列化**する。版番号は
+            # 「max(version)+1」で採番するので、ロック無しでは 2 本のトランザクションが同じ
+            # 番号を取り、UNIQUE (tenant_id, doc_type, version) に衝突した側が 500 になる
+            # （4 スレッド × 6 回の PUT で実際に 2 件が E2000 になった。第 3 回敵対的
+            # レビュー 1）。advisory lock は commit / rollback で自動解放される。
+            c.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                {"k": f"field_schemas:{tenant_id}:{doc_type}"},
+            )
             # 引き継ぎ元は**版採番と同一トランザクション内**で、get_schema と同じ
             # 版選択（ORDER BY version DESC LIMIT 1）で取る。ORDER BY を落とすと
             # v1 の設定が復活して v2 以降の設定が消えるという、InMemory では
@@ -912,10 +928,11 @@ class PgAdminRepository:
                 ]
             else:
                 regions = list(prev[0] or []) if prev is not None else []
-            if source_page_count is not None:
-                pages = source_page_count
-            else:
+            # UNSET = 引き継ぎ / None = クリア（明示 null で NULL に戻せる。§4.4）
+            if source_page_count is UNSET:
                 pages = prev[1] if prev is not None else None
+            else:
+                pages = source_page_count
 
             nxt = c.execute(
                 text(
@@ -925,17 +942,22 @@ class PgAdminRepository:
                 {"t": tenant_id, "d": doc_type},
             ).scalar_one()
             sid = f"sch_{_uuid.uuid4().hex[:20]}"
-            c.execute(
-                text(
-                    "INSERT INTO field_schemas "
-                    "(id, tenant_id, doc_type, version, fields, exclude_regions, source_page_count)"
-                    " VALUES (:i,:t,:d,:v, CAST(:f AS jsonb), CAST(:x AS jsonb), :p)"
-                ),
-                {
-                    "i": sid, "t": tenant_id, "d": doc_type, "v": nxt, "f": payload,
-                    "x": _json.dumps(regions, ensure_ascii=False), "p": pages,
-                },
-            )
+            try:
+                c.execute(
+                    text(
+                        "INSERT INTO field_schemas "
+                        "(id, tenant_id, doc_type, version, fields, exclude_regions, source_page_count)"
+                        " VALUES (:i,:t,:d,:v, CAST(:f AS jsonb), CAST(:x AS jsonb), :p)"
+                    ),
+                    {
+                        "i": sid, "t": tenant_id, "d": doc_type, "v": nxt, "f": payload,
+                        "x": _json.dumps(regions, ensure_ascii=False), "p": pages,
+                    },
+                )
+            except IntegrityError as exc:
+                # advisory lock を経由しない書き込み（seed スクリプト等）と重なった場合の
+                # 最後の防波堤。E2000 の 500 ではなく「やり直せる」エラーで返す
+                raise SchemaVersionConflictError(doc_type) from exc
         # 戻り値は引数由来ではなく **INSERT した確定値**（引き継ぎ後）にする。
         # PUT 応答＝直後の GET 応答でないと、旧編集画面が空配列で state を上書きし、
         # 次の保存で明示 []（＝本当のクリア）を送る誘発経路になる（§4.4 / C28）。

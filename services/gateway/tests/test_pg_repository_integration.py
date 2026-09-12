@@ -696,3 +696,95 @@ def test_pg_list_documents_filters_order_and_cursor(repo) -> None:
             c.execute(
                 text("DELETE FROM documents WHERE id = ANY(:i)"), {"i": made}
             )  # pages は ON DELETE CASCADE
+
+
+def test_pg_put_schema_concurrent_saves_are_serialized() -> None:
+    """同じ doc_type への同時保存が版番号の衝突（UNIQUE 違反 → 500）にならないこと
+    （第 3 回敵対的レビュー 1）。
+
+    版番号は ``max(version)+1`` で採番するので、ロック無しでは 2 本のトランザクションが
+    同じ番号を取り ``field_schemas_tenant_id_doc_type_version_key`` に衝突する（4 スレッド
+    × 6 回の PUT で実際に 2 件が E2000 になった）。``pg_advisory_xact_lock`` で直列化して、
+    全件が成功し版番号が 1..N の連番になることを見る。
+    """
+    import threading
+
+    from sqlalchemy import text
+
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_gateway.records import SchemaFieldDef
+
+    admin = PgAdminRepository(_DSN)  # type: ignore[arg-type]
+    tenant = "ten_test"
+    doc_type = f"race_probe_{uuid.uuid4().hex[:8]}"
+    fields = [SchemaFieldDef(name="total_amount", type="money_jpy")]
+    with admin._engine.begin() as c:  # noqa: SLF001 - テスト用の前提データ投入
+        c.execute(
+            text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+            {"i": tenant, "n": "test"},
+        )
+    n_threads, n_each = 4, 5
+    made: list = []
+    errors: list[str] = []
+    guard = threading.Lock()
+
+    def worker() -> None:
+        for _ in range(n_each):
+            try:
+                rec = admin.put_schema(tenant, doc_type, fields)
+            except Exception as exc:  # noqa: BLE001 - 失敗の種類ごと記録する
+                with guard:
+                    errors.append(repr(exc))
+            else:
+                with guard:
+                    made.append(rec)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == [], errors
+        assert sorted(r.version for r in made) == list(range(1, n_threads * n_each + 1))
+        assert len({r.id for r in made}) == n_threads * n_each
+    finally:
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(
+                text("DELETE FROM field_schemas WHERE tenant_id=:t AND doc_type=:d"),
+                {"t": tenant, "d": doc_type},
+            )
+
+
+def test_pg_put_schema_source_page_count_omitted_inherits_and_none_clears() -> None:
+    """source_page_count は **省略 = 引き継ぎ / 明示 None = クリア**（第 3 回敵対的レビュー 7）。
+    Pg の SQL（UNSET の分岐）で成立することを見る。"""
+    from sqlalchemy import text
+
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_gateway.records import SchemaFieldDef
+
+    admin = PgAdminRepository(_DSN)  # type: ignore[arg-type]
+    tenant = "ten_test"
+    doc_type = f"spc_probe_{uuid.uuid4().hex[:8]}"
+    fields = [SchemaFieldDef(name="total_amount", type="money_jpy")]
+    with admin._engine.begin() as c:  # noqa: SLF001
+        c.execute(
+            text("INSERT INTO tenants (id, name) VALUES (:i,:n) ON CONFLICT (id) DO NOTHING"),
+            {"i": tenant, "n": "test"},
+        )
+    try:
+        assert admin.put_schema(tenant, doc_type, fields, source_page_count=3).source_page_count == 3
+        assert admin.put_schema(tenant, doc_type, fields).source_page_count == 3  # 省略 → 引き継ぎ
+        assert admin.put_schema(tenant, doc_type, fields, source_page_count=None).source_page_count is None
+        assert admin.get_schema(tenant, doc_type).source_page_count is None  # 保存も NULL
+        assert admin.put_schema(tenant, doc_type, fields).source_page_count is None  # NULL を引き継ぐ
+        assert admin.put_schema(tenant, doc_type, fields, source_page_count=2).source_page_count == 2
+    finally:
+        with admin._engine.begin() as c:  # noqa: SLF001
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(
+                text("DELETE FROM field_schemas WHERE tenant_id=:t AND doc_type=:d"),
+                {"t": tenant, "d": doc_type},
+            )
