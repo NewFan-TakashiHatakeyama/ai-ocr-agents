@@ -137,31 +137,23 @@ export function useSchemaSaved({
 
   // 旧版を参照したままの有効ワークフローを探す。put_schema は常に新 uuid の新版
   // INSERT だが、ワークフローの extract ノードは field_schemas.id を固定保持する。
-  // ここで見つけられるのは**直前の版**を指しているものだけで、さらに古い版は
-  // クライアントから id を辿れない。取りこぼしはサーバ側 lint の L012 が拾う。
+  // 判定はサーバ（GET /schemas/{doc_type}/stale-workflows）が**全旧版**で行う。
+  // 以前は web が「直前の版の id」だけで突合していたため、v1 固定のワークフローが
+  // v3 保存時に警告から漏れていた（第 3 回敵対的レビュー 2）。lint L012 は有効化時に
+  // しか評価されないので、既に有効なワークフローにはこのトーストが唯一の警告になる。
   const warnStaleWorkflows = useCallback(
-    async (prevSchemaId: string | null) => {
-      if (!prevSchemaId) return;
+    async (docType: string) => {
       try {
-        const { items } = await api.listWorkflows();
-        const actives = items.filter((w) => w.status === "active");
-        if (actives.length === 0) return;
-        const graphs = await Promise.all(
-          actives.map((w) => api.getWorkflow(w.id).catch(() => null)),
-        );
-        const stale = graphs.filter(
-          (g) =>
-            g !== null &&
-            g.graph_json.nodes.some(
-              (n) => n.type === "process.extract" && n.config?.schema_id === prevSchemaId,
-            ),
-        );
-        if (stale.length === 0) return;
+        const { items, latest_version } = await api.staleWorkflows(docType);
+        if (items.length === 0) return;
+        const names = items
+          .map((w) => `${w.name}（v${w.schema_version ?? "?"} を参照）`)
+          .join("、");
         push({
           kind: "warn",
           message:
-            `ワークフロー ${stale.length} 件が旧版のスキーマを参照しています` +
-            `（${stale.map((g) => g!.name).join("、")}）。` +
+            `ワークフロー ${items.length} 件が「${docType}」の旧版スキーマを参照しています` +
+            `（${names}${latest_version != null ? `。最新は v${latest_version}` : ""}）。` +
             "有効化済みワークフローは版 ID 固定のため、extract ノードのスキーマを" +
             "選び直して再有効化してください。",
         });
@@ -203,7 +195,7 @@ export function useSchemaSaved({
         // ので canRerun とは独立に出す（確定済みはサーバが skipped にする）。
         actions: [{ label: "この種別の帳票をすべて再抽出", onClick: () => rerunAll(r.docType) }],
       });
-      void warnStaleWorkflows(r.prevSchemaId);
+      void warnStaleWorkflows(r.docType);
     },
     [push, qc, readOnly, runStatus, rerun, rerunAll, warnStaleWorkflows],
   );

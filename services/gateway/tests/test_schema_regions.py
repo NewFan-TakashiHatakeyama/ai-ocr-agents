@@ -670,3 +670,44 @@ def test_legacy_reserved_field_name_is_readable_but_not_writable(ctx: SimpleName
     # 書き込みは拒む
     r = _put(ctx, {"doc_type": "legacy_memo", "fields": [{"name": "__memo", "type": "string"}]})
     assert r.status == 422 and r.json["error"]["code"] == "E1003"
+
+
+# ---------- source_page_count: 省略 = 引き継ぎ / 明示 null = クリア（第 3 回敵対的レビュー 7） ----------
+
+
+def test_source_page_count_omitted_inherits_and_explicit_null_clears(ctx: SimpleNamespace) -> None:
+    """exclude_regions は明示 [] でクリアできるのに、source_page_count は None が「引き継ぎ」の
+    印だったため NULL に戻す手段が無かった。キーの有無で区別する。"""
+    fields = [{"name": "total_amount", "label": "合計", "type": "money_jpy", "required": True, "critical": True}]
+    r = _put(ctx, {"doc_type": "invoice", "fields": fields, "source_page_count": 3})
+    assert r.status == 200 and r.json["source_page_count"] == 3
+    # キーを送らない → 引き継ぎ
+    r = _put(ctx, {"doc_type": "invoice", "fields": fields})
+    assert r.status == 200 and r.json["source_page_count"] == 3
+    assert _get(ctx)["source_page_count"] == 3
+    # 明示 null → クリア
+    r = _put(ctx, {"doc_type": "invoice", "fields": fields, "source_page_count": None})
+    assert r.status == 200 and r.json["source_page_count"] is None
+    assert _get(ctx)["source_page_count"] is None
+    # クリア後にキーを送らなければ None のまま（NULL を引き継ぐ）
+    r = _put(ctx, {"doc_type": "invoice", "fields": fields})
+    assert r.status == 200 and r.json["source_page_count"] is None
+    # 値を入れ直せる
+    r = _put(ctx, {"doc_type": "invoice", "fields": fields, "source_page_count": 2})
+    assert r.status == 200 and r.json["source_page_count"] == 2
+
+
+def test_put_schema_version_conflict_is_E1005(ctx: SimpleNamespace, monkeypatch) -> None:
+    """同時保存の版衝突（Pg の advisory lock を経由しない書き込みと重なった場合）は
+    500 ではなく E1005 で「再読み込みしてやり直す」を返す（第 3 回敵対的レビュー 1）。"""
+    from newfan_gateway.admin import SchemaVersionConflictError
+
+    def boom(*_a, **_k):
+        raise SchemaVersionConflictError("invoice")
+
+    monkeypatch.setattr(ctx.admin, "put_schema", boom)
+    r = _put(ctx, {"doc_type": "invoice", "fields": [{"name": "total_amount", "type": "money_jpy"}]})
+    assert r.status == 409, r.json
+    assert r.json["error"]["code"] == "E1005"
+    assert r.json["error"]["details"]["reason"] == "version_conflict"
+    assert "同時に保存" in r.json["error"]["message"]

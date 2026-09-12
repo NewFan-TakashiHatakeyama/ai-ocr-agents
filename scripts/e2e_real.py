@@ -3,6 +3,9 @@
 外部境界（GPU/LLM）のみ Fake、DB/キュー/チェックポイントは本番相当。
   Phase A（自動確定）: enqueue → worker → extraction_fields 保存 + status=confirmed。
   Phase B（HITL）    : 低信頼 → needs_review interrupt → 修正 resume ジョブ → confirmed。
+  Phase D（除外領域） : exclude_regions 付きスキーマ → span/セルの決定論除外 → metrics.region
+                       → 集約 ReviewItem で needs_review。テキスト項目の bbox（F-0）も保存される。
+                       （設計 region-template-editor §8 E2E。検証画面の表示は手動 QA）
 
 実行:
     DATABASE_URL=postgresql+psycopg://newfan:newfan@localhost:5433/newfan \
@@ -81,14 +84,29 @@ def _llm(system: str, user: str) -> str:
     return json.dumps({"fields": [{"name": "total_amount", "value": "128000", "span_ids": [0], "page": 1}], "tables": [], "unmapped_required": []})
 
 
-def _seed(engine, doc: str, run: str, sch: str) -> None:  # type: ignore[no-untyped-def]
+def _seed(engine, doc: str, run: str, sch: str, exclude_regions: list[dict[str, Any]] | None = None) -> None:  # type: ignore[no-untyped-def]
+    """tenant / document（1 ページ 1000×1400）/ schema / run を投入する。
+
+    exclude_regions を渡すと field_schemas.exclude_regions（migration 0007）に載せる
+    （Phase D。ページ寸法があるので除外は fail-open にならず実際に効く）。
+    """
     with engine.begin() as c:
         c.execute(text("DELETE FROM documents WHERE id = :d"), {"d": doc})
         c.execute(text("DELETE FROM field_schemas WHERE id = :s"), {"s": sch})
         c.execute(text("INSERT INTO tenants (id, name) VALUES (:i,'demo') ON CONFLICT (id) DO NOTHING"), {"i": TENANT})
         c.execute(text("INSERT INTO documents (id, tenant_id, storage_uri, mime_type, page_count, doc_type, status) VALUES (:i,:t,'s3://x','image/png',1,'invoice','processing')"), {"i": doc, "t": TENANT})
         c.execute(text("INSERT INTO pages (id, tenant_id, document_id, page_no, image_uri, width, height) VALUES (:i,:t,:d,1,'x',1000,1400)"), {"i": f"pg_{doc}", "t": TENANT, "d": doc})
-        c.execute(text("INSERT INTO field_schemas (id, tenant_id, doc_type, version, fields) VALUES (:i,:t,'invoice',:v, CAST(:f AS jsonb))"), {"i": sch, "t": TENANT, "v": abs(hash(sch)) % 1000, "f": json.dumps([{"name": "total_amount", "label": "合計金額(税込)", "type": "money_jpy", "critical": True}])})
+        c.execute(
+            text(
+                "INSERT INTO field_schemas (id, tenant_id, doc_type, version, fields, exclude_regions, source_page_count)"
+                " VALUES (:i,:t,'invoice',:v, CAST(:f AS jsonb), CAST(:x AS jsonb), 1)"
+            ),
+            {
+                "i": sch, "t": TENANT, "v": abs(hash(sch)) % 1000,
+                "f": json.dumps([{"name": "total_amount", "label": "合計金額(税込)", "type": "money_jpy", "critical": True}]),
+                "x": json.dumps(exclude_regions or [], ensure_ascii=False),
+            },
+        )
         c.execute(text("INSERT INTO extraction_runs (id, tenant_id, document_id, schema_id, status, engine_versions) VALUES (:i,:t,:d,:s,'processing', CAST('{}' AS jsonb))"), {"i": run, "t": TENANT, "d": doc, "s": sch})
 
 
@@ -121,6 +139,7 @@ def main() -> int:
     gw_queue = GwRedisQueue(REDIS)  # gateway 本番アダプタ（enqueue）
     orch = QueueOrchestratorClient(gw_queue)  # gateway → resume ジョブ発行（§4.4）
     ok = True
+    phase_ok: dict[str, bool] = {}
 
     # --- Phase A: 自動確定 ---
     print("== Phase A: 自動確定 ==")
@@ -153,6 +172,7 @@ def main() -> int:
     ok &= gw_run is not None
     ok &= any(f.name == "total_amount" and f.label == "合計金額(税込)" and f.value_normalized == "128000" for f in gw_run.fields)
     ok &= len(gw_run.tables) == 1 and bool(gw_run.tables[0].rows)
+    phase_ok["A"] = ok
 
     # --- Phase B: HITL（needs_review → resume）---
     print("== Phase B: HITL needs_review -> resume ==")
@@ -175,6 +195,7 @@ def main() -> int:
     print(f"  after resume: fields={rows2} run.status={st2}")
     saved = {r[0]: r[1] for r in rows2}
     ok &= st2 == "confirmed" and saved.get("total_amount") == "178000"
+    phase_ok["B"] = st2 == "confirmed" and saved.get("total_amount") == "178000"
 
     # --- Phase C: export worker が q.export を消費し canonical JSON を書く ---
     print("== Phase C: export worker q.export -> canonical JSON ==")
@@ -194,16 +215,75 @@ def main() -> int:
         ExportService(LocalObjectStore(outdir), WebhookSender()),
         ExportConsumer(REDIS, "q.export", "export", "export-1"),
     )
-    n_exported = ex_worker.run_once()
+    # 共有の Redis（compose）には他の run の export が溜まっていることがあり、1 回の
+    # run_once では run_a の分に届かない。キューが空になるか run_a.json が出るまで回す
+    n_exported = 0
+    run_a_json = None
+    for _ in range(500):  # 計測で消した run の export が数千件残っていることがある
+        n = ex_worker.run_once()
+        n_exported += n
+        run_a_json = next((p for p in outdir.rglob("*.json") if p.name == "run_a.json"), None)
+        if run_a_json is not None or n == 0:
+            break
     canon = list(outdir.rglob("*.json"))
-    print(f"  processed={n_exported} canonical={[str(p.relative_to(outdir)) for p in canon]}")
-    run_a_json = next((p for p in canon if p.name == "run_a.json"), None)
+    print(f"  processed={n_exported} canonical={[str(p.relative_to(outdir)) for p in canon][-5:]}")
     ok &= n_exported >= 1 and run_a_json is not None
+    phase_ok["C"] = n_exported >= 1 and run_a_json is not None
     if run_a_json is not None:
         doc = json.loads(run_a_json.read_text(encoding="utf-8"))
         print(f"  run_a canonical keys={list(doc)}")
 
+    # --- Phase D: 除外領域（decision D1/D8）+ F-0 のテキスト項目 bbox ---
+    # ページ 1000×1400 のうち左上の [0, 280]〜[130, 378] px を除外する。_layout の span では
+    # 「品名」[20,300,120,320] と「りんご」[20,340,120,360] が過半を覆われて落ち、
+    # 表の「りんご」セル [10,335,130,365] は値が空になる（列は残る。数量「3」は残る）。
+    # 「128000」[300,180,430,212] は領域外なので total_amount はそのまま取れる。
+    print("== Phase D: exclude regions -> metrics.region / needs_review / field bbox (F-0) ==")
+    stamp = {"page": 1, "rect": [0.0, 0.20, 0.13, 0.27], "label": "stamp"}
+    _seed(engine, "doc_d", "run_d", "sch_d", exclude_regions=[stamp])
+    worker_d = _worker(0.99, store, exports)  # 高信頼: 除外のセルマスクだけで needs_review になる
+    s_d = worker_d.process({"run_id": "run_d", "tenant_id": TENANT})
+    rows_d, st_d = _fields(engine, "run_d")
+    with engine.begin() as c:
+        region = c.execute(text("SELECT metrics->'region' FROM extraction_runs WHERE id='run_d'")).scalar()
+        bbox_row = c.execute(
+            text("SELECT page_no, bbox FROM extraction_fields WHERE run_id='run_d' AND field_name='total_amount'")
+        ).first()
+        trows_d = c.execute(text("SELECT rows FROM extraction_tables WHERE run_id='run_d'")).all()
+    print(f"  extract -> {s_d}; fields={rows_d} run.status={st_d}")
+    print(f"  metrics.region={region}")
+    print(f"  total_amount page/bbox={tuple(bbox_row) if bbox_row else None}")
+    d_ok = True
+    # セルマスクの集約 ReviewItem（§5.4）で needs_review に倒れる。値は消えない
+    d_ok &= s_d == "needs_review" and st_d == "needs_review"
+    d_ok &= any(r[0] == "total_amount" and r[1] == "128000" for r in rows_d)
+    # 除外の観測値（needs_review 保存時点で載っていること = §5.4 の 5 点目）
+    d_ok &= region is not None and region.get("excluded_spans") == 2 and region.get("excluded_cells") == 1
+    d_ok &= region is not None and region.get("excluded_rows") == 0 and region.get("skipped_pages_no_dims") == []
+    # F-0: テキスト項目の bbox が根拠 span から合成されて保存される
+    d_ok &= bbox_row is not None and bbox_row[0] == 1 and list(bbox_row[1]) == [300, 180, 430, 212]
+    # セルは削除ではなく空化（列ズレ防止）。行は残る
+    if trows_d:
+        cells = [cell for row in trows_d[0][0] for cell in row.values()]
+        print(f"  table rows={len(trows_d[0][0])} masked_cells={[c for c in cells if not c.get('value')]}")
+        d_ok &= len(trows_d[0][0]) == 1 and sum(1 for c in cells if not c.get("value")) == 1
+    else:
+        d_ok = False
+    # gateway 側の到達経路: region_stats（run metrics 由来）と、ページ解決済みの除外領域（スキーマ由来）
+    from newfan_gateway.db import PgAdminRepository
+    from newfan_schemas import resolve_regions
+
+    gw_run_d = PgRepository(DSN).get_run(TENANT, "run_d")
+    d_ok &= gw_run_d is not None and gw_run_d.region_stats == region
+    sch_d = PgAdminRepository(DSN).get_schema_by_id(TENANT, "sch_d")
+    applied = resolve_regions(list(sch_d.exclude_regions), 1) if sch_d else []
+    print(f"  applied_exclude_regions={applied}")
+    d_ok &= applied == [{"page_no": 1, "rect": stamp["rect"], "label": "stamp"}]
+    phase_ok["D"] = d_ok
+    ok &= d_ok
+
     print("=" * 50)
+    print("phases:", {k: ("PASS" if v else "FAIL") for k, v in phase_ok.items()})
     print("E2E RESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

@@ -299,7 +299,29 @@ class PutSchemaRequest(BaseModel):
     # すると旧経路の保存 1 回で除外設定が全滅する。引き継ぎは put_schema の内部で
     # 行うので、旧経路はコード無変更のまま安全。
     exclude_regions: Optional[list[RegionRect]] = None
+    # **省略 = 直前版から引き継ぎ / 明示 null = クリア**（§4.4）。exclude_regions と
+    # 違い「空」を表す値が無いので、キーの有無（model_fields_set）で区別する。
     source_page_count: Optional[int] = None
+
+
+class StaleWorkflowDto(BaseModel):
+    """当該 doc_type の**旧版**の schema_id を extract ノードに固定保持している有効
+    ワークフロー（設計 §4.4b / D17）。"""
+
+    id: str
+    name: str
+    status: str
+    version: int
+    #: extract ノードが指している旧版の id と、その版番号
+    schema_id: str
+    schema_version: Optional[int] = None
+
+
+class StaleWorkflowList(BaseModel):
+    doc_type: str
+    latest_schema_id: Optional[str] = None
+    latest_version: Optional[int] = None
+    items: list[StaleWorkflowDto]
 
 
 class RuleDto(BaseModel):

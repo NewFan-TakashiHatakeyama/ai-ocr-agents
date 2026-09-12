@@ -186,6 +186,13 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     enabled: Boolean(data),
     staleTime: 5 * 60_000,
   });
+  // 登録済みの種別一覧（編集導線の第 3 候補の裏付けにだけ使う。§3.1）
+  const docTypes = useQuery({
+    queryKey: ["doc-types"],
+    queryFn: () => api.listDocTypes(),
+    enabled: Boolean(data) && hasRole(me.role, "admin") && Boolean(meta.data?.doc_type),
+    staleTime: 5 * 60_000,
+  });
   const pageDims = useMemo(() => meta.data?.pages ?? [], [meta.data]);
   // ページ寸法が揃うまで領域の画面を開かせない。開けてしまうと、プリロードの
   // 非同期コールバックが**マウント時の空の寸法表**を掴んだまま既存領域を復元できず、
@@ -455,7 +462,17 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   // 編集対象の doc_type は「サーバが解決した doc_type → このセッションで作成した
   // doc_type」の順。どちらも取れないときは編集させない（空のプリロードで保存すると
   // 既存の定義を空の新版で上書きしてしまう）。
-  const editDocType = data.schema_doc_type ?? createdDocType;
+  // 第 3 候補は帳票自身の doc_type（テンプレート化時に PATCH で書き戻す。§10-18）。
+  // 作成元の帳票は run.schema_id が null のままなので、作成したブラウザ以外では
+  // schema_doc_type も created も取れず、編集導線が閉じたままだった（第 3 回敵対的
+  // レビュー 6）。登録済みの種別だけを候補にする（未登録だとプリロードが失敗して
+  // 空の保存は止まるが、押せるのに開けないボタンは出さない）
+  const docTypeOfDocument = meta.data?.doc_type ?? null;
+  const docTypeRegistered =
+    docTypeOfDocument !== null &&
+    (docTypes.data?.items ?? []).some((t) => t.doc_type === docTypeOfDocument);
+  const editDocType =
+    data.schema_doc_type ?? createdDocType ?? (docTypeRegistered ? docTypeOfDocument : null);
   // 入口条件は page.tsx:290 の「=== null の厳密比較」と同じ方針。旧 gateway 混在窓で
   // schema_id キー自体が来ない（undefined）ときは出さない側に倒す。
   const canEditRegions =
@@ -463,7 +480,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
     !readOnly &&
     pageDimsReady &&
     Boolean(editDocType) &&
-    (typeof data.schema_id === "string" || created !== null);
+    (typeof data.schema_id === "string" || created !== null || docTypeRegistered);
 
   const auto = Number(data.review_summary?.auto ?? data.fields.filter((f) => f.review_status !== "pending").length);
   const pend = Number(data.review_summary?.pending ?? pending.length);

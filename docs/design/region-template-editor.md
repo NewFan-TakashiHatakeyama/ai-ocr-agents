@@ -2,6 +2,7 @@
      ユーザー要求: テンプレート化のプレビュー画面で読取領域/除外領域をドラッグ指定。
      関連: ADR-0006, DD-01。実装着手前のレビュー対象。
      更新: 2026-09-06 第2回敵対的レビュー反映済み（C1〜C35）。
+     更新: 2026-09-12 実装完了後の第3回敵対的レビュー反映済み（末尾「付録: 第3回レビュー対応表」）。
      反映方針は末尾「付録: 第2回レビュー対応表」を参照。各節の変更は「（敵対的レビュー第2回 C#）」で追跡可能。 -->
 
 # 詳細設計書（最終版）: 領域指定テンプレート化（region hint / exclude regions）+ F-0 フィールド BBOX 修正
@@ -81,7 +82,7 @@
           (1) `ResultResponse` に `schema_doc_type: Optional[str]` を追加（サーバ側で `admin.get_schema_by_id(run.schema_id)`
               から解決。§6 の `applied_exclude_regions` と同じ 1 SELECT で取れる）、
           (2) web は `api.getSchema(docType)`（既存 `GET /v1/admin/schemas/{doc_type}` = 最新版、`routers.py:707`）で取得。
-          編集対象 doc_type の決定順は `schema_doc_type` → `createdDocType`。
+          編集対象 doc_type の決定順は `schema_doc_type` → `createdDocType` → **帳票自身の `doc_type`（`GET /documents/{id}` の `doc_type`。登録済みの種別に限る）**。3 番目は、作成元の帳票では run.schema_id が null のままで、作成したブラウザ（localStorage の控え）以外から編集導線が閉じたままになるのを防ぐ（第 3 回敵対的レビュー 6。`documents.doc_type` はテンプレート化時に PATCH で書き戻す §10-18）。
           `schema_id` は「vN → v(N+1)」の版表示と「この帳票は旧版 vK で抽出済み」注記にのみ使う。
           取得失敗（doc_type が null / スキーマ削除済み）の場合は編集ボタンを**無効化**し、空プリロードでの保存を禁止する。
         - fields / region / exclude_regions をプリロードし、**元フィールドを `base` として丸ごと保持**（§3.3。
@@ -184,7 +185,7 @@ fields = drafts.filter(d => d.include || d.base)     // base 持ちは include=f
 | 表示 | キャンバスは**ページ全体 fit（高さ contain）**。スクロール中ドラッグ問題を構造的に消す（批評 D-13）。img に ResizeObserver で scale 追随。ステージに `touch-action: none`。**ステージ内 `<img>` は `draggable={false}`**、ステージの `pointerdown` 先頭で `ev.preventDefault()`、`onDragStart` でも `preventDefault()`（ネイティブ画像ドラッグが始まると pointer capture 中でも `pointercancel` が発火し、進行中矩形が消えて up が来ない）。`.viewer-stage`/RegionCanvas に `user-select: none; -webkit-user-drag: none;` を付与（敵対的レビュー第2回 C31）。 |
 | ページ切替中の描画禁止 | `usePageImage` は**ページ変更時に url を即 null へ戻し**（現行 `DocViewer.tsx:28-42` は旧画像を表示し続けるので、この挙動は切り出し時に継承しない）、ローディング表示に切り替える。`RegionCanvas` は「表示中 img の `onLoad` 完了済み **かつ** その img が `currentPage` のもの（`naturalWidth/Height` が `pageDims[currentPage]` と一致）」のときだけ `pointerdown` を受け付け、それ以外は `pointer-events: none`。ドラッグ中にページ切替が起きたら進行中矩形を破棄。`scale` は当該ページ img の `onLoad` と ResizeObserver の両方で `img.clientWidth / pageDims[currentPage].width` から再計算し、旧ページ値を引き継がない（縦横比の違うページで矩形が誤ページ・誤座標で保存される経路を構造的に閉じる。敵対的レビュー第2回 C18）。 |
 | 署名 URL | ページ切替ごとに取得（現行方式）。403/期限切れ時は 1 回だけ自動再取得。 |
-| 保存前警告（exclude） | 除外領域が 1 件以上ある状態の保存ボタン近傍に常時表示: 「**除外領域は同じ doc_type の全帳票に適用されます。レイアウトが異なる取引先の帳票では、その位置にある実データも取り込まれません。** 領域は対象（印影等）の外接より大きくしすぎないでください」（D18 / §11-8。敵対的レビュー第2回 C19）。include 領域が 1 件も無いスキーマで exclude だけを保存しようとした場合は追加で「読取領域が 1 つも無いとレイアウト違いを検知できません。少なくとも 1 項目の読取領域を確定してください」を表示する（**422 にはしない**）。 |
+| 保存前警告（exclude） | 除外領域が 1 件以上ある状態の保存ボタン近傍に常時表示: 「**除外領域は同じ doc_type の全帳票に適用されます。レイアウトが異なる取引先の帳票では、その位置にある実データも取り込まれません。** 領域は対象（印影等）の外接より大きくしすぎないでください」（D18 / §11-8。敵対的レビュー第2回 C19）。include 領域が 1 件も無いスキーマで exclude だけを保存しようとした場合は追加で「読取領域が 1 つも無いとレイアウト違いを検知できません。少なくとも 1 項目の読取領域を確定してください」を表示する（**422 にはしない**）。 **【2026-09-12 撤回】** 後段の「読取領域が 1 つも無いと…」は出さない。読取領域を引くことを勧める側に倒すと、1 行ずれた領域で正解が壊れる（`region-measurement-2026-09-07.md`）。現行は「ヒントとして渡され、この帳票で合う文字が無ければ自動的に使われない」旨の注記のみ（v2 §1.5。第 3 回敵対的レビュー 3）。 |
 
 **受け入れ条件（オンボーディング摩擦防止・批評 product-1 / P-OD4）**:
 - 矩形を一切操作せず doc_type と項目だけ確認して保存した場合、生成されるスキーマは現行 TemplatizeSchema と完全同一（region 無し・exclude_regions は作成モードで `[]`）。手数も現行ダイアログと同等（プレビューを開く→保存の 2 クリック増以内）。
@@ -263,7 +264,7 @@ op.execute("ALTER TABLE field_schemas ADD COLUMN IF NOT EXISTS source_page_count
 
 `put_schema` は常に新版 INSERT（`db.py:678-702`）であり、旧編集画面（`web/lib/api.ts:155-159` — body は `{doc_type, fields, create}` のみ）と chat 経路（`routers.py` update_schema / `chat_tools.py`）は exclude_regions を送らない。「省略時 `[]`」にすると**旧経路の保存 1 回で除外設定が全滅する**（批評 tech-1 / scope A-1）。よって:
 
-- `PutSchemaRequest.exclude_regions: Optional[list[RegionRect]] = None`、`source_page_count: Optional[int] = None`
+- `PutSchemaRequest.exclude_regions: Optional[list[RegionRect]] = None`、`source_page_count: Optional[int] = None`（**source_page_count は「キーを送らない = 引き継ぎ / 明示 null = クリア」**。`exclude_regions` と違って「空」を表す値が無いので `model_fields_set` でキーの有無を見る。リポジトリ側は `UNSET` 印（`newfan_gateway.sentinels`）で受ける。第 3 回敵対的レビュー 7）
 - `admin.py` Protocol: `put_schema(tenant_id, doc_type, fields, exclude_regions=None, source_page_count=None)`
 - Pg 実装（`db.py` put_schema）: 引数が `None` のとき、当該 doc_type の現行最新版から `exclude_regions` / `source_page_count` を SELECT してコピーし INSERT。明示 `[]` のみクリア。InMemory 実装（`admin.py:126`）も同セマンティクス。
 - **引き継ぎ用 SELECT の実装制約（敵対的レビュー第2回 C22）**: 版採番と**同一トランザクション内**で `WHERE tenant_id=:t AND doc_type=:d ORDER BY version DESC LIMIT 1`（`get_schema` と同一の版選択）により行う。`ORDER BY` を落とすと v1 の設定が復活して v2 以降の設定が消える、という InMemory では検出できない事故になる。
@@ -277,7 +278,7 @@ op.execute("ALTER TABLE field_schemas ADD COLUMN IF NOT EXISTS source_page_count
 
 - **テンプレート化 / 編集モードで保存した v2・v3 は、既存ワークフローに pin された v1 の id からは決して引かれない。** 運用者は「保存したのに印影が消えない／領域を直したのに効かない」を無音で踏む（`lint.py:204` の L009 は「存在するか」しか見ないので警告も出ない）。これは region に固有の問題ではなく、既存の項目編集と同じ性質である。
 - **v1 の対処（可視化のみ）**:
-  1. **保存成功トーストの警告**: 当該 doc_type の旧版 id を extract ノードに持つ active ワークフローを `listWorkflows` の `graph_json` 走査（web 側で可能・新 API 不要）で検出し、「ワークフロー N 件が旧版を参照しています」+ 各ワークフローへのリンクを出す。文言は「手動抽出・分類推定には最新版が使われます。有効化済みワークフローは版 ID 固定のため、extract ノードのスキーマを選び直して再有効化してください」。
+  1. **保存成功トーストの警告**: 当該 doc_type の旧版 id を extract ノードに持つ active ワークフローを **`GET /v1/schemas/{doc_type}/stale-workflows`（サーバが全旧版を対象に判定。第 3 回敵対的レビュー 2 で web 側の「直前の版のみ」`graph_json` 走査から改めた）**で検出し、「ワークフロー N 件が旧版を参照しています」+ 各ワークフローへのリンクを出す。文言は「手動抽出・分類推定には最新版が使われます。有効化済みワークフローは版 ID 固定のため、extract ノードのスキーマを選び直して再有効化してください」。
   2. **lint L012（warning）**: 「`extract.schema_id` が当該 doc_type の最新版ではありません（v1 / 最新 v3）」。`schema_exists` と同型の注入関数 `schema_is_latest` を gateway から渡す（`routers.py:901` の呼び出しに 1 引数追加）。**error ではなく warning**（既存ワークフローの有効化を塞がない）。
 - **v2 候補（本件スコープ外・§10-16）**: (a) `put_schema` 成功後に同テナント・同 doc_type の旧版を参照する `workflows` の extract ノードを新版へ自動付け替え（`workflows_repo.repoint_schema(tenant, doc_type, old_ids, new_id)`、active/draft 双方）、(b) `ExtractConfig` に `doc_type` を追加し実行時に最新版を解決（`schema_id` と排他）。いずれも「有効化済みワークフローの挙動が管理者の知らないところで変わる」副作用があるため、実測とレビューを経て別チケットで判断する。
 
@@ -476,13 +477,14 @@ ADR-0006 追補（`docs/adr/`）に以下を**正確に**書く（批評 tech-5 
 
 | API | 変更 |
 |---|---|
-| `PUT /v1/admin/schemas`（`routers.py:721`） | `PutSchemaRequest.fields[].region?: RegionRect`、`exclude_regions?: RegionRect[] \| null`（**null=引き継ぎ / []=クリア**）、`source_page_count?: int \| null`（同セマンティクス）。RegionRect 違反・include の page:null は 422。create:true の E1005 既存挙動は不変。 |
+| `PUT /v1/admin/schemas`（`routers.py:721`） | `PutSchemaRequest.fields[].region?: RegionRect`、`exclude_regions?: RegionRect[] \| null`（**null=引き継ぎ / []=クリア**）、`source_page_count?: int \| null`（**省略=引き継ぎ / 明示 null=クリア**。第 3 回敵対的レビュー 7）。RegionRect 違反・include の page:null は 422。create:true の E1005 既存挙動は不変。 |
 | `GET /v1/admin/schemas`（`_schema_dto`） | `SchemaDto` に `exclude_regions: RegionRect[]`、`source_page_count?: int`、`fields[].region?` を追加。**応答忠実性がこの機能の生命線**（extra="ignore" による往復全滅の防止）。 |
 | `GET /v1/documents/{id}`（`routers.py:164` / `db.py:144`） | `DocumentMeta` に **`pages: list[PageDim] = []`（既定値あり）**（`{page_no, width, height}`）を追加。未訪問ページの正規化に必須（批評 tech-4。草案 §8.10 は撤回）。**`DocumentMeta` は一覧 `GET /v1/documents`（`routers.py:143`）と共用のため、埋めるのは単体取得 `get_document`（`routers.py:170`）のみ**で、既存の `repo.get_pages(tenant_id, document_id)`（`db.py:159`）を 1 回呼ぶ（追加 SELECT 1 回）。一覧は `pages` を埋めず空のまま返す（**N+1 回避**。敵対的レビュー第2回 C25）。web 側も `pages?: PageDim[]` の任意型とし、`pageDims` は **`GET /documents/{id}` の応答からのみ**構築する。 |
 | result API（`ResultResponse`, `dto.py:69` / `db.py:294,590`） | `region_stats: Optional[dict] = None`（`(row.metrics or {}).get("region")` — fallback_pages と同パターン。**`needs_review` 保存時点で非 None になること**が §3.5 バッジの前提 — §5.4 の save_result 5 点目）。<br>`applied_exclude_regions: list[ResolvedRegion] = []` — **RegionRect 生返しではなく、サーバ側でページ解決済みの `{page_no: int, rect, label?}` 配列**（敵対的レビュー第2回 C16）。理由: DocViewer は `pageNo` しか持たず `page_count` を持たないため、`"last"` / `null` の解決を web に再実装させると最終ページ限定の承認印除外が全ページに描かれる／描かれない事故になる。解決規則は §5.1 `resolve_page` と同一（`"last"` → page_count、`null` → 1..page_count に展開、page_count 超の int は落とす）。共通化のため `resolve_page` を `newfan_schemas` に置き orchestrator / gateway 双方から参照する。<br>**取得経路**: `db.py` の 1 SELECT 案は撤回し、`routers.get_result` に `admin: AdminRepository = Depends(get_admin)` を追加して `admin.get_schema_by_id(tenant, run.schema_id)` の `exclude_regions` を採る。Pg/InMemory 両実装に既存メソッドがあるため経路が一本化され、「InMemory では常に `[]` が返るので UI 実装者が本番との差異に気づけない」盲点が消える。`page_count` は `repo.get_pages()` の件数から取る。スキーマレス run は空。<br>`schema_doc_type: Optional[str] = None` — `run.schema_id` から `get_schema_by_id` で解決した doc_type（編集モードのプリロード起点。§3.1 / 敵対的レビュー第2回 C9）。上記 `get_schema_by_id` 呼び出しと同一 SELECT で取れる。 |
 | `POST /v1/documents/{id}/extract`（`routers.py:350-355`） | **`ExtractRequest` に `supersede_review: bool = false` を追加**（敵対的レビュー第2回 C2/C3/C6）。true のときのみ競合判定を `repo.has_active_run`（`processing` + `needs_review`、`db.py:173-179`）から `has_processing_run` に切り替える（`chat_tools.rerun_extract` と同一意味論）。既定 false で外部連携の二重投入防止は不変。true で受理した場合、既存の `needs_review` run を **`superseded`** に遷移させる。`confirmed` / `exported` run を持つ帳票は従来どおり E1005 で拒否（確定済み結果の無警告置換防止）。**Phase 2 までに入れる**（Phase 3 の UI 単独先行は 409 トーストになる）。 |
 | lint（`routers.py:901` / `lint.py`） | **L012（warning）「`extract.schema_id` が当該 doc_type の最新版ではありません（v1 / 最新 v3）」を追加**（§4.4b / D17。敵対的レビュー第2回 C5）。`schema_exists` と同型の注入関数 `schema_is_latest` を gateway から渡す（呼び出しに 1 引数追加）。**error ではなく warning**（既存ワークフローの有効化を塞がない）。 |
 | ページ画像 API | 変更なし（既存の署名 URL 流用）。 |
+| **`GET /v1/schemas/{doc_type}/stale-workflows`（admin・新設）** | 当該 doc_type の**旧版**（最新版以外の全版）の id を `process.extract.config.schema_id` に持つ **active** ワークフローを `{items:[{id,name,status,version,schema_id,schema_version}], latest_schema_id, latest_version}` で返す。web は保存成功後にこれを呼んで警告する（§4.4b）。lint L012 は有効化時にしか評価されないため、既に有効なワークフローにはこれが唯一の警告経路（第 3 回敵対的レビュー 2） |
 
 web 側: `web/lib/types.ts` に `RegionRect` / `ResolvedRegion` / `PageDim`、`SchemaFieldDto.region?`、`SchemaDto.exclude_regions?/source_page_count?`、`DocumentMeta.pages?`（**任意・一覧では空**）、`ResultResponse.region_stats/applied_exclude_regions/schema_doc_type`。`web/lib/api.ts` の `putSchema` を `(docType, fields, opts?: {create?, excludeRegions?, sourcePageCount?})` に拡張（省略時はキー自体を送らない = 引き継ぎ）。さらに `api.getSchema(docType)`（既存 `GET /v1/admin/schemas/{doc_type}` = 最新版、`routers.py:707`）と `api.extract(id, {schema_id, supersede_review})` を追加し、`ExtractStart.pollJob` を **`web/lib/useExtractJob.ts`** に切り出して再抽出ボタンと共有する（§3.1。敵対的レビュー第2回 C3/C9/C11）。`TemplatizeSchema` の `onCreated` は `{docType, schemaId}` を渡す形に変更する（再抽出の `schema_id` 明示送信と編集モードの入口条件に必要 — C11 / C30）。
 
@@ -535,7 +537,7 @@ web 側: `web/lib/types.ts` に `RegionRect` / `ResolvedRegion` / `PageDim`、`S
 
 ### E2E / 手動
 
-- `scripts/e2e_real.py`: region/exclude 付きスキーマで抽出 → 検証画面でテキストフィールド BBOX 表示・除外バッジ表示。
+- `scripts/e2e_real.py`: region/exclude 付きスキーマで抽出 → 検証画面でテキストフィールド BBOX 表示・除外バッジ表示。 **【2026-09-12 実装】** Phase D（exclude_regions 付きスキーマで worker を通し、`metrics.region`（excluded_spans / excluded_cells / skipped_pages_no_dims）・集約 ReviewItem による `needs_review`・F-0 の bbox・セルの空化（列は残る）・`resolve_regions` によるページ解決済み除外領域を assert）。検証画面の表示は手動（AWS 実機 QA で確認済み）。第 3 回敵対的レビュー 4。
 - web: tsc + 手動チェックリスト。既存項目（描く / ゴースト確定 / 置換 / 消す（input フォーカス中の Delete で矩形が消えないこと）/ モード切替 / 全ページタブ / "last"・全ページ exclude / 署名 URL 失効後の再取得 / `.tpl-overlay` 存在下で Ctrl+Enter 無効 / **矩形を触らず保存 → 現行と同一スキーマ** / 編集モードで既存領域のプリロードと新版警告）に、第 2 回レビューで以下を追加する:
   - **画像上（ゴースト・確定矩形の外）から 20px 以上ドラッグして矩形が確定すること**（ネイティブ画像ドラッグで pointercancel にならない。C31）
   - **ページタブ切替直後の即ドラッグで矩形が生成されないこと**／縦横比の異なるページへ切替直後のドラッグが旧ページ座標で保存されないこと（C18）
@@ -611,7 +613,7 @@ web 側: `web/lib/types.ts` に `RegionRect` / `ResolvedRegion` / `PageDim`、`S
 3. **pred_html 経由のセル text 汚染（被覆率 0.5 未満）は決定論では消えない**（§5.1 既知の限界）。頻度が高ければ v2 で「セル text から除外領域内 span 相当部分を差し引く」検討。
 4. **fit 表示での小フィールド精密指定**: A4@250dpi を fit すると scale ≈ 0.35、最小矩形 8 表示 px ≈ 23 画像 px。日付・単価セル等の指定はやや粗い。ズーム要望が出たら v2。
 5. **checkpoint / LayoutBlock.content への除外テキスト残存**は保証外として ADR に明記済み。テナントから「checkpoint も消せ」要求が出た場合は別途スクラブ設計が要る。
-6. **編集モードの同時編集**: put_schema は楽観ロックが無く、admin 2 人が同時に編集モードで保存すると後勝ちの新版が積まれる（既存挙動と同じ）。version 表示 + 保存時警告で v1 は許容。
+6. **編集モードの同時編集**: put_schema は楽観ロックを持たず、同時保存は**順に**新版として積まれる（後勝ち）。版番号の採番（`max(version)+1`）は `pg_advisory_xact_lock(hashtext('field_schemas:' || tenant || ':' || doc_type))` で直列化する（第 3 回敵対的レビュー 1: ロック無しでは `UNIQUE (tenant_id, doc_type, version)` に衝突した側が E2000（500）になっていた。4 スレッド × 6 回の PUT で 2 件が再現）。ロックを経由しない書き込みと重なった場合は `SchemaVersionConflictError` → E1005（再読み込みしてやり直す）。version 表示 + 保存時警告で v1 は許容。
 7. **shadow → enforce の運用移行**: フラグ on のタイミング・テナント別段階適用の要否は実測後に決める。
 8. **exclude の適用単位が doc_type（スキーマ版）であることの副作用**（敵対的レビュー第2回 C19 / D18）: 現行の分類は宣言 doc_type とファイル名語彙のみで取引先を区別できないため、取引先 A の帳票で描いた「承認印」矩形が、同じ `doc_type=invoice` を使う取引先 B/C の帳票にも適用され、その座標にある印字値（合計・発行者・登録番号）の span が除去され得る。span 数件では §5.4 の 20% 条件にもセル条件にも掛からず、grounding 喪失で値が null になっても現状は「要確認」に出ない（→ Phase 0 の `review_status` 修正と「除外 span > 0 かつ required/critical が null」の集約 ReviewItem で最低線を張る）。運用者の回避策が「取引先ごとに doc_type を分ける」しかない状態は製品を座標テンプレート必須品へ退行させるため、**v2 でレイアウト単位のスコープ化（取引先 / レイアウト ID での適用条件、または本文分類の導入後に不一致 run で exclude を降格）を検討する**。v1 は保存前警告 + オーバーレイ + ReviewItem による検知に留める。
 9. **ワークフローの版固定（D17 / §4.4b）**: v1 は可視化のみで、有効化済みワークフローは旧版の除外設定を使い続ける。運用者が警告と lint L012 を無視した場合「保存したのに印影が消えない」は残る。自動 repoint を入れるかは実運用での踏み方を見てから判断する。
@@ -705,3 +707,22 @@ web 側: `web/lib/types.ts` に `RegionRect` / `ResolvedRegion` / `PageDim`、`S
 | C33 | info | 「region フィールドの過半 mismatch」判定は n=1〜2 の典型スキーマで per-field レビューを構造的に出せない | 対処: `REGION_GUARD_MIN_FIELDS_FOR_LAYOUT`（初期値 3）を導入し、n ≤ 2 では doc レベル判定を行わず per-field ReviewItem を積む（値を捨てない前提でレビュー側に倒す）。「過半」を strict 定義に明確化。n の分布も shadow 実測対象に追加 | §5.5-4/-5, §8, §9 Phase 5, §11-1 |
 | C34 | info | C26 と同旨（既存テスト seed が寸法を持たない） | 対処: C26 と同一。`test_exclude_noop_when_page_dims_missing` と、test_worker で width/height 有り・無し両方を seed する方針を追加 | §4.6, §5.2, §5.5, §8 |
 | C35 | info | タイブレーク「最小 span_id のページ」は VL 併存時に読み順を表さない | 対処: タイブレークを **`(page, span_id)` の辞書順**に変更（第一キーを page）。`vl_fallback` が `max(span_id)+1` から採番する事実を根拠として明記。テスト名を `test_field_bbox_tie_breaks_by_min_page_then_span_id` に改名し VL 併存ケースを追加 | §7.2-2, §8 |
+
+---
+
+## 付録: 第3回敵対的レビュー対応表（2026-09-12、実装完了後の照合）
+
+設計書の要求（D1〜D18・§3〜§9・F-0 §7）を実装とテストに 1 対 1 で突き合わせた結果、
+未対応・逸脱は 7 件。値を壊す・データを無音で消す種類の欠陥は無かった。
+
+| # | 重大度 | 指摘 | 対応 | 反映箇所 |
+|---|---|---|---|---|
+| 1 | Medium | 同じ doc_type の同時保存で版番号が UNIQUE に衝突し 500（設計 §11-6 は「後勝ち」と記述。実機で再現） | 対処: `put_schema` を advisory lock で直列化。衝突は `SchemaVersionConflictError` → E1005。実 Pg の同時保存テスト（4 スレッド × 5 回が 1..20 の連番になる） | §11-6、`db.py` / `admin.py` / `sentinels.py`、`test_pg_repository_integration.py`、`test_schema_regions.py` |
+| 2 | Medium | 旧版参照ワークフローの警告が「直前の版」しか検出せず、v1 固定のワークフローが v3 保存時に漏れる。L012 は有効化時にしか走らない | 対処: `GET /schemas/{doc_type}/stale-workflows`（全旧版・active）を新設し、web の保存後トーストはそれを使う | §4.4b、§6、`routers.py`、`useSchemaSaved.ts`、`test_schema_stale_workflows.py` |
+| 3 | Low | §3.4 の 2 つ目の警告（読取領域が無いと…）は実装で意図的に外されているが設計書が未更新 | 対処: §3.4 に撤回と理由を明記 | §3.4 |
+| 4 | Low | §8 の E2E（region/exclude）が `scripts/e2e_real.py` に無い | 対処: Phase D を追加（除外・metrics.region・needs_review・F-0 bbox・セル空化・ページ解決） | §8、`scripts/e2e_real.py` |
+| 5 | Low | RegionCanvas の縮尺追随が ResizeObserver ではなく、ウィンドウサイズが変わらないコンテナ幅変化の後の 1 ドラッグが古い縮尺で確定し得る | 対処: img に ResizeObserver、pointerdown で測り直し、座標変換は ref の最新値 | `RegionCanvas.tsx` |
+| 6 | Low | 作成元の帳票から編集できるのが作成したブラウザだけ（run.schema_id が null のまま） | 対処: 帳票自身の `doc_type`（登録済み）を編集対象の第 3 候補に | §3.1、`page.tsx` |
+| 7 | Low | `source_page_count` を NULL に戻す手段が無い（None が引き継ぎの印） | 対処: 省略=引き継ぎ / 明示 null=クリア（`UNSET` 印、`model_fields_set`） | §4.4、§6、`test_schema_regions.py`、`test_pg_repository_integration.py` |
+
+反証して問題なしと判断したもの: `has_processing_run` が `queued` を見ない（run は作成時 `processing`）、`superseded` を読む経路の棚卸し（§11-12）、編集モードでの英字始まりでない既存項目名（サーバは予約名だけ拒む）、`source_page_count` が None のときの位置ガードの空間判定（§5.5-2 の文言どおり）、markdown の drop 条件と §5.7 (g) の整合、背景 pointerdown が行選択を保つこと。
