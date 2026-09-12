@@ -3,7 +3,8 @@
 固定する契約:
 - bbox の**中心**が上端 25% に入る span だけ（辺ではなく中心。境界跨ぎで安定）
 - 読み順は「行を上から、行内は左から」（OCR の返却順に依存しない）
-- 上限 40 span / 600 文字
+- 上限 40 span / 600 文字。文字数の切れ目が英数語の途中なら、その断片は落とす
+  （"orderly" → "order" の誤一致を作らない）
 - 寸法不明（height None/0）→ 空（呼び出し側はファイル名だけで分類する）
 - bbox 無し・壊れた bbox・空文字の span は数えない
 """
@@ -11,9 +12,12 @@
 from newfan_workflow import (
     TITLE_ZONE_MAX_CHARS,
     TITLE_ZONE_MAX_SPANS,
+    build_candidate,
+    classify_text,
     title_zone_spans,
     title_zone_text,
 )
+from newfan_workflow.classify import DOC_TYPE_SYNONYMS
 
 H = 1400  # FakeRasterizer と同じ A4 相当（上端 25% = 350px 未満）
 
@@ -56,6 +60,39 @@ def test_文字数の上限で切る():
     got = title_zone_text(spans, page_height=H)
     assert len(got) == TITLE_ZONE_MAX_CHARS
     assert got.startswith("あ")
+
+
+def _all_cands():
+    return [build_candidate(dt) for dt in DOC_TYPE_SYNONYMS]
+
+
+def test_文字数の切れ目が英数語の途中なら断片を落とす():
+    # 594 文字 + 空白 + "orderly" = 602 文字。600 で切ると "order|ly" になり、語境界
+    # 付きの "order" が purchase_order に 1 領域で一致する（元の本文では一致しない。
+    # レビューで実測: 0.667 のサジェストに「order」が表題部に一致 と出た）。
+    spans = [_span("あ" * 594, 10, 30), _span("orderly", 40, 60)]
+    full = " ".join(s["text"] for s in spans)
+    assert len(full) == TITLE_ZONE_MAX_CHARS + 2
+    assert classify_text(text=full, filename="0001.pdf", candidates=_all_cands()).doc_type is None
+
+    got = title_zone_text(spans, page_height=H)
+    assert got == "あ" * 594 + " "  # 断片 "order" を落とす
+    assert classify_text(text=got, filename="0001.pdf", candidates=_all_cands()).doc_type is None
+
+
+def test_文字数の切れ目が英数語の途中でも全角英数は同じ扱い():
+    # NFKC で ASCII になる全角「ｏｒｄｅｒｌｙ」も classify_text では "orderly" なので、
+    # 切れ目の判定も同じ（断片を落とす）
+    spans = [_span("あ" * 594, 10, 30), _span("ｏｒｄｅｒｌｙ", 40, 60)]
+    assert title_zone_text(spans, page_height=H) == "あ" * 594 + " "
+
+
+def test_文字数の切れ目が語境界なら切った位置をそのまま使う():
+    # "order" の直後が空白（語境界）で切れる → 元の本文でも "order" は一致するので落とさない
+    spans = [_span("あ" * 594, 10, 30), _span("order", 40, 60), _span("x", 70, 90)]
+    got = title_zone_text(spans, page_height=H)
+    assert got == "あ" * 594 + " order"
+    assert len(got) == TITLE_ZONE_MAX_CHARS
 
 
 def test_寸法不明なら空_ファイル名のみに倒す():

@@ -10,6 +10,7 @@ import pytest
 pytest.importorskip("langgraph.checkpoint.memory")
 
 from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
+from newfan_workflow import title_zone_text  # noqa: E402
 
 from newfan_orchestrator.consumer import InMemoryQueueConsumer  # noqa: E402
 from newfan_orchestrator.workflow_graph import RunnerDeps  # noqa: E402
@@ -76,8 +77,10 @@ def _run(graph: dict[str, Any], *, fields: Optional[dict[str, Any]] = None,
     if original_name is not None:
         result["original_name"] = original_name
     if page1_spans is not None:
-        result["page1_spans"] = page1_spans
-        result["page1_height"] = page1_height
+        # 本番の load_extract_result と同じく、span は event に載せず文字列にして渡す
+        # （Pg 実装は test_workflow_runner_pg で固定）。テストは幾何（どの y が
+        # 上端 25% に入るか）で書けるよう span のまま受ける
+        result["title_text"] = title_zone_text(page1_spans, page_height=page1_height)
     store.seed_extract_result("run_wf_1", result)
     status = runner.process({
         "type": "resume", "tenant_id": TENANT, "workflow_run_id": "wfrun_p8",
@@ -277,6 +280,8 @@ def test_classifyは表題部が別種別を確信すれば取り違えを止め
 def test_classifyは表題と食い違うファイル名1語を優先する() -> None:
     # ファイル名は発注書（3.0）、表題は「御見積書」（1.0）→ purchase_order 0.75。
     # 対象は invoice のみなので halt（従来どおりファイル名で検知。表題は反転させない）。
+    # purchase_order も quotation も対象外で同じ文言になるので、エラーに埋め込まれる
+    # 実効種別まで見る（表題が反転させた quotation ではないこと）。
     status, store, _ = _run(
         _invoice_only_halt(),
         doc_type="invoice",
@@ -284,7 +289,94 @@ def test_classifyは表題と食い違うファイル名1語を優先する() ->
         page1_spans=[_sp("御見積書", 60, 110)],
     )
     assert status == "failed"
-    assert "分類対象外" in store.runs["wfrun_p8"]["error"]["message"]
+    msg = store.runs["wfrun_p8"]["error"]["message"]
+    assert "分類対象外" in msg
+    assert "'purchase_order'" in msg
+    assert "quotation" not in msg
+
+
+# ---- 表題部だけの証拠は、表題部に語がある宣言種別を反転させない（レビュー実測, 2026-09-12） ----
+
+
+def test_classifyは請求書ヘッダの納品参照3行で請求書を止めない() -> None:
+    # 卸の請求書ヘッダ: 「御請求書」「請求No.」「請求日」に「納品日」「納品先」「納品No.」が
+    # 並ぶ。DOC_TYPE_SYNONYMS に裸の「納品」はあるが裸の「請求」は無いので
+    # delivery_note 3.0（飽和） vs invoice 1.0 → 0.75 でゲート閾値にちょうど達し、
+    # 宣言種別 invoice を上書きして halt していた。宣言種別の語が表題部にある
+    # （invoice 1 領域）ので、表題部だけの証拠では上書きしない → invoice で通す。
+    status, store, _ = _run(
+        _invoice_only_halt(),
+        doc_type="invoice",
+        original_name="0001.pdf",
+        page1_spans=[
+            _sp("御請求書", 60, 110, x0=400, x1=600),
+            _sp("株式会社ABC 御中", 150, 180),
+            _sp("請求No. 1234", 150, 180, x0=700, x1=950),
+            _sp("請求日 2026/8/31", 190, 220, x0=700, x1=950),
+            _sp("納品日 2026/8/20", 230, 260, x0=700, x1=950),
+            _sp("納品先 東京倉庫", 270, 300, x0=700, x1=950),
+            _sp("納品No. D-9", 310, 340, x0=700, x1=950),
+        ],
+    )
+    assert status == "succeeded"
+    assert store.node_runs[("wfrun_p8", "c1")]["output"] == {"doc_type": "invoice", "known": True}
+
+
+def test_classifyは発注書ヘッダの見積参照3行で発注書を止めない() -> None:
+    # 発注書の右上に「御見積書No.」「見積日」「見積有効期限」→ quotation 3.0 vs
+    # purchase_order 1.0 → 0.75。同じ理由で宣言種別 purchase_order を守る。
+    g = _graph(
+        [*_extract_nodes(),
+         {"id": "c1", "type": "process.classify",
+          "config": {"doc_types": ["purchase_order"], "on_unknown": "halt"}}],
+        [{"from": "t1", "to": "x1"}, {"from": "x1", "to": "c1"}],
+    )
+    status, store, _ = _run(
+        g,
+        doc_type="purchase_order",
+        original_name="0001.pdf",
+        page1_spans=[
+            _sp("発注書", 60, 110, x0=400, x1=600),
+            _sp("御見積書No. Q-1", 150, 180, x0=700, x1=950),
+            _sp("見積日 2026/8/1", 190, 220, x0=700, x1=950),
+            _sp("見積有効期限 2026/9/30", 230, 260, x0=700, x1=950),
+        ],
+    )
+    assert status == "succeeded"
+    assert store.node_runs[("wfrun_p8", "c1")]["output"] == {
+        "doc_type": "purchase_order", "known": True,
+    }
+
+
+def test_classifyは宣言種別の語が表題部に無ければ表題部だけでも取り違えを止める() -> None:
+    # 上の規則の境界: 納品書が請求ワークフローに紛れ、表題部に請求の語が一切無い
+    # → delivery_note 3.0 vs invoice 0 → 1.0 で従来どおり halt する（検知は保つ）。
+    status, store, _ = _run(
+        _invoice_only_halt(),
+        doc_type="invoice",
+        original_name="0001.pdf",
+        page1_spans=[
+            _sp("納品書", 60, 110, x0=400, x1=600),
+            _sp("納品先 東京倉庫", 150, 180, x0=700, x1=950),
+            _sp("納品日 2026/8/20", 190, 220, x0=700, x1=950),
+        ],
+    )
+    assert status == "failed"
+    assert "'delivery_note'" in store.runs["wfrun_p8"]["error"]["message"]
+
+
+def test_classifyはファイル名に証拠があれば表題部の自種別語があっても上書きする() -> None:
+    # 規則は「表題部だけの証拠」に限る。ファイル名が納品書なら、表題部に「御請求」が
+    # あっても従来どおりファイル名（人が付けた名前）で検知する:
+    # delivery_note 3.0+1.0 vs invoice 1.0 → 0.8 → halt。
+    status, store, _ = _run(
+        _invoice_only_halt(),
+        doc_type="invoice",
+        original_name="納品書_ABC_0001.pdf",
+        page1_spans=[_sp("納品書", 60, 110), _sp("御請求先 株式会社ABC", 150, 180)],
+    )
+    assert status == "failed"
+    assert "'delivery_note'" in store.runs["wfrun_p8"]["error"]["message"]
 
 
 def test_classifyはページ寸法が無ければ表題部を使わない() -> None:

@@ -15,6 +15,8 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Optional, Protocol
 
+from newfan_workflow.title_zone import title_zone_text
+
 EnqueueFn = Callable[[str, dict[str, Any]], None]
 
 # ワークフローが起こした抽出 Run の冪等キー（extraction_runs.options 内）。
@@ -100,9 +102,14 @@ class WorkflowRunStore(Protocol):
         """抽出完了 notify を enrich する（runner が resume の event に merge する）。
 
         キー: doc_type / original_name / fields / run_confidence に加えて、
-        classify ゲートの表題部信号（ADR-0008）の材料 ``page1_spans``
-        （run_spans の 1 ページ目。行が無ければ空）と ``page1_height``
-        （pages.height。無ければ None → 表題部は使わない）。
+        classify ゲートの表題部信号（ADR-0008）``title_text``。run_spans の
+        1 ページ目と pages.height から **ここで** title_zone_text を掛けた
+        ≤600 文字の文字列であり、span そのものは返さない。event は runner が
+        Command(resume=event) に載せ、LangGraph が checkpoint_writes に
+        __resume__ として永続化する（1 ページ目 400 span で 1 回 33KB、
+        resume ごとに 2 行。整理は無い）ため、span を event に載せると
+        run ごとに恒久的に肥大する。行が無い・寸法が無い場合は空文字
+        （呼び出し側はファイル名だけで分類する）。
         """
         ...
 
@@ -467,8 +474,12 @@ class PgWorkflowRunStore:
             "fields": fields,
             # run 全体の確度は最弱フィールドで代表する（保守的。値が無ければ None → 条件 False）
             "run_confidence": min(confs) if confs else None,
-            "page1_spans": list(page1_spans or []),
-            "page1_height": head[2] if head else None,
+            # 表題部は span を event に載せず、ここで文字列（≤600 文字）にしてから返す
+            # （Protocol の docstring。span は checkpoint_writes の __resume__ に
+            # 恒久的に残る）。gateway の classify と同じ純関数（ADR-0008）。
+            "title_text": title_zone_text(
+                list(page1_spans or []), page_height=head[2] if head else None
+            ),
         }
 
     def get_webhook_connection(self, tenant_id, connection_id):

@@ -24,6 +24,7 @@ nullable であり、寸法不明のまま「上端」を決めることはで�
 from __future__ import annotations
 
 import statistics
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
@@ -116,12 +117,34 @@ def title_zone_text(
 ) -> str:
     """表題部の span を空白で連結した文字列（classify_text の text に渡す形）。
 
-    上限 ``max_chars`` で切る。切れ目で語が欠けても、欠けた語は単に一致しない
-    だけで誤った一致は生まない。
+    上限 ``max_chars`` で切る。切れ目が**英数語の途中**に掛かったときは、その語の
+    断片を落とす。classify_text の英数語彙は語境界付き（``order`` が ``border`` に
+    埋没ヒットしない）なので、``orderly`` を ``order|ly`` で切ると元の本文には無い
+    一致が生まれる（``orderly`` → purchase_order 1 領域）。日本語の語彙は境界を
+    要求しないため、切れて残った前半（「見積書」→「見積」）が一致するなら元の語も
+    同じ候補に一致しており、誤った一致にはならない。
     """
     joined = " ".join(
         title_zone_spans(
             spans, page_height=page_height, zone_ratio=zone_ratio, max_spans=max_spans
         )
     )
-    return joined[:max_chars]
+    if len(joined) <= max_chars:
+        return joined
+    cut = joined[:max_chars]
+    if _is_word_char(joined[max_chars]) and _is_word_char(cut[-1]):
+        end = len(cut)
+        while end > 0 and _is_word_char(cut[end - 1]):
+            end -= 1
+        cut = cut[:end]
+    return cut
+
+
+def _is_word_char(ch: str) -> bool:
+    """classify_text の英数語彙が「語の内側」と見なす文字か（NFKC 後の [a-z0-9]）。
+
+    全角英数（「ｏｒｄｅｒ」）も NFKC で ASCII になるので同じ扱い。それ以外
+    （かな・漢字・記号・空白）は語境界。
+    """
+    n = unicodedata.normalize("NFKC", ch)
+    return bool(n) and n.isascii() and n.isalnum()

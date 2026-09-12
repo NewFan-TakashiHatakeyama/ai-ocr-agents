@@ -286,17 +286,19 @@ def test_load_extract_resultは実DDLからoriginal_nameとfieldsを返す() -> 
                 " VALUES (:i,:t,:r,'total_amount','136998',NULL,0.97)"),
                 {"i": f"fld_{uuid.uuid4().hex[:12]}", "r": run_id, "t": tenant})
 
-        # pages / run_spans が無い段階（0008 より前の run と同じ観測）: 表題部の材料は空
+        # pages / run_spans が無い段階（0008 より前の run と同じ観測）: 表題部は空
         got = store.load_extract_result(tenant, run_id)
         assert got["doc_type"] == "invoice"
         assert got["original_name"] == "請求書_ABC_2026.pdf"
         assert got["fields"]["total_amount"]["value"] == "136998"
         assert got["run_confidence"] == pytest.approx(0.97, abs=1e-6)
-        assert got["page1_spans"] == []
-        assert got["page1_height"] is None
+        assert got["title_text"] == ""
+        # span は event（＝checkpoint_writes の __resume__）に載せない
+        assert "page1_spans" not in got and "page1_height" not in got
 
         # 1 ページ目の寸法と run_spans が揃えば、classify ゲートの表題部信号（ADR-0008）
-        # の材料が返る。2 ページ目の span は混ざらない。
+        # が**文字列で**返る（上端 25% = 350px 未満の span だけ。900px の見積参照は
+        # 入らない）。2 ページ目の span は混ざらない。
         spans_p1 = [
             {"span_id": 1, "text": "御請求書", "bbox": [400, 60, 600, 110], "conf": 0.99},
             {"span_id": 2, "text": "見積番号 Q-1", "bbox": [50, 900, 300, 930], "conf": 0.9},
@@ -312,8 +314,8 @@ def test_load_extract_resultは実DDLからoriginal_nameとfieldsを返す() -> 
                     " VALUES (:r,:t,:p, CAST(:s AS jsonb))"),
                     {"r": run_id, "t": tenant, "p": pg, "s": json.dumps(sp, ensure_ascii=False)})
         got = store.load_extract_result(tenant, run_id)
-        assert got["page1_spans"] == spans_p1
-        assert got["page1_height"] == 1400
+        assert got["title_text"] == "御請求書"
+        assert "page1_spans" not in got
     finally:
         with owner.begin() as c:
             c.execute(text("DELETE FROM run_spans WHERE run_id=:r"), {"r": run_id})
