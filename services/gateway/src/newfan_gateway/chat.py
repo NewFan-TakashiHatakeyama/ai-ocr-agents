@@ -41,14 +41,24 @@ class RuleBasedChatAgent:
             quoted = re.search(r"[「『](.+?)[」』]", m)
             label = quoted.group(1) if quoted else "支払方法"
             name = _slug(label)
-            yield from _tokens(f"承知しました。請求書スキーマに「{label}」を追加して再抽出する提案です。")
+            # 対象スキーマは「<doc_type> のスキーマに…」から取る（スキーマ管理画面の
+            # 「チャットで追加を依頼」がこの形で送ってくる）。書いていなければ invoice。
+            # 常に invoice に固定すると、delivery_note を開いていた管理者の依頼が
+            # invoice の新版（無ければ 1 項目だけの新規スキーマ）になる。
+            doc_type = _doc_type_in(m) or "invoice"
+            yield from _tokens(
+                f"承知しました。{doc_type} のスキーマに「{label}」を追加して再抽出する提案です。"
+            )
             yield ChatEvent(
                 "confirm_request",
                 {
                     "action": "update_schema",
-                    "doc_type": "invoice",
+                    "doc_type": doc_type,
                     "field": {"name": name, "label": label, "type": "string"},
-                    "prompt": f"スキーマに「{label}」を追加して再抽出しますか？（新しい版とRunを発行します）",
+                    "prompt": (
+                        f"スキーマ「{doc_type}」に「{label}」を追加して再抽出しますか？"
+                        "（新しい版とRunを発行します）"
+                    ),
                 },
             )
             yield ChatEvent("done", {"reason": "confirm_pending"})
@@ -95,6 +105,17 @@ class RuleBasedChatAgent:
 def _slug(label: str) -> str:
     table = {"支払方法": "payment_method", "備考": "note", "担当者": "person_in_charge"}
     return table.get(label, "field_" + str(abs(hash(label)) % 10000))
+
+
+def _doc_type_in(message: str) -> str | None:
+    """「delivery_note のスキーマに…」「発注書のスキーマに…」の doc_type。無ければ None。
+
+    doc_type は英数字とは限らない（スキーマ管理画面は「発注書」のような名前も許す）
+    ので、「のスキーマ」の直前の空白区切りでない語をそのまま取る。文頭が「スキーマに」
+    で始まる従来の言い方は対象なし。
+    """
+    hit = re.search(r"(?:^|\s)([^\s「『」』、。]+?)\s*のスキーマ", message)
+    return hit.group(1) if hit else None
 
 
 # ---- 本番: LLM ツール使用エージェント（Anthropic tool-use, §4.5） ----

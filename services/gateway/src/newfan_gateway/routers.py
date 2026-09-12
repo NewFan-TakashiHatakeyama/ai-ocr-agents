@@ -1029,9 +1029,15 @@ def review_queue(
     runs = repo.list_review_runs(principal.tenant_id)
     # hitl_gate の priority_boost（workflow_runs.waiting）を加点する（§16 P5）
     boosts = repo.list_hitl_boosts(principal.tenant_id)
+    # 行に出す原本ファイル名。run は名前を持たないので帳票を一括で引く（run ごとに
+    # get_document を呼ぶ N+1 にしない）。画面側で一覧 API から名前を引く方式は
+    # 一覧の先頭ページ（既定 50 件）に無い帳票だけが ID 表示になり、同じ表の中で
+    # 名前と ID が混ざる。
+    docs = repo.get_documents_by_ids(principal.tenant_id, [r.document_id for r in runs])
     items = []
     for run in runs:
         pending = int(run.review_summary.get("pending", 0))
+        doc = docs.get(run.document_id)
         # 優先度（§8.5 の簡易版）: pending 件数を主指標 + ワークフローの boost
         items.append(
             dto.ReviewQueueItem(
@@ -1039,6 +1045,7 @@ def review_queue(
                 run_id=run.id,
                 pending=pending,
                 priority=float(pending + boosts.get(run.document_id or "", 0)),
+                original_name=doc.original_name if doc else None,
             )
         )
     items.sort(key=lambda i: i.priority, reverse=True)

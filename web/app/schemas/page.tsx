@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
+import { chatHrefForSchema, schemaAddRequest } from "@/lib/schemaChat";
 import { useToasts } from "@/lib/toast";
 import type { SchemaFieldDto } from "@/lib/types";
 
@@ -306,14 +307,19 @@ export default function SchemasPage() {
             ＋ 項目を追加
           </button>
           {/* SCR-01 のエージェント経由（update_schema）。チャットの承認カードを通して
-              新版が作られる経路は実装済みなので、「準備中」で押せなくしたままにしない */}
-          <Link
-            className="btn sm ghost"
-            href="/chat"
-            title="チャットに「スキーマに『支払方法』を追加して」のように頼むと、承認のうえ新版が作られます"
-          >
-            💬 チャットで追加を依頼
-          </Link>
+              新版が作られる経路は実装済みなので、「準備中」で押せなくしたままにしない。
+              **開いているスキーマの doc_type をリンクに載せる**: 素の /chat に送ると
+              チャット側は対象を invoice に倒すので、delivery_note を見ながら頼んだ項目が
+              invoice の新版になる。新規作成中（まだ無いスキーマ）には出さない */}
+          {!creating && current && (
+            <Link
+              className="btn sm ghost"
+              href={chatHrefForSchema(current.doc_type)}
+              title={`チャットに「${schemaAddRequest(current.doc_type)}」のように頼むと、承認のうえ ${current.doc_type} の新版が作られます`}
+            >
+              💬 チャットで追加を依頼
+            </Link>
+          )}
         </div>
         <p className="sub" style={{ marginTop: 10 }}>
           型は正規化器レジストリ（§5.6）から選択。並び順は表示順のみ（抽出結果に影響しません）。保存は常に新版作成（§7.2）。

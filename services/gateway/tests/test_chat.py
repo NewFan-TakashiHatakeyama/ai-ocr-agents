@@ -38,6 +38,25 @@ def test_chat_schema_add_intent_emits_confirm(ctx: SimpleNamespace) -> None:
     assert conf, "書込み系は confirm_request を挟む（§4.5）"
     assert conf[0]["action"] == "update_schema"
     assert conf[0]["field"]["label"] == "支払方法"
+    assert conf[0]["doc_type"] == "invoice"  # 対象を書いていなければ従来どおり invoice
+
+
+def test_chat_schema_add_intent_targets_named_doc_type(ctx: SimpleNamespace) -> None:
+    """「<doc_type> のスキーマに…」なら、その doc_type を承認カードに載せる。
+
+    スキーマ管理画面の「チャットで追加を依頼」は開いていたスキーマ名をこの形で
+    渡してくる。常に invoice に固定すると、delivery_note を開いていた管理者の依頼が
+    invoice の新版になる（テナントに invoice が無ければ 1 項目だけの新規スキーマ）。
+    """
+    for message, expected in [
+        ("delivery_note のスキーマに「支払方法」を追加して", "delivery_note"),
+        ("発注書のスキーマに「担当者」を足して", "発注書"),
+    ]:
+        r = ctx.client.post("/v1/chat", headers=auth("viewer"), json={"message": message})
+        conf = [d for t, d in _sse(r.text) if t == "confirm_request"]
+        assert conf and conf[0]["doc_type"] == expected, message
+        # 承認前に対象が読めるよう、確認文にもスキーマ名を入れる
+        assert expected in conf[0]["prompt"]
 
 
 def test_chat_confirm_update_schema_creates_new_version(ctx: SimpleNamespace) -> None:

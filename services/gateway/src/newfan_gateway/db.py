@@ -169,6 +169,17 @@ class PgRepository:
             row = s.get(Document, document_id)
             return _doc_record(row) if row else None
 
+    def get_documents_by_ids(self, tenant_id, document_ids):
+        ids = list(dict.fromkeys(document_ids))  # 重複を落とす（同じ帳票の run が複数）
+        if not ids:
+            return {}
+        with self._rls(tenant_id) as s:
+            # RLS に加えて tenant_id を WHERE に明示する二重防御（get_run_spans と同じ方針）
+            stmt = select(Document).where(
+                Document.id.in_(ids), Document.tenant_id == tenant_id
+            )
+            return {r.id: _doc_record(r) for r in s.scalars(stmt)}
+
     def list_documents(
         self, tenant_id, *, status, cursor, limit, doc_type=None, statuses=None
     ):

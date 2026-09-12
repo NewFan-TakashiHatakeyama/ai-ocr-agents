@@ -8,23 +8,28 @@
 //
 // 復元手段は無い（ゴミ箱も Undo も無い）。だから確認文言には必ず
 // ファイル名と「何が一緒に消えるか」を入れる。
+//
+// 確認文言の名前は documentDisplayName（lib/documents）で決める。呼び出し側に
+// 文字列を組ませると、一覧の列は原本名なのに確認は external_ref、といった
+// 「見ていた名前と消す名前が違う」ずれが起きる。ここで規則を一つに固定する。
 
 import { useMutation } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
+import { documentDisplayName } from "@/lib/documents";
 import { hasRole, usePrincipal } from "@/lib/principal";
 import { useToasts } from "@/lib/toast";
 
 export function DeleteDocument({
   documentId,
-  label,
+  originalName,
   disabled,
   className = "btn sm danger",
   onDeleted,
 }: {
   documentId: string;
-  /** 確認ダイアログに出す表示名（原本ファイル名など）。無ければ ID を使う */
-  label?: string | null;
+  /** 原本ファイル名（DocumentMeta.original_name）。未取得・無しなら ID で確認する */
+  originalName?: string | null;
   disabled?: boolean;
   className?: string;
   onDeleted: () => void;
@@ -76,7 +81,8 @@ export function DeleteDocument({
   });
 
   function confirmThenDelete() {
-    const name = label || documentId;
+    // 一覧の「帳票」列・検証画面の見出しと同じ規則（原本名、無ければ ID）
+    const name = documentDisplayName({ document_id: documentId, original_name: originalName });
     const ok = window.confirm(
       `「${name}」を削除します。\n` +
         "抽出結果・原本ファイル・この帳票から学習した修正例も消え、元に戻せません。\n\n" +

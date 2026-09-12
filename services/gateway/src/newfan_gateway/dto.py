@@ -217,6 +217,10 @@ class ReviewQueueItem(BaseModel):
     run_id: str
     pending: int
     priority: float
+    # 原本のファイル名（documents.original_name）。キューの行を ID だけで見せないため
+    # run 側にも載せる。一覧 API（既定 50 件）から名前を引く方式だと、先頭ページに
+    # 無い古い帳票だけが同じ表の中で ID 表示になり、レビュアーには理由が見えない。
+    original_name: Optional[str] = None
 
 
 class ReviewQueue(BaseModel):

@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useRef, useState } from "react";
 
 import { AppShell } from "@/components/AppShell";
 import { ApiError, api } from "@/lib/api";
+import { CHAT_DOC_TYPE_PARAM, schemaAddRequest } from "@/lib/schemaChat";
 import { useToasts } from "@/lib/toast";
 import { UPLOAD_ACCEPT, UPLOAD_FORMATS_HINT, UPLOAD_FORMATS_LABEL } from "@/lib/uploads";
 
@@ -33,9 +34,14 @@ interface Msg {
 
 const SUGGESTIONS = ["要確認の請求書を見せて", "スキーマに「支払方法」を追加して", "先月のSTP率は？"];
 
-export default function ChatPage() {
+function ChatInner() {
+  // スキーマ管理の「チャットで追加を依頼」から来たときは ?doc_type=<開いていたスキーマ>。
+  // 入力欄をその doc_type 入りの依頼文で始める（送信はしない。項目名は書き換える前提）。
+  // 素の依頼だとエージェントは対象を invoice に倒すので、ここで対象を文に入れておく。
+  const params = useSearchParams();
+  const fromSchema = params.get(CHAT_DOC_TYPE_PARAM);
   const [messages, setMessages] = useState<Msg[]>([]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(() => (fromSchema ? schemaAddRequest(fromSchema) : ""));
   const [busy, setBusy] = useState(false);
   const push = useToasts((s) => s.push);
   const router = useRouter();
@@ -165,7 +171,24 @@ export default function ChatPage() {
                       <div className="cc-head">
                         <b>エージェントの提案：</b>
                         <span style={{ color: "var(--ink2)", flex: 1 }}>{msg.confirm.prompt}</span>
-                        <button className="btn sm primary" onClick={() => approve(msg.id, msg.confirm!)}>
+                        {/* どのスキーマの新版になるかを承認前に見せる。prompt はエージェントが
+                            書く文で対象を含むとは限らず、承認後にサーバは doc_type 無しを
+                            invoice として扱う。対象が読めない提案は承認させない */}
+                        {msg.confirm.action === "update_schema" && (
+                          <span className="sub" title="承認するとこのスキーマの新しい版が作られます">
+                            対象スキーマ: <b>{msg.confirm.doc_type ?? "（不明）"}</b>
+                          </span>
+                        )}
+                        <button
+                          className="btn sm primary"
+                          disabled={msg.confirm.action === "update_schema" && !msg.confirm.doc_type}
+                          title={
+                            msg.confirm.action === "update_schema" && !msg.confirm.doc_type
+                              ? "対象のスキーマが特定できません。「<スキーマ名> のスキーマに…」のように言い直してください"
+                              : undefined
+                          }
+                          onClick={() => approve(msg.id, msg.confirm!)}
+                        >
                           承認して実行
                         </button>
                         <button className="btn sm ghost" onClick={() => patch(msg.id, (m) => ({ ...m, confirm: undefined }))}>
@@ -226,5 +249,14 @@ export default function ChatPage() {
         </div>
       </div>
     </AppShell>
+  );
+}
+
+// useSearchParams は Suspense 境界内で使う（Next 15）。
+export default function ChatPage() {
+  return (
+    <Suspense fallback={<div className="page">読み込み中…</div>}>
+      <ChatInner />
+    </Suspense>
   );
 }

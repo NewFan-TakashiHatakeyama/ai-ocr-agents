@@ -154,6 +154,8 @@ export interface ReviewQueueItem {
   run_id: string;
   pending: number;
   priority: number;
+  /** 原本ファイル名（帳票の original_name）。行の表示名に使う。無い帳票は null */
+  original_name?: string | null;
 }
 
 export interface CorrectionItem {

@@ -152,14 +152,6 @@ function DocumentsInner() {
   const items = docs.data?.items ?? [];
   const filtered = useMemo(() => items.filter((d) => matchesDocumentQuery(d, q)), [items, q]);
 
-  // レビューキューの行に出す名前。キュー API は run 単位で名前を持たないので、
-  // 同じ画面で取ってある一覧から document_id で引く（先頭ページに無い帳票は ID のまま）。
-  const nameById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const d of items) m.set(d.document_id, documentDisplayName(d));
-    return m;
-  }, [items]);
-
   // ---- 選択と一括再抽出（設計 bulk-processing §3） ----
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -408,9 +400,11 @@ function DocumentsInner() {
                     </td>
                     <td className="sub">{d.external_ref ?? "—"}</td>
                     <td onClick={(e) => e.stopPropagation()}>
+                      {/* 確認文言の名前は「帳票」列と同じ規則（DeleteDocument が
+                          documentDisplayName で決める）。external_ref は名前ではない */}
                       <DeleteDocument
                         documentId={d.document_id}
-                        label={d.original_name ?? d.external_ref ?? d.document_id}
+                        originalName={d.original_name}
                         onDeleted={() => {
                           setSelected((prev) => {
                             if (!prev.has(d.document_id)) return prev;
@@ -465,8 +459,10 @@ function DocumentsInner() {
                           </span>
                         </td>
                         <td>
+                          {/* 名前はキュー API が行ごとに返す（一覧 API から引くと、その
+                              先頭ページに無い古い帳票だけが同じ表で ID 表示になる） */}
                           <span className="docname" title={it.document_id}>
-                            {nameById.get(it.document_id) ?? it.document_id}
+                            {documentDisplayName(it)}
                           </span>
                         </td>
                         <td>

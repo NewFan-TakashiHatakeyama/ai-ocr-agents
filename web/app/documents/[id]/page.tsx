@@ -44,16 +44,19 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   });
   // result が E1001 のとき、それが「未抽出」なのか「帳票ごと削除済み」なのかは
   // result だけでは区別できない（サーバはどちらも E1001）。帳票の存在を別途確かめる。
+  // 取れた DocumentMeta は捨てずに持つ: 未抽出画面の見出しと削除確認に原本ファイル名を
+  // 出すため（アップロード直後に着く画面がここ。捨てると「一覧はファイル名、ここは ID」
+  // になり、誤アップロードを消す確認が ID で出る）。無ければ null（＝削除済み）。
   const resultErrCode = (error as { code?: string } | null)?.code;
-  const docExists = useQuery({
+  const docProbe = useQuery({
     queryKey: ["doc-exists", id],
-    queryFn: () => api.getDocument(id).then(() => true).catch(() => false),
+    queryFn: () => api.getDocument(id).catch(() => null),
     enabled: resultErrCode === "E1001",
     retry: false,
     staleTime: 0,
     gcTime: 0,
   });
-  const docGone = docExists.data === false;
+  const docGone = docProbe.data === null;
 
   const { selectedField, selectedCell, edits, select, setEdit, clearEdits } = useReviewStore();
   const push = useToasts((s) => s.push);
@@ -340,23 +343,32 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
       </div>
     );
   }
-  if (errCode === "E1001" && docExists.isPending) {
+  if (errCode === "E1001" && docProbe.isPending) {
     // 「未抽出」と「削除済み」の判定が付くまでは出し分けない（一瞬 ExtractStart が
     // 見えてから消えるより、読み込み中のままの方が誤解が無い）
     return <div className="page">読み込み中…</div>;
   }
   if (errCode === "E1001") {
+    // ここに来た時点で docProbe.data は DocumentMeta（null なら上で削除済み画面）
+    const unextracted = docProbe.data ?? undefined;
     return (
       <div className="main">
         <div className="rv-head">
           <Link href="/documents" className="btn sm ghost">
             ← 一覧
           </Link>
-          <span className="docname" style={{ marginLeft: 8 }}>{id}</span>
+          {/* 見出しは原本ファイル名（一覧・抽出済み画面と同じ規則）。ID は title で引ける */}
+          <span className="docname" style={{ marginLeft: 8 }} title={id}>
+            {unextracted ? documentDisplayName(unextracted) : id}
+          </span>
           {/* 未抽出の帳票（誤アップロード等）こそ消したい。ここに導線が無いと
               一覧に戻らないと消せない */}
           <span style={{ marginLeft: "auto" }}>
-            <DeleteDocument documentId={id} onDeleted={afterDelete} />
+            <DeleteDocument
+              documentId={id}
+              originalName={unextracted?.original_name}
+              onDeleted={afterDelete}
+            />
           </span>
         </div>
         <ExtractStart documentId={id} onDone={() => refetch()} />
@@ -578,7 +590,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
         {/* 他者が確認中は消させない（サーバ側も 409 で弾くが、押せない方が親切） */}
         <DeleteDocument
           documentId={id}
-          label={meta.data?.original_name}
+          originalName={meta.data?.original_name}
           disabled={readOnly}
           onDeleted={afterDelete}
         />

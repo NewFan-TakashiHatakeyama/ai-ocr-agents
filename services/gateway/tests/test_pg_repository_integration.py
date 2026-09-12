@@ -476,6 +476,31 @@ def test_pg_set_document_doc_type_は他テナントの行を書き換えない(
     assert got == "invoice"  # seeded のまま（他テナント指定では書き換わらない）
 
 
+def test_pg_get_documents_by_ids_は自テナントの行だけを一括で返す(repo, seeded) -> None:
+    """レビューキューが行に原本ファイル名を載せるための一括取得。
+
+    無い id はキーごと欠け、空の id 列では SQL を発行せず空を返す。テストは
+    スーパーユーザー接続で RLS が効かないため、他テナント指定で空になることは
+    WHERE 側の tenant_id 条件が守る。
+    """
+    from newfan_gateway.records import DocumentRecord
+
+    tenant, doc_id, _run = seeded
+    other_id = f"doc_{uuid.uuid4().hex[:12]}"
+    repo.create_document(
+        DocumentRecord(
+            id=other_id, tenant_id=tenant, storage_uri="s3://b/k2", mime_type="application/pdf",
+            original_name="納品書_2026-09.pdf", page_count=1, status="uploaded",
+        ),
+        [],
+    )
+    got = repo.get_documents_by_ids(tenant, [doc_id, other_id, "doc_missing", doc_id])
+    assert set(got) == {doc_id, other_id}
+    assert got[other_id].original_name == "納品書_2026-09.pdf"
+    assert repo.get_documents_by_ids(tenant, []) == {}
+    assert repo.get_documents_by_ids("ten_other", [doc_id, other_id]) == {}
+
+
 def test_pg_get_run_spans_は自テナントの行だけ返す(repo, seeded) -> None:
     """run_spans（0008）を実 DDL で読めること、他テナントからは空になること（設計 D12）。
 
