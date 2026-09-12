@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -31,8 +31,10 @@ G3_MIN_DEFENDED = 4
 G3_DOC = "s2_sample8"
 G3_FIELD = "customer_name"
 # 入力のどれかが region_ab --allow-arm-reuse で回した出力（resume_arm_reuse: true）なら、
-# 表の先頭にこの行を出す
-ARM_REUSE_WARNING = "⚠ 対照アームを再利用した計測（時間帯の交絡あり）"
+# 表の先頭にこの行を出す。再利用したのは対照とは限らない（介入を残して対照だけ回し直す
+# こともできる）ので、どちらのアームを何帳票かは resume_arm_reuse_docs から出す
+ARM_REUSE_WARNING = "⚠ 片方のアームを再利用した計測（時間帯の交絡あり）"
+ARM_LABEL = {"control": "対照", "treat": "介入"}
 
 
 def _load(p: Path | None) -> dict[str, Any] | None:
@@ -76,6 +78,17 @@ def _paired_field(report: dict[str, Any], doc: str, field: str) -> dict[str, int
         else:
             out["neither"] += 1
     return out
+
+
+def _arm_reuse_label(arm: str, report: dict[str, Any]) -> str:
+    """警告に出す「S3（対照 12 帳票）」。``resume_arm_reuse_docs`` は 帳票 → 残っている
+    （= 再利用した）アーム。帳票の内訳が無い古い出力はアーム名だけ。"""
+    docs = report.get("resume_arm_reuse_docs") or {}
+    counts = Counter(str(a) for a in docs.values())
+    if not counts:
+        return arm
+    inner = "、".join(f"{ARM_LABEL.get(a, a)} {n} 帳票" for a, n in sorted(counts.items()))
+    return f"{arm}（{inner}）"
 
 
 def _docs_in(report: dict[str, Any]) -> list[str]:
@@ -319,13 +332,13 @@ def main(argv: list[str] | None = None) -> int:
     # region_ab --allow-arm-reuse で片方のアームを丸ごと再利用した計測は、対照と介入の
     # 時刻が離れている（交互実行の手順が崩れている）。表の先頭で目立つように断る
     reused = [
-        arm for arm, rep in (("S1", s1), ("S2", s2), ("S3", s3))
+        _arm_reuse_label(arm, rep) for arm, rep in (("S1", s1), ("S2", s2), ("S3", s3))
         if rep is not None and rep.get("resume_arm_reuse")
     ]
     if reused:
         out.append(
             f"{ARM_REUSE_WARNING}: {', '.join(reused)}"
-            "（region_ab --allow-arm-reuse。対照と介入を同じ試行で交互に回した計測ではない）"
+            " ── region_ab --allow-arm-reuse の出力。対照と介入を同じ試行で交互に回した計測ではない"
         )
         out.append("")
     out.append("| ゲート | 判定 | 根拠 |")
@@ -383,7 +396,9 @@ def main(argv: list[str] | None = None) -> int:
     text = "\n".join(out)
     print(text)
     print()
-    print("総合:", "G1〜G4 すべて通過" if all_ok else "不通過あり（既定 off のまま）")
+    # ヒントは第 3 回の結果で既定 on にした。不通過があれば「off のまま」ではなく、
+    # 既定 on の根拠（第 3 回の 6 ゲート通過）を見直す
+    print("総合:", "G1〜G4 すべて通過" if all_ok else "不通過あり（既定 on の根拠を見直す）")
     if args.md:
         args.md.parent.mkdir(parents=True, exist_ok=True)
         args.md.write_text(text + "\n", encoding="utf-8")

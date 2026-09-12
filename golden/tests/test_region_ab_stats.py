@@ -387,11 +387,12 @@ class Test再開の欠けた対:
         """run_region_arms.sh はこれが空のアームを回さない（完全な出力を --resume に渡すと、
         1 件も抽出せずに同じ行を書き直し、前回の結果が新しい計測に化ける）。"""
         from newfan_golden.dataset import GoldField, GoldenDoc
-        from newfan_golden.region_ab import missing_pairs
+        from newfan_golden.region_ab import SCORING, missing_pairs
 
         docs = [GoldenDoc(document_id=d, doc_type="t", fields=[GoldField(name="a", value="X")])
                 for d in ("d1", "d2")]
         prev = {
+            "scoring": SCORING,
             "control_runs": [_row("d1", 0, True), _row("d1", 1, True)],
             "treat_runs": [_row("d1", 0, True), _row("d1", 1, True)],
         }
@@ -405,7 +406,8 @@ class Test再開の欠けた対:
         # 前回の出力が無ければ全部
         assert len(missing_pairs(docs, 2, None)) == 8
         # field_hits の無い古い行は「無い」扱い
-        old = {"control_runs": [{"document_id": "d1", "trial": 0, "hits": 1}], "treat_runs": []}
+        old = {"scoring": SCORING, "control_runs": [{"document_id": "d1", "trial": 0, "hits": 1}],
+               "treat_runs": []}
         assert len(missing_pairs(docs[:1], 1, old)) == 2
 
 
@@ -420,9 +422,10 @@ class Test片方のアームの丸ごと再利用:
     手順が崩れて時間帯の交絡が入る（第 3 回 (b) で踏んだ）。既定では止める。"""
 
     def test_片方のアームしか無い帳票を検出し両方ある帳票は対象にしない(self) -> None:
-        from newfan_golden.region_ab import _done_rows, arm_reuse_docs
+        from newfan_golden.region_ab import SCORING, _done_rows, arm_reuse_docs
 
         prev = {
+            "scoring": SCORING,
             "control_runs": [
                 _row("d1", 0, True), _row("d1", 1, True),  # d1: 対照だけ（全試行）→ 再利用
                 _row("d2", 0, True), _row("d2", 1, True),  # d2: 両方ある

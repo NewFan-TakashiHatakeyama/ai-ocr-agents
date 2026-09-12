@@ -23,6 +23,8 @@
 - ``--resume`` は**欠けた (帳票, 試行, アーム) の対を埋める**ためのもの。片方のアームを
   丸ごと再利用する（対照は前回のまま、介入だけ回し直す）と交互実行が崩れて時間帯の
   交絡が入るので、既定では止める（``--allow-arm-reuse`` で通すと出力に印が残る）。
+  印は、その出力を ``--resume`` に渡した次の実行にも**引き継ぐ**（再利用した行は交絡の
+  入った計測に由来したままなので、欠けた対の埋め直しや試行の延長で印が消えてはいけない）。
 
 出力は JSON。判定は人が読んで決める（このスクリプトは出荷可否を自動で決めない）。
 """
@@ -356,6 +358,24 @@ def _done_rows(resume: Optional[dict[str, Any]]) -> dict[tuple[str, int, str], d
     return out
 
 
+def missing_pairs(
+    docs: list[GoldenDoc], trials: int, resume: Optional[dict[str, Any]]
+) -> list[tuple[str, int, str]]:
+    """前回の出力に無い (document_id, trial, arm)。空なら ``--resume`` で回すものは無い。
+
+    run_region_arms.sh はこれが空のアームを**回さない**。完全な出力を ``--resume`` に渡すと
+    region_ab は 1 件も抽出せずに同じ行を書き直し、前回の結果が新しい計測に化ける
+    （出力の mtime だけが新しくなり、コードやプロンプトを変えた後でも見分けがつかない）。"""
+    done = _done_rows(resume)
+    return [
+        (doc.document_id, i, arm)
+        for doc in docs
+        for i in range(trials)
+        for arm in ("control", "treat")
+        if (doc.document_id, i, arm) not in done
+    ]
+
+
 def arm_reuse_docs(done: dict[tuple[str, int, str], dict[str, Any]]) -> dict[str, str]:
     """--resume で**片方のアームを丸ごと**再利用することになる帳票（帳票 → 残っているアーム）。
 
@@ -412,12 +432,21 @@ def run(
     ``resume`` に、ある帳票の片方のアームしか無いときは **止める**（``arm_reuse_docs``）。
     片方のアームを丸ごと再利用すると交互実行の手順が崩れる。``allow_arm_reuse`` で
     通した場合は出力に ``resume_arm_reuse: true`` を残し、eval_gates_v2 が警告を出す。
+    この印は ``resume`` 側に既にあれば**そのまま引き継ぐ**。印の付いた出力を ``resume`` に
+    渡すと両アームの行が揃っているので ``arm_reuse_docs`` は何も返さないが、再利用する行は
+    交絡の入った計測に由来したままである（第 3 回の S1 延長がこの形。ここで印が消えると
+    eval_gates_v2 の警告も消えて、交互に回した計測として記録に残る）。
     """
     positional_map = regions.get("_positional", {})
     done = _done_rows(resume)
     reuse = arm_reuse_docs(done)
     if reuse and not allow_arm_reuse:
         raise RegionAbError(_arm_reuse_message(reuse))
+    # 前回の出力に付いていた印（--allow-arm-reuse で回した計測）。今回の再利用と合わせて残す
+    prior_reuse_docs: dict[str, str] = {
+        str(k): str(v) for k, v in ((resume or {}).get("resume_arm_reuse_docs") or {}).items()
+    }
+    prior_reuse = bool((resume or {}).get("resume_arm_reuse")) or bool(prior_reuse_docs)
     # 位置でしか区別できない項目名の集合（doc_type をまたいで合算する）
     positional_names = {n for names in positional_map.values() for n in names}
     tally = Tally()
@@ -557,9 +586,10 @@ def run(
         "per_doc_net": per_doc_net(tally.control_runs, tally.treat_runs),
         "hint_summary": hint_summary(tally.control_runs, tally.treat_runs),
         # --resume で片方のアームを丸ごと再利用した計測か（時間帯の交絡あり。
-        # eval_gates_v2 が先頭に警告を出す）。どの帳票かも残す
-        "resume_arm_reuse": bool(reuse),
-        "resume_arm_reuse_docs": reuse,
+        # eval_gates_v2 が先頭に警告を出す）。どの帳票かも残す。前回の出力に付いていた
+        # 印は消さない（--resume を重ねても、再利用した行の由来は変わらない）
+        "resume_arm_reuse": bool(reuse) or prior_reuse,
+        "resume_arm_reuse_docs": {**prior_reuse_docs, **reuse},
     }
 
 
@@ -579,7 +609,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument(
         "--allow-arm-reuse", action="store_true",
         help="--resume に片方のアームしか無い帳票があっても止めない（交互実行の手順が崩れ、"
-             "時間帯の交絡が入る。出力に resume_arm_reuse: true が残る）",
+             "時間帯の交絡が入る。出力に resume_arm_reuse: true が残り、その出力を --resume に"
+             "渡した実行にも引き継がれる）",
     )
     args = ap.parse_args(argv)
 

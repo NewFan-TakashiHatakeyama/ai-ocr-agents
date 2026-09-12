@@ -3,7 +3,7 @@
 # 手順どおりに 1 本で回す。実測記録 region-measurement-2026-09-12.md「再実行の手順」から呼ぶ。
 #
 #   golden/scripts/run_region_arms.sh --api http://localhost:8000/v1 --token "$JWT" \
-#       --out out/phase4 [--trials-s1 5] [--structure http://localhost:8081]
+#       --out out/phase4 [--trials-s1 5] [--structure http://localhost:8081] [--resume]
 #
 # アームごと（S3 → S2 → S1 の順。ゲートを決める S3 を先に）に:
 #   1. region_from_gold: 正解値の位置から領域を起こす（例示値も一緒に出る）。
@@ -14,8 +14,15 @@
 #   3. region_ab: 対照（領域なし）と介入（領域あり）を **同じ試行で交互に** 回す。
 #      交互に回すのが手順そのもの（時間帯によるモデル側の揺れを両条件へ均等に散らす）。
 #      片方のアームだけを回し直す使い方（--resume で対照を丸ごと再利用）は region_ab が止める。
-#      <out>/<arm>_ab.json が既にあれば、それを --resume に渡して **欠けた対だけ** 埋める
-#      （LLM 側の失敗で捨てた試行の埋め直し。元は <arm>_ab_prefill.json に残す）。
+#
+# 前回の出力（<out>/<arm>_ab.json）がある --out には、--resume を付けたときだけ回す:
+#   - --resume あり: 欠けた (帳票, 試行, アーム) があるアームは、出力を region_ab --resume に
+#     渡して **欠けた対だけ** 埋める（LLM 側の失敗で捨てた試行の埋め直し、試行数の延長。
+#     元は <arm>_ab_prefill.json に残す）。欠けた対が無いアームは **回さず、書き直さない**。
+#   - --resume なし: 止める（exit 2）。完全な出力を region_ab --resume に渡すと 1 件も抽出せずに
+#     同じ行を書き直し、前回の結果が新しい計測に化ける（mtime だけ新しくなる。出力には
+#     どの worker / プロンプトで回したかが残らないので、後から見分けられない）。
+#     コードやプロンプトを変えて測り直すなら別の --out にする。
 #
 # 試行数: S3 / S2 は 5（設計 §3）、S1 は --trials-s1（既定 5。第 3 回で 2 試行は検出力不足と
 # 分かった）。前提: worker のヒントが有効（既定 on。REGION_KIE_HINTS を off にしていないこと）、
@@ -29,8 +36,9 @@ TOKEN=""
 OUT=""
 TRIALS_S1=5
 STRUCTURE="http://localhost:8081"
+RESUME_MODE=0
 usage() {
-  echo "使い方: $0 --api URL --token JWT --out DIR [--trials-s1 N] [--structure URL]" >&2
+  echo "使い方: $0 --api URL --token JWT --out DIR [--trials-s1 N] [--structure URL] [--resume]" >&2
   exit 2
 }
 while [ $# -gt 0 ]; do
@@ -40,6 +48,7 @@ while [ $# -gt 0 ]; do
     --out) OUT="$2"; shift 2;;
     --trials-s1) TRIALS_S1="$2"; shift 2;;
     --structure) STRUCTURE="$2"; shift 2;;
+    --resume) RESUME_MODE=1; shift;;
     -h|--help) usage;;
     *) echo "不明な引数: $1" >&2; usage;;
   esac
@@ -56,6 +65,18 @@ export PYTHONPATH=golden/src
 export PYTHONIOENCODING=utf-8
 mkdir -p "$OUT"
 
+# 前回の出力がある --out に --resume なしで回さない（前回の結果を新しい計測として書き直さないため）
+EXISTING=""
+for ARM in s3 s2 s1; do
+  [ -f "$OUT/${ARM}_ab.json" ] && EXISTING="$EXISTING $OUT/${ARM}_ab.json"
+done
+if [ -n "$EXISTING" ] && [ "$RESUME_MODE" -eq 0 ]; then
+  echo "前回の出力があります:$EXISTING" >&2
+  echo "欠けた対を埋めるなら --resume を付けてください。コードやプロンプトを変えて測り直すなら" \
+       "別の --out にしてください（前回の出力を新しい計測として書き直さないため）。" >&2
+  exit 2
+fi
+
 gold_regions() {  # $1=goldspec  $2=out
   if [ -f "$2" ]; then
     echo "[skip] 領域は取得済み: $2"
@@ -63,6 +84,17 @@ gold_regions() {  # $1=goldspec  $2=out
     "$PY" -m newfan_golden.region_from_gold --api "$API" --token "$TOKEN" \
       --structure "$STRUCTURE" --spec "$1" --out "$2"
   fi
+}
+
+missing_pairs() {  # $1=gold jsonl  $2=前回の出力  $3=trials → 欠けた (帳票, 試行, アーム) の数
+  "$PY" - "$1" "$2" "$3" <<'PYEOF'
+import json, pathlib, sys
+from newfan_golden.dataset import load_jsonl
+from newfan_golden.region_ab import missing_pairs
+gold, prev, trials = sys.argv[1:4]
+resume = json.loads(pathlib.Path(prev).read_text(encoding="utf-8"))
+print(len(missing_pairs(load_jsonl(pathlib.Path(gold)), int(trials), resume)))
+PYEOF
 }
 
 merge() {  # $1=regions  $2=positional  $3=out  $4=strip_example(0/1)
@@ -96,10 +128,17 @@ for ARM in s3 s2 s1; do
     "$OUT/${ARM}_regions_full.json" "$STRIP"
   RESUME=()
   if [ -f "$OUT/${ARM}_ab.json" ]; then
-    # 前回の出力がある: 欠けた対だけ埋める（片方のアームを丸ごと再利用する形なら region_ab が止める）
+    # --resume（上で確かめてある）: 欠けた対が無ければこのアームは回さない（書き直すと前回の
+    # 結果が新しい計測に化ける）。あれば欠けた対だけ埋める（片方のアームを丸ごと再利用する
+    # 形なら region_ab が止める）
+    MISSING="$(missing_pairs "golden/data/region_ab_${ARM}.jsonl" "$OUT/${ARM}_ab.json" "$TRIALS")"
+    if [ "$MISSING" -eq 0 ]; then
+      echo "[skip] 前回の出力に欠けた対はありません（測り直すなら別の --out）: $OUT/${ARM}_ab.json"
+      continue
+    fi
     cp "$OUT/${ARM}_ab.json" "$OUT/${ARM}_ab_prefill.json"
     RESUME=(--resume "$OUT/${ARM}_ab_prefill.json")
-    echo "[resume] 前回の出力から欠けた対だけ回す: $OUT/${ARM}_ab_prefill.json"
+    echo "[resume] 前回の出力から欠けた対 $MISSING 件だけ回す: $OUT/${ARM}_ab_prefill.json"
   fi
   "$PY" -m newfan_golden.region_ab --gold "golden/data/region_ab_${ARM}.jsonl" \
     --regions "$OUT/${ARM}_regions_full.json" --api "$API" --token "$TOKEN" \

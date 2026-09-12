@@ -391,7 +391,8 @@ uv run python golden/scripts/build_region_fixtures.py
 #    対照アームはフラグの影響を受けない）
 docker compose --env-file .env -f deploy/compose.yaml up -d --no-deps orchestrator-worker
 
-# 3. 3 アームを回す（S3 → S2 → S1。S3 / S2 は 5 試行、S1 は --trials-s1、既定 5）
+# 3. 3 アームを回す（S3 → S2 → S1。S3 / S2 は 5 試行、S1 は --trials-s1、既定 5）。
+#    --out は計測ごとに新しくする（第 4 回なら out/phase4、第 5 回なら out/phase5）
 golden/scripts/run_region_arms.sh --api http://localhost:8000/v1 --token "$JWT" \
   --out out/phase4 [--trials-s1 5] [--structure http://localhost:8081]
 
@@ -408,11 +409,22 @@ uv run python golden/scripts/eval_gates_v2.py \
 **対が欠けたとき（LLM 側の失敗で捨てた試行）** は、同じ `--out` でスクリプトをもう一度
 回す。`<arm>_ab.json` があれば `region_ab --resume` に渡して**欠けた (帳票, 試行, アーム)
 だけ**を埋める（元は `<arm>_ab_prefill.json` に残る）。
+**対が欠けたとき（LLM 側の失敗で捨てた試行）や試行数を延ばすとき** は、同じ `--out` に
+**`--resume` を付けて**スクリプトをもう一度回す。欠けた対のあるアームだけ `<arm>_ab.json` を
+`region_ab --resume` に渡して**欠けた (帳票, 試行, アーム) だけ**を埋める（元は
+`<arm>_ab_prefill.json` に残る）。欠けた対の無いアームは回さず、出力も書き直さない。
+
+**前回の出力がある `--out` に `--resume` なしで回すと止まる**（exit 2）。完全な出力を
+`region_ab --resume` に渡すと 1 件も抽出せずに同じ行を書き直し、前回の結果が新しい計測に
+化ける（mtime だけ新しくなる。出力にはどの worker / プロンプトで回したかが残らないので、
+後から見分けられない）。worker やプロンプトを変えて測り直すときは**別の `--out`** にする。
 
 **片方のアームを丸ごと再利用してはいけない。** 第 3 回の (b) は対照アームを (a) から
 再利用して介入だけ回し直した（上記「計測の限界」）。これは対照と介入の時刻が離れ、
 時間帯の交絡が入る。第 4 回からは `region_ab` が、`--resume` の出力にある帳票の片方の
 アームが 1 行も無いとき**止める**（`--allow-arm-reuse` を付けたときだけ通し、出力に
-`resume_arm_reuse: true` が残って `eval_gates_v2` が先頭に
-「⚠ 対照アームを再利用した計測（時間帯の交絡あり）」を出す）。プロンプトを変えて
-介入だけ見直したいときも、**両アームを回し直す**（別の `--out` にする）。
+`resume_arm_reuse: true` と帳票ごとの再利用したアームが残って `eval_gates_v2` が先頭に
+「⚠ 片方のアームを再利用した計測（時間帯の交絡あり）: S3（対照 12 帳票）」のように出す。
+この印は、その出力を `--resume` に渡した実行にも引き継がれる ── 欠けた対の埋め直しや
+試行の延長で消えることはない）。プロンプトを変えて介入だけ見直したいときも、
+**両アームを回し直す**（別の `--out` にする）。
