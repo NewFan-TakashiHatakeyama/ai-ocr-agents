@@ -221,6 +221,45 @@ export function spansInRect(spans: readonly RunSpanDto[], bbox: Px): RunSpanDto[
 }
 
 /**
+ * 除外領域の判定に使う、重なりの下限（span 面積に対する比）。サーバの
+ * `region_mask.EXCLUDE_SPAN_RATIO` と同じ値にしておく（表示と実際の除外がずれない）。
+ */
+export const EXCLUDE_SPAN_RATIO = 0.5;
+
+/**
+ * 除外領域 bbox がこの帳票で**実際に消す** span を読み順（span_id 昇順）で返す。規則は
+ * サーバの `filter_spans` と同じ: 「重なりが span 面積の 50% 以上」。面積の無い span
+ * （退化 bbox）は中心点包含で判定する。bbox の無い span は対象外。逆向きの矩形は
+ * min/max で吸収する。ヒント用の `spansInRect`（30%・中心点）は流用しない —— 除外は
+ * 「消しすぎ」が危険で、保存前に見せたいのは実際に消える件数だから。
+ */
+export function spansExcludedByRect(spans: readonly RunSpanDto[], bbox: Px): RunSpanDto[] {
+  const left = Math.min(bbox[0], bbox[2]);
+  const right = Math.max(bbox[0], bbox[2]);
+  const top = Math.min(bbox[1], bbox[3]);
+  const bottom = Math.max(bbox[1], bbox[3]);
+  return spans
+    .filter((s) => {
+      const b = s.bbox;
+      if (!b) return false;
+      const sx1 = Math.min(b[0], b[2]);
+      const sx2 = Math.max(b[0], b[2]);
+      const sy1 = Math.min(b[1], b[3]);
+      const sy2 = Math.max(b[1], b[3]);
+      const area = (sx2 - sx1) * (sy2 - sy1);
+      if (area <= 0) {
+        const cx = (sx1 + sx2) / 2;
+        const cy = (sy1 + sy2) / 2;
+        return cx >= left && cx <= right && cy >= top && cy <= bottom;
+      }
+      const ix = Math.max(0, Math.min(right, sx2) - Math.max(left, sx1));
+      const iy = Math.max(0, Math.min(bottom, sy2) - Math.max(top, sy1));
+      return (ix * iy) / area >= EXCLUDE_SPAN_RATIO;
+    })
+    .sort((a, b) => a.span_id - b.span_id);
+}
+
+/**
  * 手描き領域の例示値（D11）。`run` は GET /documents/{id}/spans の応答（ページごとに
  * キャッシュしたもの）で、取得に失敗していれば null を渡す。**別ページの応答は使わない**
  * （page_no が一致しなければ null）。枠に文字が無ければ null。span の原文を読み順に

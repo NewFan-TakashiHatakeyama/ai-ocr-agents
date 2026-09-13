@@ -2515,3 +2515,26 @@ a {
   font-weight: 700;
   white-space: nowrap;
 }
+
+/* 領域指定のズーム（RegionCanvas zoom > 1、設計 §3.4）: img の幅を fit × zoom にし、
+   キャンバス側をスクロールさせる。fit の contain（max-width/max-height）は外す */
+.rgn-canvas.zoomed {
+  overflow: auto;
+  place-items: start;
+}
+.rgn-stage.zoomed {
+  max-width: none;
+  max-height: none;
+}
+.rgn-stage.zoomed img {
+  max-width: none;
+  max-height: none;
+  height: auto;
+}
+.rgn-zoom {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 6px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+}

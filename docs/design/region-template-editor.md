@@ -180,9 +180,9 @@ fields = drafts.filter(d => d.include || d.base)     // base 持ちは include=f
 | 消す | 選択中に Delete/Backspace、または矩形上の × ボタン。**`ev.target instanceof HTMLInputElement || HTMLTextAreaElement` なら無視**（page.tsx:137 と同型の typing ガード。批評 D-12）。Esc は選択解除のみ（ダイアログは閉じない）。 |
 | 移動・リサイズ | **v1 なし**。位置修正は削除→描き直し or 置換（批評 D-11、工数 3〜4 割減）。 |
 | モード切替 | 右ペイン上部トグル。`.bbox` 基底 + `.bx-include`（実線）/ `.bx-exclude`(斜線背景 + 別色) / `.bx-ghost`（破線）。 |
-| exclude 行 | リスト行に label 入力（任意）と適用範囲セレクト:「このページ / 全ページ / 最終ページ」（→ page: N / null / "last"）。 |
+| exclude 行 | リスト行に label 入力（任意）と適用範囲セレクト:「このページ / 全ページ / 最終ページ」（→ page: N / null / "last"）。 **【2026-09-13】** 行に「この領域内の文字: N 件（p.X）: …」を出す（`spansExcludedByRect`。サーバの除外規則＝重なり 50% と同じで、**この帳票で実際に消える span**）。ヒント用の 30% 判定は流用しない。除外は「消しすぎ」が危険なので、保存する前に何が消えるかを見せる。 |
 | ページタブ | `GET /documents/{id}` の `page_count` から 1..N の全タブ（発見フィールドの無いページにも印影を描けるようにする）。`.pagetab` CSS 流用。 |
-| 表示 | キャンバスは**ページ全体 fit（高さ contain）**。スクロール中ドラッグ問題を構造的に消す（批評 D-13）。img に ResizeObserver で scale 追随。ステージに `touch-action: none`。**ステージ内 `<img>` は `draggable={false}`**、ステージの `pointerdown` 先頭で `ev.preventDefault()`、`onDragStart` でも `preventDefault()`（ネイティブ画像ドラッグが始まると pointer capture 中でも `pointercancel` が発火し、進行中矩形が消えて up が来ない）。`.viewer-stage`/RegionCanvas に `user-select: none; -webkit-user-drag: none;` を付与（敵対的レビュー第2回 C31）。 |
+| 表示 | キャンバスは**ページ全体 fit（高さ contain）**。スクロール中ドラッグ問題を構造的に消す（批評 D-13）。img に ResizeObserver で scale 追随。ステージに `touch-action: none`。**ステージ内 `<img>` は `draggable={false}`**、ステージの `pointerdown` 先頭で `ev.preventDefault()`、`onDragStart` でも `preventDefault()`（ネイティブ画像ドラッグが始まると pointer capture 中でも `pointercancel` が発火し、進行中矩形が消えて up が来ない）。`.viewer-stage`/RegionCanvas に `user-select: none; -webkit-user-drag: none;` を付与（敵対的レビュー第2回 C31）。 **【2026-09-13】** ズーム（全体 / 150% / 200% / 300%、`RegionCanvas` の `zoom`）を追加。倍率は fit の何倍かで、fit のときに測った img の幅 × zoom を img の幅にし `.rgn-canvas.zoomed` をスクロールさせる。座標は毎イベント stage の `getBoundingClientRect()` 相対で測り、ドラッグは pointer capture で追うので、スクロールしても「見えている位置と保存される位置」はずれない（§10-8 の反転）。 |
 | ページ切替中の描画禁止 | `usePageImage` は**ページ変更時に url を即 null へ戻し**（現行 `DocViewer.tsx:28-42` は旧画像を表示し続けるので、この挙動は切り出し時に継承しない）、ローディング表示に切り替える。`RegionCanvas` は「表示中 img の `onLoad` 完了済み **かつ** その img が `currentPage` のもの（`naturalWidth/Height` が `pageDims[currentPage]` と一致）」のときだけ `pointerdown` を受け付け、それ以外は `pointer-events: none`。ドラッグ中にページ切替が起きたら進行中矩形を破棄。`scale` は当該ページ img の `onLoad` と ResizeObserver の両方で `img.clientWidth / pageDims[currentPage].width` から再計算し、旧ページ値を引き継がない（縦横比の違うページで矩形が誤ページ・誤座標で保存される経路を構造的に閉じる。敵対的レビュー第2回 C18）。 |
 | 署名 URL | ページ切替ごとに取得（現行方式）。403/期限切れ時は 1 回だけ自動再取得。 |
 | 保存前警告（exclude） | 除外領域が 1 件以上ある状態の保存ボタン近傍に常時表示: 「**除外領域は同じ doc_type の全帳票に適用されます。レイアウトが異なる取引先の帳票では、その位置にある実データも取り込まれません。** 領域は対象（印影等）の外接より大きくしすぎないでください」（D18 / §11-8。敵対的レビュー第2回 C19）。include 領域が 1 件も無いスキーマで exclude だけを保存しようとした場合は追加で「読取領域が 1 つも無いとレイアウト違いを検知できません。少なくとも 1 項目の読取領域を確定してください」を表示する（**422 にはしない**）。 **【2026-09-12 撤回】** 後段の「読取領域が 1 つも無いと…」は出さない。読取領域を引くことを勧める側に倒すと、1 行ずれた領域で正解が壊れる（`region-measurement-2026-09-07.md`）。現行は「ヒントとして渡され、この帳票で合う文字が無ければ自動的に使われない」旨の注記のみ（v2 §1.5。第 3 回敵対的レビュー 3）。 |
@@ -592,7 +592,7 @@ web 側: `web/lib/types.ts` に `RegionRect` / `ResolvedRegion` / `PageDim`、`S
 5. **フィールド別ハードフィルタ / マルチコール化**: single-call 一括抽出の構造上不可能で、本件の目的に過剰。
 6. **`region.mode: "strict"`（領域内 span の決定論読取）を v1 で実装**: span 根拠契約とは整合する有効な将来案だが、まず Phase 4 の計測で「タイトル系がヒントで取れる率」を実測してから判断する。fields JSONB へのキー追加は後方互換なので v2 で追加可能（批評 product-5 は「実測を先に」の要求として吸収）。
 7. **LLM フォールバックテーブルの TableCell bbox 合成**: page が無く描画に届かない効果ゼロの変更（批評 tech-9）。
-8. **矩形の移動・四隅リサイズハンドル / ズーム / Undo・Redo**: 削除→描き直し・置換で代替可能。JS テスト基盤の無い現状で最もバグ密度の高い部位を落とす（批評 D-11/D-13）。ズームは明示の非ゴール。
+8. **矩形の移動・四隅リサイズハンドル / ズーム / Undo・Redo**: 削除→描き直し・置換で代替可能。JS テスト基盤の無い現状で最もバグ密度の高い部位を落とす（批評 D-11/D-13）。ズームは明示の非ゴール。 **【2026-09-13 反転（ズームのみ）】** ズームを実装した（§3.4）。fit では A4@250dpi で最小矩形 8 表示 px ≈ 23 画像 px と粗く（§11-4）、日付・単価セルの指定が実用上つらいため。座標は stage 相対・毎イベント測定なので、非ゴールにした理由（スクロール中の座標補正）は構造的に生じない。移動・リサイズ・Undo は引き続き入れない。
 9. **旧スキーマ編集画面への領域編集 UI**: スプレッド保全により往復で壊れないことを確認済み。編集はプレビュー（作成/編集モード）に一本化。読み取り専用バッジのみ任意。
 10. **スキーマ一覧への mismatch 集計バッジ**: 集計クエリ基盤が必要。run 単位の region_stats / バッジ / ReviewItem で「見直しシグナルが運用者に届く」最低線は成立する（批評 product-9 は部分対処）。
 11. **既存 run への一括遡及再抽出**: 別機能。保存 UI の「今後の取込にのみ適用」明示 + 当該帳票の再抽出ボタンで期待ギャップを埋める（批評 product-10 / scope C-10 は部分対処）。
@@ -613,7 +613,7 @@ web 側: `web/lib/types.ts` に `RegionRect` / `ResolvedRegion` / `PageDim`、`S
 1. **位置ガードの許容パラメータ（ページ 5% / 領域辺長 50% / 過半判定 / `MIN_FIELDS_FOR_LAYOUT`）は現時点で根拠のない初期値**。shadow mode の実測（`metrics["region"]["mismatch_fields"]` の分布、および **region 付きフィールド数 n の分布** — 敵対的レビュー第2回 C33）で確定してから enforce する。enforce 前に確定できないのは設計上の意図（実測なしに本番有効化しない）。**ページ数可変帳票の mismatch で実測が汚染されないよう、`source_page_count` の配線（§4.6）は Phase 1 で必ず入れる**（C10 / C14）。
 2. **KIE ヒントの効果は未実証**。Phase 4 の計測で改善が出なければ出荷しない。その場合「位置でしか特定できない項目」の要求には v2 の strict mode で応える判断が要る（→ やらないこと 6）。
 3. **pred_html 経由のセル text 汚染（被覆率 0.5 未満）は決定論では消えない**（§5.1 既知の限界）。頻度が高ければ v2 で「セル text から除外領域内 span 相当部分を差し引く」検討。
-4. **fit 表示での小フィールド精密指定**: A4@250dpi を fit すると scale ≈ 0.35、最小矩形 8 表示 px ≈ 23 画像 px。日付・単価セル等の指定はやや粗い。ズーム要望が出たら v2。
+4. **fit 表示での小フィールド精密指定**: A4@250dpi を fit すると scale ≈ 0.35、最小矩形 8 表示 px ≈ 23 画像 px。日付・単価セル等の指定はやや粗い。ズーム要望が出たら v2。 **【2026-09-13】** ズーム（全体 / 150% / 200% / 300%）を実装（§3.4）。300% で最小矩形 8 表示 px ≈ 8 画像 px。
 5. **checkpoint / LayoutBlock.content への除外テキスト残存**は保証外として ADR に明記済み。テナントから「checkpoint も消せ」要求が出た場合は別途スクラブ設計が要る。
 6. **編集モードの同時編集**: put_schema は楽観ロックを持たず、同時保存は**順に**新版として積まれる（後勝ち）。版番号の採番（`max(version)+1`）は `pg_advisory_xact_lock(hashtext('field_schemas:' || tenant || ':' || doc_type))` で直列化する（第 3 回敵対的レビュー 1: ロック無しでは `UNIQUE (tenant_id, doc_type, version)` に衝突した側が E2000（500）になっていた。4 スレッド × 6 回の PUT で 2 件が再現）。ロックを経由しない書き込みと重なった場合は `SchemaVersionConflictError` → E1005（再読み込みしてやり直す）。version 表示 + 保存時警告で v1 は許容。
 7. **shadow → enforce の運用移行**: フラグ on のタイミング・テナント別段階適用の要否は実測後に決める。

@@ -6,10 +6,18 @@
 // 入れない（再ドラッグでの置換で代替できるうえ、ハンドルの当たり判定は矩形が小さい
 // ときに描画開始と競合する）。
 //
-// 表示は**ページ全体 fit**。スクロールできる大きな画像にすると、ドラッグ中に
-// 端へ寄って自動スクロールが起きたときの座標補正が要り、そこがずれると
-// 「見えている位置と保存される位置が違う」という最悪の不具合になる。
-// 全体を収めてしまえばその経路自体が消える。
+// 表示の既定は**ページ全体 fit**。v1 ではスクロールできる大きな画像を避けた（ドラッグ中に
+// 端へ寄って自動スクロールが起きたときの座標補正がずれると「見えている位置と保存される
+// 位置が違う」という最悪の不具合になる）。
+//
+// ズーム（zoom > 1。2026-09-13、設計 §3.4 / §10-8 の反転）はその前提を次の 2 点で守った
+// うえで足した:
+// - 座標は毎イベント stage の getBoundingClientRect() から取る（stagePoint）。コンテナが
+//   スクロールしても stage 相対の値は動かないので、開始点 (x0, y0) はそのまま有効
+// - ドラッグは pointer capture で追うので、ブラウザのネイティブ自動スクロール（テキスト
+//   選択・ネイティブ D&D のもの）は起きない。ホイールで動かしても上の理由でずれない
+// 倍率は「fit の何倍か」。fit のときに測った img の幅（fitWidth）× zoom を img の幅にし、
+// キャンバス側をスクロールさせる（.rgn-canvas.zoomed）。
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
@@ -50,6 +58,7 @@ export function RegionCanvas({
   onBackgroundDown,
   onGhostClick,
   onDelete,
+  zoom = 1,
 }: {
   documentId: string;
   pageNo: number;
@@ -66,6 +75,8 @@ export function RegionCanvas({
   onBackgroundDown: () => void;
   onGhostClick: (key: string) => void;
   onDelete: (id: string) => void;
+  // 表示倍率（fit の何倍か）。1 = ページ全体 fit。>1 でキャンバスがスクロールする
+  zoom?: number;
 }) {
   const { url, failed } = usePageImage(documentId, pageNo);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -75,6 +86,11 @@ export function RegionCanvas({
   // ドラッグ中は useLayoutEffect が測り直しを止めるため、開始時点の値で確定してしまう
   const scaleRef = useRef(0);
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  // fit のときの img の表示幅（px）。zoom > 1 のとき img の幅を fitWidth × zoom にする。
+  // state は描画用、ref は measure() から最新値を読むため（scale と同じ理由）
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const fitWidthRef = useRef(0);
+  const [fitWidth, setFitWidth] = useState(0);
 
   const W = pageDim?.width ?? 0;
   const H = pageDim?.height ?? 0;
@@ -97,8 +113,23 @@ export function RegionCanvas({
       apply(0); // このページの画像ではない → 操作を受け付けない
       return;
     }
+    const applyFit = (v: number) => {
+      if (v > 0 && v !== fitWidthRef.current) {
+        fitWidthRef.current = v;
+        setFitWidth(v);
+      }
+    };
+    if (zoom <= 1) {
+      // fit 表示のときだけ「fit の幅」を覚える（ズーム中の幅は fit × zoom なので使わない）
+      applyFit(img.clientWidth);
+    } else if (fitWidthRef.current <= 0 && canvasRef.current) {
+      // 画像が届く前にズームされた: fit を測れていないので、コンテナから見積もる
+      // （幅 or 高さ contain の小さい方。padding 14px × 2 を引く）
+      const c = canvasRef.current;
+      applyFit(Math.floor(Math.min(c.clientWidth - 28, ((c.clientHeight - 28) * W) / H)));
+    }
     apply(img.clientWidth > 0 ? img.clientWidth / W : 0);
-  }, [W, H]);
+  }, [W, H, zoom]);
 
   // 描画のたびに測り直す。キャッシュ済み画像では load がレイアウト前に発火して
   // clientWidth が 0 になり、矩形が左上に潰れる（DocViewer で実際に踏んだ）。
@@ -214,11 +245,14 @@ export function RegionCanvas({
     height: (b[3] - b[1]) * scale,
   });
 
+  const zoomed = zoom > 1 && fitWidth > 0;
+  const imgStyle = zoomed ? { width: Math.round(fitWidth * zoom) } : undefined;
+
   return (
-    <div className="rgn-canvas">
+    <div ref={canvasRef} className={`rgn-canvas${zoomed ? " zoomed" : ""}`}>
       <div
         ref={stageRef}
-        className={`rgn-stage${ready ? "" : " loading"} mode-${mode}`}
+        className={`rgn-stage${ready ? "" : " loading"} mode-${mode}${zoomed ? " zoomed" : ""}`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -232,6 +266,7 @@ export function RegionCanvas({
             alt={`ページ ${pageNo}`}
             draggable={false}
             onLoad={measure}
+            style={imgStyle}
           />
         ) : (
           <div className="rgn-loading">
