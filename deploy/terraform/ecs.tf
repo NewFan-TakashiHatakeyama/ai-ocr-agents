@@ -28,6 +28,7 @@ resource "aws_ecs_task_definition" "gateway" {
       # Fargate のディスクはタスク毎に独立なので、gateway(2台) 間でも
       # orchestrator-worker からも読めず抽出が失敗する。
       { name = "S3_BUCKET", value = aws_s3_bucket.this.id },
+      { name = "INGEST_PREPROCESS", value = var.ingest_preprocess },
       { name = "S3_KMS_KEY_ID", value = var.s3_kms_key_id },
       # チャットグラフ（§4.5）の supervisor が LLM を呼ぶ。未設定だと
       # RuleBasedChatAgent に落ち、ツールが一切使われない（実 AWS で検出）。
@@ -102,6 +103,7 @@ resource "aws_ecs_task_definition" "orchestrator_worker" {
       { name = "LLM_PROVIDER", value = var.llm_provider },
       # S3 イベント駆動トリガー（§16 P4）。ingest の書込み先と SQS 購読先
       { name = "S3_BUCKET", value = aws_s3_bucket.this.id },
+      { name = "INGEST_PREPROCESS", value = var.ingest_preprocess },
       { name = "S3_KMS_KEY_ID", value = var.s3_kms_key_id },
       { name = "TRIGGER_SQS_URL", value = data.aws_sqs_queue.workflow_trigger.url },
       # 読取領域ヒント（設計 region-field-add-and-hint-v2）。既定 on で、REGION_KIE_HINTS は

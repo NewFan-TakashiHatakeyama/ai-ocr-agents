@@ -271,3 +271,15 @@ variable "acm_certificate_arn" {
   default     = ""
   description = "ALB HTTPS リスナ用 ACM 証明書 ARN（空なら HTTP のみ）"
 }
+
+# 取込の前処理（DD-01 / ADR-0002 追記）。空・"none"（既定）は前処理なし、"deskew" で
+# 射影プロファイルの傾き補正（gateway の手動アップロードと worker の自動取込の両方に効く）。
+variable "ingest_preprocess" {
+  type        = string
+  default     = ""
+  description = "取込の前処理。空は none、\"deskew\" で傾き補正"
+  validation {
+    condition     = contains(["", "none", "deskew"], var.ingest_preprocess)
+    error_message = "ingest_preprocess は \"\" / \"none\" / \"deskew\" のいずれか。"
+  }
+}
