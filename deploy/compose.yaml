@@ -112,6 +112,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-qa-secret-0123456789-abcdefghijklmnop}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       STORAGE_ROOT: /data
+      # 取込の前処理（DD-01 / ADR-0002 追記）。空・none＝しない（既定）、deskew＝傾き補正
+      INGEST_PREPROCESS: ${INGEST_PREPROCESS:-}
       # ページ画像・原本は結合テストではローカル FS（本番は S3_BUCKET を設定）
     volumes:
       - appdata:/data
@@ -180,6 +182,8 @@ services:
       BOX_CLIENT_SECRET: ${BOX_CLIENT_SECRET:-}
       BOX_ENTERPRISE_ID: ${BOX_ENTERPRISE_ID:-}
       STORAGE_ROOT: /data
+      # 取込の前処理（DD-01 / ADR-0002 追記）。空・none＝しない（既定）、deskew＝傾き補正
+      INGEST_PREPROCESS: ${INGEST_PREPROCESS:-}
     volumes:
       - appdata:/data
       - ./gdrive-fake:/gdrive-fake

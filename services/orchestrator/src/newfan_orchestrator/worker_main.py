@@ -207,16 +207,19 @@ def main() -> None:
             import boto3
 
             from newfan_ingest import IngestService
+            from newfan_ingest.preprocess import preprocessor_from_env
             from newfan_ingest.rasterize import AutoRasterizer
             from newfan_ingest.storage import S3ObjectStore
 
             s3 = boto3.client("s3")
+            # 前処理は gateway と同じ INGEST_PREPROCESS（none|deskew）で揃える（ADR-0002 追記）
             ingest = IngestService(
                 S3ObjectStore(
                     os.environ["S3_BUCKET"],
                     kms_key_id=os.environ.get("S3_KMS_KEY_ID") or None,
                 ),
                 AutoRasterizer(),
+                preprocessor_from_env(),
             )
             trigger = S3TriggerConsumer(
                 sqs=boto3.client("sqs"),
@@ -292,6 +295,7 @@ def main() -> None:
                 continue
             if saas_ingest is None:
                 from newfan_ingest import IngestService
+                from newfan_ingest.preprocess import preprocessor_from_env
                 from newfan_ingest.rasterize import AutoRasterizer
 
                 # 保存先は gateway と同じ規約: S3_BUCKET があれば S3、無ければローカル FS
@@ -308,7 +312,7 @@ def main() -> None:
                     from newfan_ingest.storage import LocalObjectStore
 
                     object_store = LocalObjectStore(Path(os.environ.get("STORAGE_ROOT", "/data")))
-                saas_ingest = IngestService(object_store, AutoRasterizer())
+                saas_ingest = IngestService(object_store, AutoRasterizer(), preprocessor_from_env())
             from newfan_orchestrator.workflow_trigger import FolderEventPoller
 
             saas_pollers[kind] = FolderEventPoller(

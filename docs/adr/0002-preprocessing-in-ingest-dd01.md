@@ -41,3 +41,18 @@ DD-01 は「HITL ビューアにはパイプラインが返す前処理済みペ
 
 反映済み: 詳細設計 v1.2（`NewFan_AI-OCRエージェント詳細設計書_v1.2.md`）で DD-01 の本文を
 本 ADR の方式（ingest 側前処理）に更新済み。
+
+## 追記（2026-09-13）: 傾き補正の最小実装（`DeskewPreprocessor`）
+
+「軽量な自前回転」として、射影プロファイル法の傾き補正 `newfan_ingest.preprocess.DeskewPreprocessor`
+を入れた（Pillow のみ、±5° を 1° → 0.25° の 2 段で探索、幅 800 px の縮小グレースケールで判定、
+補正は元解像度で bicubic・余白は白・**寸法は変えない**）。有効化は `INGEST_PREPROCESS=deskew`
+（既定 `none`）。gateway の手動アップロードと orchestrator-worker の自動取込（S3 / SaaS）の
+両方が同じ環境変数を読む。適用した回転角（反時計回りが正）は `pages.preproc.angle`、判定の内訳
+（推定角・山の高さ `gain`・適用したか）は `pages.preproc.deskew` に残る。
+
+補正しない条件: |角| < 0.3°、または最良角の射影分散が 0° の 1.05 倍に届かない（山が無い＝白紙・
+写真・罫線だけ）。画像を開けない場合は warning を出して無補正で通す（取込を止めない）。
+
+未実装のまま: 90°/180° の向き補正（orientation）、アンワープ。方針決定の材料は
+`docs/design/dd01-deskew-measurement-2026-09-13.md`（手元 30 帳票の傾き分布）。

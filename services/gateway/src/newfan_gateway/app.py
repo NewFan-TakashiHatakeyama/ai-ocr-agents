@@ -134,6 +134,8 @@ def _default_ingestor(settings: Settings, store: Any) -> Ingestor:
     # PdfiumRasterizer 単体だと PNG/JPEG のアップロードが NotImplementedError → 500 になる
     # （validate_upload は pdf/png/jpeg/tiff/office を通すため。実コンテナで検出）。
     from newfan_ingest import IngestService
+    from newfan_ingest.preprocess import preprocessor_from_env
     from newfan_ingest.rasterize import AutoRasterizer
 
-    return IngestService(store, AutoRasterizer())
+    # 前処理は INGEST_PREPROCESS（none|deskew。既定 none。ADR-0002 追記）
+    return IngestService(store, AutoRasterizer(), preprocessor_from_env())

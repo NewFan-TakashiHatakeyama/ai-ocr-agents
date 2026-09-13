@@ -188,3 +188,11 @@ TF_VAR_region_kie_hints=0 scripts/aws_env.sh resume   # tfvars の値が優先�
 
 RDS の `engine_version` はメジャー指定（`16`）にしている。ap-northeast-1 の 16 系は 16.9 以降しか
 提供されておらず、マイナーを固定すると存在しない版を掴んで apply が落ちるため（実測で確認）。
+
+## 取込の前処理（`ingest_preprocess`）
+
+| 変数 | 環境変数 | 意味 |
+|---|---|---|
+| `ingest_preprocess` | `INGEST_PREPROCESS` | 取込時のページ前処理（DD-01 / ADR-0002 追記）。空・`none`（既定）は何もしない。`deskew` で射影プロファイルの傾き補正（±5°、Pillow のみ。gateway の手動アップロードと worker の自動取込の両方）。適用した回転角は `pages.preproc.angle`、判定の内訳は `pages.preproc.deskew` に残る |
+
+有効化の判断材料は `docs/design/dd01-deskew-measurement-2026-09-13.md`（手元 30 帳票の傾き分布）。
