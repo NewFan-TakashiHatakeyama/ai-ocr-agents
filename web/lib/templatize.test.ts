@@ -25,6 +25,7 @@ import {
   type Preserved,
   type PreviewRegion,
   type Px,
+  spansExcludedByRect,
 } from "./templatize";
 
 // ---- フィクスチャ ----
@@ -984,5 +985,35 @@ describe("buildSaveBody: 例示値を消す（§2.3）", () => {
     expect(saved.example_value).toBeNull();
     expect(saved.origin).toBe("ghost"); // 出どころ・作成時刻は保つ
     expect(saved.created_at).toBe("2026-09-11T00:00:00Z");
+  });
+});
+
+describe("spansExcludedByRect（除外行の「この領域内の文字」）", () => {
+  const span = (span_id: number, bbox: [number, number, number, number], text = "x"): RunSpanDto => ({
+    span_id,
+    text,
+    bbox,
+  });
+
+  it("サーバの filter_spans と同じ 50% 判定（境界を含む）。読み順で返す", () => {
+    const spans = [
+      span(3, [100, 100, 200, 120], "c"), // 全没
+      span(1, [150, 100, 250, 120], "a"), // 50% ちょうど → 消える
+      span(2, [160, 100, 260, 120], "b"), // 40% → 残る
+    ];
+    expect(spansExcludedByRect(spans, [0, 0, 200, 200]).map((s) => s.span_id)).toEqual([1, 3]);
+  });
+
+  it("ヒント用の spansInRect（30%）より厳しい: 35% 重なる span はヒントには入るが除外では消えない", () => {
+    const s = span(1, [165, 100, 265, 120]); // 35%
+    expect(spansInRect([s], [0, 0, 200, 200])).toHaveLength(1);
+    expect(spansExcludedByRect([s], [0, 0, 200, 200])).toHaveLength(0);
+  });
+
+  it("面積の無い span は中心点で判定する。bbox の無い span と逆向きの矩形", () => {
+    const zero = span(1, [150, 100, 150, 100]);
+    expect(spansExcludedByRect([zero], [200, 200, 0, 0])).toHaveLength(1);
+    expect(spansExcludedByRect([zero], [160, 0, 200, 200])).toHaveLength(0);
+    expect(spansExcludedByRect([{ span_id: 2, text: "n" }], [0, 0, 200, 200])).toHaveLength(0);
   });
 });

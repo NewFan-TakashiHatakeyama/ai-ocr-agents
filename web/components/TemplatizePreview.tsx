@@ -28,6 +28,8 @@ import {
   padOf,
   resolveGhosts,
   resolvePage,
+  spansExcludedByRect,
+  truncateChars,
   validateDrafts,
   type DraftRow,
   type Preserved,
@@ -52,6 +54,13 @@ type Selection = { kind: "row"; rowId: string } | { kind: "region"; regionId: st
 function emptyRow(): DraftRow {
   return { rowId: newUuid(), name: "", label: "", type: "string", include: true, sample: "", isNew: true };
 }
+
+// キャンバスの表示倍率（fit の何倍か。設計 §3.4）。fit では A4@250dpi で最小矩形 8 表示 px
+// ≈ 23 画像 px と粗く、日付・単価セルの指定がつらい（§11-4）。
+const ZOOM_LEVELS = [1, 1.5, 2, 3] as const;
+type ZoomLevel = (typeof ZOOM_LEVELS)[number];
+// 除外行の「この領域内の文字」に添える原文の上限（読み順に連結して切る）
+const EXCLUDE_PREVIEW_MAX_LEN = 40;
 
 export function TemplatizePreview({
   documentId,
@@ -91,6 +100,7 @@ export function TemplatizePreview({
   const [selection, setSelection] = useState<Selection>(null);
   const [drawMode, setDrawMode] = useState<"include" | "exclude">("include");
   const [page, setPage] = useState(1);
+  const [zoom, setZoom] = useState<ZoomLevel>(1);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(mode === "edit");
@@ -328,6 +338,22 @@ export function TemplatizePreview({
 
   const excludes = regions.filter((r) => r.kind === "exclude");
   const includes = regions.filter((r) => r.kind === "include");
+
+  // 除外行の「この領域内の文字」（この帳票で実際に消える span）のために、除外の引かれた
+  // ページの span を引く（未取得のときだけ。失敗＝null は除外を引き直したときに取り直す）。
+  // 除外は「消しすぎ」が危険なので、保存する前に何が消えるかを見せる
+  const excludePagesKey = Array.from(new Set(excludes.map((r) => r.drawnPage)))
+    .sort((a, b) => a - b)
+    .join(",");
+  useEffect(() => {
+    if (!excludePagesKey) return;
+    for (const p of excludePagesKey.split(",").map(Number)) {
+      if (spansByPage.get(p)) continue;
+      void loadSpans(p);
+    }
+    // spansByPage は読むだけ（取得の完了で変わっても取り直す必要は無い）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [excludePagesKey, loadSpans]);
 
   // --- 操作 ---
   function patchRow(rowId: string, p: Partial<DraftRow>) {
@@ -603,6 +629,23 @@ export function TemplatizePreview({
                   p.{p}
                 </button>
               ))}
+              <span className="rgn-zoom" role="group" aria-label="表示倍率">
+                {ZOOM_LEVELS.map((z) => (
+                  <button
+                    key={z}
+                    className={`pagetab${zoom === z ? " on" : ""}`}
+                    onClick={() => setZoom(z)}
+                    aria-pressed={zoom === z}
+                    title={
+                      z === 1
+                        ? "ページ全体を表示"
+                        : `全体表示の ${z} 倍。日付・単価セルなど小さな項目を正確に囲むとき（スクロールできます）`
+                    }
+                  >
+                    {z === 1 ? "全体" : `${Math.round(z * 100)}%`}
+                  </button>
+                ))}
+              </span>
               <span className="spacer" />
               <span className="sub">
                 {addingFromRegion
@@ -630,6 +673,7 @@ export function TemplatizePreview({
               // 「次のドラッグが新しい項目」という約束が崩れる
               ghosts={drawMode === "include" && !addingFromRegion ? ghosts : []}
               mode={drawMode}
+              zoom={zoom}
               selectedId={selectedRegionId}
               onDraw={onDraw}
               onSelect={(id) => setSelection(id ? { kind: "region", regionId: id } : null)}
@@ -847,7 +891,19 @@ export function TemplatizePreview({
                       してドラッグしてください。
                     </p>
                   )}
-                  {excludes.map((r) => (
+                  {excludes.map((r) => {
+                    // この帳票でこの除外が実際に消す span（サーバの規則＝重なり 50%）。
+                    // 別ページの応答は使わない（page_no が一致しなければ未取得と同じ）
+                    const pageSpans = spansByPage.get(r.drawnPage);
+                    const hit =
+                      pageSpans && pageSpans.page_no === r.drawnPage
+                        ? spansExcludedByRect(pageSpans.spans, r.bbox)
+                        : [];
+                    const preview = hit
+                      .map((s) => s.text.trim())
+                      .filter((t) => t.length > 0)
+                      .join(" ");
+                    return (
                     <div
                       key={r.id}
                       className={`rgn-exrow${selectedRegionId === r.id ? " on" : ""}`}
@@ -891,8 +947,20 @@ export function TemplatizePreview({
                       <button className="btn sm ghost" onClick={() => deleteRegion(r.id)}>
                         削除
                       </button>
+                      <span className="sub rgn-rownote clip" title={preview || undefined}>
+                        この領域内の文字:{" "}
+                        {pageSpans === undefined
+                          ? "読み取り中…"
+                          : pageSpans === null
+                            ? "（文字を読み取れませんでした）"
+                            : hit.length === 0
+                              ? "なし（この帳票では何も消えません）"
+                              : `${hit.length} 件（p.${r.drawnPage}）` +
+                                (preview ? `: ${truncateChars(preview, EXCLUDE_PREVIEW_MAX_LEN)}` : "")}
+                      </span>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 {excludes.length > 0 && (
