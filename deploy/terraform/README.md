@@ -159,7 +159,7 @@ aws ecs run-task --cluster $(terraform output -raw cluster_name) \
 |---|---|---|
 | `region_kie_hints` | `REGION_KIE_HINTS` | **キルスイッチ**。空は on、`"0"`（`false` / `no` / `off` も可）で止める。それ以外の値は on |
 | `region_hints_activated_at` | `REGION_HINTS_ACTIVATED_AT` | 「有効化前に引かれた領域」注記の境界（ISO 8601。**時刻と Z かオフセットまで必須**。日付だけ・tz 無しは plan で弾く ── worker は tz の無い値を UTC とみなすので、JST の日付を書くと境界が 9 時間ずれる。JST の時点は `2026-10-01T00:00:00+09:00` のように書く）。空はコードの定数 `2026-09-12T00:00:00Z`。この環境で実際に on にした時点が違うときだけ渡す。解釈できない値は worker が warning を出して定数に倒す |
-| `region_guard_enforce` | `REGION_GUARD_ENFORCE` | 位置ずれ検知（読取領域と違う位置で項目が見つかった）を**レビューへ反映**する（Phase 5）。空は shadow（metrics とログのみ）、`"1"` で有効化。有効化の判断は shadow 実測（設計 `region-template-editor.md` §9 Phase 5）に基づく |
+| `region_guard_enforce` | `REGION_GUARD_ENFORCE` | 位置ずれ検知（読取領域と違う位置で項目が見つかった）を**レビューへ反映**する（Phase 5）。空は shadow（metrics とログのみ）、`"1"` で有効化。2026-09-13 の shadow 実測（`docs/design/region-measurement-2026-09-13-guard.md`: 誤検知 field 3.0%・doc レベル 0 / 25）で**有効化して良い水準**。まず dev / staging で `"1"` |
 | `region_exclude_skip_on_layout_mismatch` | `REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH` | 別レイアウトと判定したページで**除外領域を見送る**（設計 §5.4 / §11-8）。空は off、`"1"` で有効化。読取領域の例示値がそのページに 1 つも無いときに除外を適用せず、`metrics.region.skipped_exclude_pages` に記録（検証画面にバッジ） |
 
 ```bash
