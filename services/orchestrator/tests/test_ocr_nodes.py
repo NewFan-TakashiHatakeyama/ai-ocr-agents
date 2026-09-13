@@ -338,3 +338,56 @@ def test_白紙ページはページ失敗として記録しない() -> None:
 
     out = ocr_nodes.make_structure_ocr(_BlankPage(), _loader)({"pages": _pages(1, **_DIMS)})
     assert out["errors"] == []
+
+
+# ---------------- 別レイアウトでは除外を見送る（REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH） ----------------
+
+_SCHEMA_PROBE_HIT = {
+    "doc_type": "invoice",
+    "fields": [
+        {"name": "total_amount", "type": "money_jpy",
+         "region": {"page": 1, "rect": [0.25, 0.15, 0.50, 0.25], "example_value": "¥128,000"}}
+    ],
+}
+_SCHEMA_PROBE_MISS = {
+    "doc_type": "invoice",
+    "fields": [
+        {"name": "issuer_name", "type": "string",
+         "region": {"page": 1, "rect": [0.25, 0.15, 0.50, 0.25], "example_value": "株式会社山田"}}
+    ],
+}
+
+
+def test_exclude_skipped_on_layout_mismatch_when_flag_on(monkeypatch) -> None:
+    """読取領域の例示値がそのページに 1 つも無い＝別レイアウト → 除外を見送る。
+    span は残り、見送ったページが metrics に残る（バッジの根拠）。"""
+    monkeypatch.setenv("REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH", "1")
+    node = ocr_nodes.make_structure_ocr(_FakeStructureClient(), _loader)
+    out = node({"pages": _pages(1, **_DIMS), "exclude_regions": [_COVER_SPAN], "schema": _SCHEMA_PROBE_MISS})
+    assert [s.text for s in out["spans"]] == ["¥128,000"]
+    region = out["metrics"]["region"]
+    assert region["excluded_spans"] == 0
+    assert region["skipped_exclude_pages"] == [1]
+    assert (region["layout_probe_matched"], region["layout_probe_total"]) == (0, 1)
+
+
+def test_exclude_applied_when_layout_matches(monkeypatch) -> None:
+    monkeypatch.setenv("REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH", "1")
+    node = ocr_nodes.make_structure_ocr(_FakeStructureClient(), _loader)
+    out = node({"pages": _pages(1, **_DIMS), "exclude_regions": [_COVER_SPAN], "schema": _SCHEMA_PROBE_HIT})
+    assert out["spans"] == []
+    region = out["metrics"]["region"]
+    assert region["excluded_spans"] == 1 and region["skipped_exclude_pages"] == []
+    assert (region["layout_probe_matched"], region["layout_probe_total"]) == (1, 1)
+
+
+def test_exclude_applied_when_flag_off_or_no_probe_material(monkeypatch) -> None:
+    """フラグ off（既定）では判定しない。フラグ on でも例示値つき読取領域が無ければ従来どおり適用。"""
+    monkeypatch.delenv("REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH", raising=False)
+    node = ocr_nodes.make_structure_ocr(_FakeStructureClient(), _loader)
+    out = node({"pages": _pages(1, **_DIMS), "exclude_regions": [_COVER_SPAN], "schema": _SCHEMA_PROBE_MISS})
+    assert out["spans"] == [] and out["metrics"]["region"]["excluded_spans"] == 1
+    monkeypatch.setenv("REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH", "1")
+    out = node({"pages": _pages(1, **_DIMS), "exclude_regions": [_COVER_SPAN], "schema": {"doc_type": "x", "fields": []}})
+    assert out["spans"] == [] and out["metrics"]["region"]["excluded_spans"] == 1
+    assert out["metrics"]["region"]["skipped_exclude_pages"] == []

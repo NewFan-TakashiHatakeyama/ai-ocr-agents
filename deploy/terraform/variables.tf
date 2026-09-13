@@ -146,6 +146,24 @@ variable "region_hints_activated_at" {
   }
 }
 
+# 位置ずれ検知（読取領域と違う位置で項目が見つかった）を実際にレビューへ反映するか
+# （設計 region-template-editor D10 / Phase 5）。既定は shadow（metrics とログのみ）。
+# "1" / "true" / "yes" / "on" で有効化。有効化の判断は shadow 実測（誤検知率）に基づく。
+variable "region_guard_enforce" {
+  type        = string
+  default     = ""
+  description = "位置ガードをレビューへ反映する（Phase 5）。空は shadow、\"1\" で有効化"
+}
+
+# 別レイアウトと判定したページで除外領域を見送るか（設計 §5.4 / §11-8）。既定 off。
+# on にすると、読取領域の例示値がそのページに 1 つも見つからないとき除外を適用せず、
+# metrics.region.skipped_exclude_pages に記録する（検証画面にバッジが出る）。
+variable "region_exclude_skip_on_layout_mismatch" {
+  type        = string
+  default     = ""
+  description = "別レイアウトと判定したページで除外領域を見送る。空は off、\"1\" で有効化"
+}
+
 # 推論サービングは Service Connect の client_alias で名前解決する（service_connect.tf）。
 # URL を変数で受けると alias と食い違って解決不能になるため、locals で固定する。
 
