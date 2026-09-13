@@ -108,6 +108,9 @@ per-field レビューを出さず metrics とバッジに留める。取引先 
 # セットごとに 1 回（S2 は数分、S1 / S3 は 10〜20 分）。compose の gateway / worker が動いていること。
 # --regions は読取領域ヒント計測（run_region_arms.sh）が出力した領域ファイルをそのまま使う
 for ARM in s2 s3 s1; do
-  PYTHONPATH=golden/src PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m newfan_golden.region_guard_shadow     --gold golden/data/region_ab_${ARM}.jsonl --regions golden/out/phase4r4/c1/${ARM}_regions_full.json     --api http://localhost:8000/v1 --token "$TOKEN" --trials 1 --shift 0.12     --out golden/out/phase5/${ARM}_guard_shadow.json
+  PYTHONPATH=golden/src PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m newfan_golden.region_guard_shadow \
+    --gold golden/data/region_ab_${ARM}.jsonl --regions golden/out/phase4r4/c1/${ARM}_regions_full.json \
+    --api http://localhost:8000/v1 --token "$TOKEN" --trials 1 --shift 0.12 \
+    --out golden/out/phase5/${ARM}_guard_shadow.json
 done
 ```
