@@ -7,6 +7,7 @@ test_workflow_runner_pg.py が担当。
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -406,3 +407,39 @@ def test_完走済みcheckpointへのresumeは射影を終端へ同期する(hen
     assert _hresume(runner, "confirm_done", "confirmed") == "succeeded"
     assert store.runs["wfrun_h"]["status"] == "succeeded"
     assert len(webhook.sent) == 1  # webhook は再実行されない
+
+
+def test_extractのdoc_type指定は実行時に最新版へ解決する() -> None:
+    """設計 region-template-editor §4.4b v2 (b): schema_id 固定ではなく種別で指定すると、
+    テンプレート化・領域編集で作った新版が次の実行から自動で使われる。"""
+    graph = copy.deepcopy(GRAPH)
+    graph["nodes"][1]["config"] = {"doc_type": "invoice"}
+    store = InMemoryWorkflowRunStore()
+    store.seed_run("wfrun_1", tenant_id=TENANT, workflow_id="workflow_1", graph_json=graph)
+    store.seed_webhook(TENANT, "con_hook", "https://example.com/hook", "sec")
+    store.seed_doc_type_schema(TENANT, "invoice", "sch_inv_v7")
+    runner = WorkflowRunner(
+        store, InMemoryQueueConsumer(), RunnerDeps(store=store, send_webhook=FakeWebhook().send),
+        checkpointer=MemorySaver(),
+    )
+    assert _start(runner) == "running"
+    assert [r["schema_id"] for r in store.extract_runs.values()] == ["sch_inv_v7"]
+    # 実際に使った版は node_outputs に残る（監査）
+    assert store.runs["wfrun_1"]["waiting"]["kind"] == "await_extract"
+
+
+def test_extractのdoc_type指定が解決できなければ理由の分かる失敗() -> None:
+    """未登録・アーカイブ済みの種別を空スキーマで「成功」させない（L013 は有効化時にしか
+    走らないので、有効化後のアーカイブはここで初めて分かる）。"""
+    graph = copy.deepcopy(GRAPH)
+    graph["nodes"][1]["config"] = {"doc_type": "gone"}
+    store = InMemoryWorkflowRunStore()
+    store.seed_run("wfrun_1", tenant_id=TENANT, workflow_id="workflow_1", graph_json=graph)
+    store.seed_webhook(TENANT, "con_hook", "https://example.com/hook", "sec")
+    runner = WorkflowRunner(
+        store, InMemoryQueueConsumer(), RunnerDeps(store=store, send_webhook=FakeWebhook().send),
+        checkpointer=MemorySaver(),
+    )
+    assert _start(runner) == "failed"
+    assert store.extract_runs == {}
+    assert "gone" in (store.node_runs[("wfrun_1", "x1")].get("error") or "")

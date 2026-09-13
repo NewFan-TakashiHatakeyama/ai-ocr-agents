@@ -288,3 +288,32 @@ def test_L011_拡張子が重ならなければ許容() -> None:
         [{"from": "t1", "to": "x1"}, {"from": "t2", "to": "x1"}],
     )
     assert not any(f.rule == "L011" for f in lint(g))
+
+
+def _graph_doc_type(doc_type: str = "invoice") -> WorkflowGraph:
+    """extract を doc_type 指定（実行時に最新版へ解決）にした代表形。"""
+    data = copy.deepcopy(CLEAN)
+    data["nodes"][1]["config"] = {"doc_type": doc_type}
+    return WorkflowGraph.model_validate(data)
+
+
+def test_L013_doc_type指定は種別の実在を検査する() -> None:
+    findings = lint(_graph_doc_type("nope"), doc_type_exists=lambda dt: dt == "invoice")
+    l013 = [f for f in findings if f.rule == "L013"]
+    assert [f.node_id for f in l013] == ["x1"]
+    assert l013[0].severity == "error"  # schema_id の L009 と同じく有効化を止める
+    assert "L013" not in _rules(lint(_graph_doc_type("invoice"), doc_type_exists=lambda dt: dt == "invoice"))
+    # resolver 未注入なら skip（オフライン lint）／schema_id 指定のノードには出ない
+    assert "L013" not in _rules(lint(_graph_doc_type("nope")))
+    assert "L013" not in _rules(lint(_graph(), doc_type_exists=lambda dt: False))
+
+
+def test_doc_type指定はL009とL012の対象外() -> None:
+    """doc_type 指定は常に最新版を使うので旧版参照（L012）は起き得ず、schema_id の
+    実在検査（L009）も掛からない（種別の実在は L013 が見る）。"""
+    findings = lint(
+        _graph_doc_type(),
+        schema_exists=lambda sid: False,
+        schema_is_latest=lambda sid: False,
+    )
+    assert "L009" not in _rules(findings) and "L012" not in _rules(findings)

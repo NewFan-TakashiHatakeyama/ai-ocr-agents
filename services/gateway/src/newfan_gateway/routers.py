@@ -1243,6 +1243,16 @@ def _archive_schema(
         # 隠すと次に有効化し直せなくなる（L009）のに、走っている実行は続くという
         # 中途半端な状態を作らない。draft/paused からの参照は止めない（L009 が断る）
         active = wf.workflows_referencing_schema(principal.tenant_id, ids, statuses=("active",))
+        # doc_type 指定（実行時に最新版へ解決）のワークフローも、アーカイブすると次の実行で
+        # 解決先が無くなって失敗する。同じ理由で先に止めさせる
+        seen = {w.id for w in active}
+        active += [
+            w
+            for w in wf.workflows_referencing_doc_type(
+                principal.tenant_id, doc_type, statuses=("active",)
+            )
+            if w.id not in seen
+        ]
         if active:
             raise ApiError(
                 "E1005",
@@ -1597,6 +1607,12 @@ def _validate_graph(data: dict[str, Any]) -> "WorkflowGraph":
         raise ApiError("E4001", "graph_json がスキーマに合いません", details={"errors": errors}) from exc
 
 
+def _doc_type_usable(admin: AdminRepository, tenant_id: str, doc_type: str) -> bool:
+    """L013: extract.doc_type の種別が存在し、アーカイブ済みでない（最新版が使える）。"""
+    rec = admin.get_schema(tenant_id, doc_type)
+    return rec is not None and not rec.archived
+
+
 def _schema_usable(admin: AdminRepository, tenant_id: str, schema_id: str) -> bool:
     """L009 のうち「アーカイブ済み」の側（C9-D）。存在判定は wf.schema_exists が担う。
 
@@ -1622,6 +1638,8 @@ def _lint_workflow(
         ),
         connection_ok=lambda cid: wf.connection_ok(tenant_id, cid),
         schema_is_latest=lambda sid: wf.schema_is_latest(tenant_id, sid),
+        # L013: doc_type 指定（実行時に最新版へ解決）の種別が存在し、アーカイブ済みでない
+        doc_type_exists=lambda dt: _doc_type_usable(admin, tenant_id, dt),
     )
     unsupported = sorted(str(t) for t in {n.type for n in graph.nodes} - IMPLEMENTED_NODE_TYPES)
     return findings, unsupported

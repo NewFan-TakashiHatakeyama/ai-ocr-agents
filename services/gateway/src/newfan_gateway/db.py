@@ -1550,6 +1550,9 @@ class PgWorkflowsRepository:
             tenant_id, "connection_id", [connection_id], statuses=statuses
         )
 
+    def workflows_referencing_doc_type(self, tenant_id: str, doc_type: str, *, statuses=None):
+        return self._workflows_referencing(tenant_id, "doc_type", [doc_type], statuses=statuses)
+
     def workflows_referencing_schema(self, tenant_id: str, schema_ids, *, statuses=None):
         return self._workflows_referencing(
             tenant_id, "schema_id", list(schema_ids), statuses=statuses

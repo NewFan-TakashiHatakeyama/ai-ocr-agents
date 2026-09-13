@@ -137,10 +137,24 @@ def _wrap(node_id: str, node_type: str, fn: Callable, store: WorkflowRunStore) -
 def _make_extract(node: ExtractNode, deps: RunnerDeps) -> Callable:
     def run(state: WorkflowState) -> dict[str, Any]:
         idem = f"{state['workflow_run_id']}:{node.id}"
+        # schema_id 指定は版固定（§11.1）。doc_type 指定は**実行時点の最新版**へ解決する
+        # （設計 region-template-editor §4.4b v2 (b)）。解決できない（未登録・アーカイブ済み）
+        # は空スキーマで「成功」させず、理由の分かる失敗にする（L013 は有効化時にしか
+        # 走らないので、有効化後にアーカイブされた場合はここで初めて分かる）
+        schema_id = node.config.schema_id
+        if not schema_id:
+            schema_id = deps.store.resolve_schema_id_for_doc_type(
+                state["tenant_id"], str(node.config.doc_type)
+            )
+            if not schema_id:
+                raise RuntimeError(
+                    f"帳票種別 {node.config.doc_type!r} のスキーマが見つかりません"
+                    "（未登録かアーカイブ済み）。extract ノードの種別を選び直してください"
+                )
         run_id = deps.store.ensure_extract_run(
             state["tenant_id"],
             state["document_id"],
-            node.config.schema_id,
+            schema_id,
             node.config.options.model_dump(),
             idem,
             notify={"stream": WORKFLOW_STREAM, "workflow_run_id": state["workflow_run_id"]},
@@ -159,7 +173,14 @@ def _make_extract(node: ExtractNode, deps: RunnerDeps) -> Callable:
             "title_text": event.get("title_text") or "",
             "run_confidence": event.get("run_confidence"),
             "fields": event.get("fields", {}),
-            "node_outputs": {node.id: {"run_id": run_id, "status": event.get("status")}},
+            "node_outputs": {
+                node.id: {
+                    "run_id": run_id,
+                    "status": event.get("status"),
+                    # doc_type 指定のときに実際に使った版（監査用。版固定なら config と同じ）
+                    "schema_id": schema_id,
+                }
+            },
         }
 
     return run

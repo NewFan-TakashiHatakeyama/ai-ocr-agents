@@ -197,7 +197,7 @@ P1 実装済み（`packages/workflow/models.py`）。原則は「**未知のも�
 | トリガー | `source.schedule` | `cron`（5 フィールド） | P8 |
 | トリガー | `source.email_attachment` | `connection_id`, `from_filter?`, `subject_filter?` | P8 |
 | 処理 | `process.classify` | `doc_types[]`, `on_unknown` | P8 |
-| 処理 | `process.extract` | `schema_id`（**必須**）, `options.force_vl` | P3 |
+| 処理 | `process.extract` | `schema_id`（版固定）**か** `doc_type`（実行時に最新版へ解決。2026-09-13）の**どちらか一方（必須）**, `options.force_vl` | P3 |
 | 分岐 | `branch.condition` | `branches[{when,to}]`, `else`（**必須**） | P3 |
 | 分岐 | `branch.hitl_gate` | `priority_boost?`, `assignee_group?`, `sla_hours?` | P5 |
 | 変換 | `transform.map_fields` | `mappings[{from\|const, to, format?, mask?}]` | P3 |

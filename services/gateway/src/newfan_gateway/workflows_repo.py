@@ -101,6 +101,17 @@ class WorkflowsRepository(Protocol):
         ...
 
     # activate 時の lint L009/L010 の参照解決
+    def workflows_referencing_doc_type(
+        self,
+        tenant_id: str,
+        doc_type: str,
+        *,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> list[WorkflowRecord]:
+        """extract ノードが ``doc_type``（実行時に最新版へ解決する指定）で当該種別を
+        指すワークフロー。アーカイブのガードが schema_id 参照と併せて見る。"""
+        ...
+
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool: ...
     def schema_is_latest(self, tenant_id: str, schema_id: str) -> bool: ...
     def connection_ok(self, tenant_id: str, connection_id: str) -> bool: ...
@@ -257,6 +268,11 @@ class InMemoryWorkflowsRepository:
             detail={**detail, "name": w.name, "status": w.status, "version": w.version},
         )
         return True
+
+    def workflows_referencing_doc_type(
+        self, tenant_id: str, doc_type: str, *, statuses: Optional[Iterable[str]] = None
+    ) -> list[WorkflowRecord]:
+        return self._referencing(tenant_id, "doc_type", [doc_type], statuses)
 
     def schema_exists(self, tenant_id: str, schema_id: str) -> bool:
         return (tenant_id, schema_id) in self._schemas

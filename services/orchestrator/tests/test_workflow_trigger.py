@@ -282,3 +282,53 @@ def test_activeワークフローゼロなら削除せず保留する() -> None:
     c2, enqueued2, _ = _consumer(store, sqs2)
     assert c2.run_once() == 1
     assert len(enqueued2) == 1
+
+
+def test_取込時に発火ワークフローのextractから宣言種別を決める() -> None:
+    """自動取込（S3 / GDrive / M365 / Box）の帳票にも documents.doc_type を入れる
+    （設計 region-template-editor §11-11）。schema_id 指定は版の種別、doc_type 指定はその
+    種別。別々の種別を指すワークフローが同時に発火したら決めない（None）。"""
+    from newfan_orchestrator.workflow_trigger import InMemoryTriggerStore, TriggerMatch
+
+    def _match(wid: str, cfg: dict) -> TriggerMatch:
+        return TriggerMatch(
+            workflow_id=wid,
+            workflow_version=1,
+            graph_json={
+                "version": 1,
+                "nodes": [
+                    {"id": "t1", "type": "source.s3_event", "config": {"connection_id": "con_s3", "prefix": ""}},
+                    {"id": "x1", "type": "process.extract", "config": cfg},
+                ],
+                "edges": [{"from": "t1", "to": "x1"}],
+            },
+            node_id="t1",
+            connection_id="con_s3",
+        )
+
+    def _register(store: InMemoryTriggerStore, matches: list[TriggerMatch], key: str) -> dict:
+        store.register_ingested(
+            "ten_1",
+            source_key=key,
+            content_hash="etag",
+            document={"id": f"doc_{key}", "storage_uri": "s3://x", "mime_type": "image/png", "page_count": 1},
+            pages=[{"page_no": 1, "image_uri": "s3://x/p1.png"}],
+            matches=matches,
+        )
+        return store.documents[-1]
+
+    s = InMemoryTriggerStore()
+    s.schema_doc_types["sch_inv_v4"] = "invoice"
+    # schema_id 指定 → 版の種別
+    assert _register(s, [_match("wf1", {"schema_id": "sch_inv_v4"})], "a")["doc_type"] == "invoice"
+    # doc_type 指定 → その種別
+    assert _register(s, [_match("wf2", {"doc_type": "quotation"})], "b")["doc_type"] == "quotation"
+    # 同じ種別を指す 2 本なら決まる
+    m1 = _match("wf1", {"schema_id": "sch_inv_v4"})
+    m2 = TriggerMatch(**{**m1.__dict__, "workflow_id": "wf3", "connection_id": "con_s3b"})
+    assert _register(s, [m1, m2], "c")["doc_type"] == "invoice"
+    # 別々の種別なら決めない
+    m3 = TriggerMatch(**{**_match("wf4", {"doc_type": "purchase_order"}).__dict__, "connection_id": "con_s3c"})
+    assert _register(s, [m1, m3], "d")["doc_type"] is None
+    # 版が見つからない schema_id は数えない
+    assert _register(s, [_match("wf5", {"schema_id": "sch_unknown"})], "e")["doc_type"] is None

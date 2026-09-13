@@ -95,8 +95,17 @@ const SCHEMA_LABELS: Record<string, SchemaLabels> = {
   },
   ExtractConfig: {
     schema_id: {
-      label: "使用するスキーマ",
-      help: "抽出する項目を定義したスキーマの ID（スキーマ管理で作成）",
+      label: "使用するスキーマ（版を固定）",
+      help:
+        "抽出する項目を定義したスキーマの版 ID。テンプレート化や領域編集で新しい版を作っても" +
+        "このワークフローには反映されません（「帳票種別」と どちらか一方 を指定）",
+    },
+    doc_type: {
+      label: "帳票種別（常に最新版を使う）",
+      help:
+        "帳票種別で指定すると、実行のたびにその種別の最新版スキーマを使います。" +
+        "テンプレート化や領域編集で作った新版が次の実行から自動で反映されます" +
+        "（「使用するスキーマ」と どちらか一方 を指定）",
     },
     options: { label: "詳細設定" },
   },
@@ -260,6 +269,7 @@ const CONNECTION_TYPE_BY_NODE: Record<string, string> = {
 };
 
 type PickerSchema = { id: string; doc_type: string; version: number };
+type PickerDocType = { doc_type: string; version: number };
 type PickerConn = { id: string; name: string; type: string };
 
 /** schema_id / connection_id の文字列入力を、実在する ID の選択肢（oneOf）へ差し替える。
@@ -269,7 +279,14 @@ type PickerConn = { id: string; name: string; type: string };
  * （消えた接続を参照している等）option として残し、値が黙って消えないようにする。 */
 export function injectPickers(
   schema: RJSFSchema,
-  opts: { nodeType: string; config: Record<string, unknown>; schemas: PickerSchema[]; connections: PickerConn[] },
+  opts: {
+    nodeType: string;
+    config: Record<string, unknown>;
+    schemas: PickerSchema[];
+    connections: PickerConn[];
+    // extract の doc_type（実行時に最新版へ解決）の候補。GET /doc-types
+    docTypes?: PickerDocType[];
+  },
 ): RJSFSchema {
   const clone = JSON.parse(JSON.stringify(schema)) as SchemaNode;
   const props = clone.properties;
@@ -296,6 +313,13 @@ export function injectPickers(
       "schema_id",
       opts.schemas.map((s) => ({ const: s.id, title: `${s.doc_type}（${s.id}・v${s.version}）` })),
       opts.config.schema_id,
+    );
+  }
+  if ("doc_type" in props && opts.nodeType === "process.extract") {
+    setOptions(
+      "doc_type",
+      (opts.docTypes ?? []).map((d) => ({ const: d.doc_type, title: `${d.doc_type}（最新 v${d.version}）` })),
+      opts.config.doc_type,
     );
   }
   if ("connection_id" in props) {

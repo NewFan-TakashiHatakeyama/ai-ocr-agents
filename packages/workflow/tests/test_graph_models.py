@@ -119,10 +119,23 @@ def test_versionは1のみ() -> None:
         WorkflowGraph.model_validate(_mutate(version=2))
 
 
-def test_extractはschema_id必須() -> None:
-    # 無いと load_context が空スキーマを返し、1 項目も抽出しないまま「成功」する
+def test_extractはschema_idかdoc_typeのどちらか一方が必須() -> None:
+    # 両方無いと load_context が空スキーマを返し、1 項目も抽出しないまま「成功」する
     g = _mutate()
     g["nodes"][1]["config"] = {}
+    with pytest.raises(ValidationError, match="どちらか一方"):
+        WorkflowGraph.model_validate(g)
+    # 両方あるのも曖昧なので拒む
+    g["nodes"][1]["config"] = {"schema_id": "sch_x", "doc_type": "invoice"}
+    with pytest.raises(ValidationError, match="どちらか一方"):
+        WorkflowGraph.model_validate(g)
+    # doc_type だけ（実行時に最新版へ解決。設計 region-template-editor §4.4b v2 (b)）
+    g["nodes"][1]["config"] = {"doc_type": "invoice"}
+    wf = WorkflowGraph.model_validate(g)
+    cfg = wf.nodes[1].config
+    assert cfg.doc_type == "invoice" and cfg.schema_id is None
+    # 空文字は指定とみなさない
+    g["nodes"][1]["config"] = {"doc_type": ""}
     with pytest.raises(ValidationError):
         WorkflowGraph.model_validate(g)
 
@@ -197,7 +210,9 @@ def test_catalogは全ノード種別のJSONSchemaを返す() -> None:
     schemas = catalog()
     assert set(schemas) == set(NODE_CONFIG_MODELS)
     assert len(schemas) == 16  # 13 + フォルダ監視3種（gdrive/m365/box, ⑤⑥）
-    assert "schema_id" in schemas["process.extract"]["required"]
+    # schema_id と doc_type はどちらか一方（モデルの validator）なので、どちらも required ではない
+    assert "schema_id" not in schemas["process.extract"].get("required", [])
+    assert {"schema_id", "doc_type"} <= set(schemas["process.extract"]["properties"])
     # extra=forbid が JSON Schema にも出る（フォーム側で未知キーを出さない）
     assert schemas["process.extract"]["additionalProperties"] is False
 

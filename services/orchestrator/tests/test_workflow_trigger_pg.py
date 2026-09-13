@@ -10,6 +10,7 @@ DATABASE_URL_TEST が設定されている時だけ動く。
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -184,3 +185,54 @@ def test_register_ingestedは1TXで登録し再配信は空を返す(seeded) -> 
         matches=[match],
     )
     assert len(run_ids2) == 1
+
+
+def test_register_ingestedはextractノードの種別をdocuments_doc_typeに書く(seeded) -> None:  # noqa: ANN001
+    """自動取込の帳票にも宣言種別を入れる（設計 §11-11）。schema_id 指定は field_schemas の
+    doc_type を引く。実 Pg の SQL（UPDATE と SELECT）で成立することを見る。"""
+    from sqlalchemy import create_engine, text
+
+    from newfan_orchestrator.workflow_trigger import TriggerMatch
+
+    tenant, wf_active = seeded
+    store = _store()
+    sch_id = f"sch_{uuid.uuid4().hex[:20]}"
+    engine = create_engine(_DSN, future=True)  # type: ignore[arg-type]
+    with engine.begin() as c:
+        c.execute(
+            text(
+                "INSERT INTO field_schemas (id, tenant_id, doc_type, version, fields)"
+                " VALUES (:i,:t,'invoice',1, CAST(:f AS jsonb))"
+            ),
+            {"i": sch_id, "t": tenant, "f": json.dumps([{"name": "total_amount", "type": "money_jpy"}])},
+        )
+    graph = {
+        "version": 1,
+        "nodes": [
+            {"id": "t1", "type": "source.s3_event", "config": {"connection_id": "con_s3x", "prefix": "invoices/"}},
+            {"id": "x1", "type": "process.extract", "config": {"schema_id": sch_id}},
+        ],
+        "edges": [{"from": "t1", "to": "x1"}],
+    }
+    doc_id = f"doc_{uuid.uuid4().hex[:24]}"
+    try:
+        run_ids = store.register_ingested(
+            tenant,
+            source_key="ten_x/invoices/typed.png",
+            content_hash="etag-typed",
+            document={
+                "id": doc_id, "storage_uri": "s3://main/x/original.png", "original_name": "typed.png",
+                "mime_type": "image/png", "page_count": 1, "external_ref": "s3://inbox-bkt/ten_x/invoices/typed.png",
+            },
+            pages=[{"page_no": 1, "width": 10, "height": 20, "image_uri": "s3://main/x/p1.png", "preproc": {}}],
+            matches=[TriggerMatch(workflow_id=wf_active, workflow_version=3, graph_json=graph, node_id="t1", connection_id="con_s3x")],
+        )
+        assert len(run_ids) == 1
+        with engine.begin() as c:
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            dt = c.execute(text("SELECT doc_type FROM documents WHERE id=:d"), {"d": doc_id}).scalar()
+        assert dt == "invoice"
+    finally:
+        with engine.begin() as c:
+            c.execute(text("SELECT set_config('app.tenant_id', :t, true)"), {"t": tenant})
+            c.execute(text("DELETE FROM field_schemas WHERE id=:i"), {"i": sch_id})
