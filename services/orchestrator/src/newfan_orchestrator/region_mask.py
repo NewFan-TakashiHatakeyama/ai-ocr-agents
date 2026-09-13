@@ -21,7 +21,16 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from newfan_paddle_client.spans import overlap_area
-from newfan_schemas import ExtractedField, Span, TableCell, TableResult, resolve_page
+from newfan_schemas import (
+    ExtractedField,
+    Span,
+    TableCell,
+    TableResult,
+    resolve_page,
+    sanitize_example_value,
+)
+
+from newfan_orchestrator.region_hint import example_present, is_placeholder_example, span_inside
 
 # span / セルの面積のうち領域に覆われた割合がこれ以上なら除外する。
 # 「交差したら即除外」は本文を巻き込み、中心点だけを見る方式は境界を跨ぐ span で
@@ -38,6 +47,23 @@ REGION_GUARD_PAD_SIDE_RATIO = 0.50
 # 適用する最小 region 件数。n=1 なら 1 件の mismatch が常に「過半」になり、抑止が
 # 常に効いてガードが一度もレビューを出さない。n=2 も過半の判別が成立しない。
 REGION_GUARD_MIN_FIELDS_FOR_LAYOUT = 3
+
+
+def exclude_skip_on_layout_mismatch() -> bool:
+    """別レイアウトと判定したページで除外領域を**適用しない**か（既定 off）。
+
+    除外は doc_type（スキーマ版）単位で決定論的に効くため、同じ doc_type を共有する
+    別レイアウトの取引先帳票では、その座標にある実データを消し得る（設計 D18 / §11-8）。
+    on にすると、読取領域の例示値（テンプレート元でその位置にあった値）がそのページに
+    1 つも見つからないとき、そのページの除外を見送って ``skipped_exclude_pages`` に記録する
+    （``layout_probe``）。判定材料（例示値つきの読取領域）が無いスキーマでは従来どおり適用する。
+    """
+    return os.environ.get("REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def guard_enforced() -> bool:
@@ -72,6 +98,11 @@ class RegionStats:
     excluded_rows: int = 0
     skipped_pages_no_dims: list[int] = field(default_factory=list)
     markdown_dropped_pages: list[int] = field(default_factory=list)
+    # 別レイアウトと判定して除外を見送ったページ（REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH）
+    skipped_exclude_pages: list[int] = field(default_factory=list)
+    # レイアウト判定の材料: 例示値つき読取領域のうち、そのページで例示値が見つかった数／総数
+    layout_probe_matched: int = 0
+    layout_probe_total: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +111,9 @@ class RegionStats:
             "excluded_rows": self.excluded_rows,
             "skipped_pages_no_dims": sorted(set(self.skipped_pages_no_dims)),
             "markdown_dropped_pages": sorted(set(self.markdown_dropped_pages)),
+            "skipped_exclude_pages": sorted(set(self.skipped_exclude_pages)),
+            "layout_probe_matched": self.layout_probe_matched,
+            "layout_probe_total": self.layout_probe_total,
         }
 
 
@@ -213,6 +247,50 @@ def mask_tables(
             )
         )
     return out, stats
+
+
+# ---------------- 除外前のレイアウト判定（設計 §5.4 / §11-8） ----------------
+
+
+def layout_probe(
+    schema: dict[str, Any],
+    page_no: int,
+    page_count: int,
+    page_w: Optional[int],
+    page_h: Optional[int],
+    spans: list[Span],
+) -> Optional[tuple[int, int]]:
+    """このページがテンプレート元と同じレイアウトかを、**KIE の前に**決定論で測る。
+
+    材料は読取領域（include）の ``example_value``（テンプレート元でその位置にあった値）。
+    領域を画素へ射影し、その中の span の原文に例示値があるか（``example_present``、
+    照合キーは norm_key）を数える。戻り値は ``(見つかった数, 例示値つき領域の数)``。
+    このページに掛かる例示値つき領域が無い（材料が無い）なら None。
+
+    記入例語の例示値（「〇〇株式会社」「YYYY/MM/DD」等。``is_placeholder_example``）と
+    消毒で空になる値は**材料に数えない**。どの帳票にも無い値を探して「見つからない＝
+    別レイアウト」とすると、そのスキーマの全帳票で除外が止まる。
+
+    位置ガード（§5.5）は KIE の**後**に field.bbox で判定するため、除外（KIE の前）の
+    降格には使えない（設計 §5.4「順序が逆」）。こちらは KIE 前に使える情報だけで判定する。
+    """
+    if not page_w or not page_h or page_w <= 0 or page_h <= 0:
+        return None
+    total = matched = 0
+    for region in regions_by_field(schema).values():
+        rect = _rect_of(region)
+        ev_raw = region.get("example_value") if isinstance(region, dict) else None
+        example = sanitize_example_value(ev_raw) if isinstance(ev_raw, str) else None
+        if rect is None or not example or is_placeholder_example(example):
+            continue
+        if not resolve_page(_page_of(region), page_no, page_count):
+            continue
+        px = project(rect, int(page_w), int(page_h))
+        cands = [s for s in spans if s.page == page_no and span_inside(s.bbox, px)]
+        total += 1
+        if example_present(example, cands):
+            matched += 1
+    return (matched, total) if total else None
 
 
 # ---------------- include 領域の位置ガード（§5.5） ----------------

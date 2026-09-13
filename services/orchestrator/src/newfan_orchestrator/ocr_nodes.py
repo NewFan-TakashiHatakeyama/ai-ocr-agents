@@ -26,6 +26,8 @@ from newfan_paddle_client import (
 from newfan_schemas import ExtractionState, ReviewItem, Span, SpanSource
 
 from newfan_orchestrator.region_mask import (
+    exclude_skip_on_layout_mismatch,
+    layout_probe,
     RegionStats,
     filter_spans,
     mask_tables,
@@ -156,10 +158,51 @@ def _merge_region_metrics(
     add = stats.as_dict()
     for key in ("excluded_spans", "excluded_cells", "excluded_rows"):
         cur[key] = int(cur.get(key, 0)) + int(add[key])
-    for key in ("skipped_pages_no_dims", "markdown_dropped_pages"):
+    for key in ("layout_probe_matched", "layout_probe_total"):
+        cur[key] = int(cur.get(key, 0)) + int(add[key])
+    for key in ("skipped_pages_no_dims", "markdown_dropped_pages", "skipped_exclude_pages"):
         cur[key] = sorted(set(list(cur.get(key, []) or []) + add[key]))
     metrics["region"] = cur
     return metrics
+
+
+def _skip_if_layout_mismatch(
+    stage: str,
+    state: ExtractionState,
+    page_no: int,
+    page_count: int,
+    w: Any,
+    h: Any,
+    spans: list[Span],
+    px_regions: list[list[int]],
+    rstats: RegionStats,
+) -> list[list[int]]:
+    """別レイアウトと判定したページでは除外領域を見送る（設計 §5.4 / §11-8。既定 off）。
+
+    除外は doc_type 単位で全帳票に当たるため、同じ doc_type の別レイアウト帳票では
+    その座標の実データを消し得る。読取領域の例示値がそのページに 1 つも無ければ
+    別レイアウトとみなして適用しない（見送ったページは metrics に残し、検証画面の
+    バッジで知らせる）。材料の無いスキーマ・フラグ off では何もしない。
+    """
+    if not px_regions or not exclude_skip_on_layout_mismatch():
+        return px_regions
+    probe = layout_probe(dict(state.get("schema") or {}), page_no, page_count, w, h, spans)
+    if probe is None:
+        return px_regions
+    matched, total = probe
+    rstats.layout_probe_matched += matched
+    rstats.layout_probe_total += total
+    if matched > 0:
+        return px_regions
+    logger.warning(
+        "[%s] 読取領域の例示値がこのページに 1 つも見つからないため除外領域を適用しません"
+        "（別レイアウトの可能性）: page=%s probe=0/%s",
+        stage,
+        page_no,
+        total,
+    )
+    rstats.skipped_exclude_pages.append(page_no)
+    return []
 
 
 def make_structure_ocr(
@@ -236,6 +279,9 @@ def make_structure_ocr(
                     "[structure_ocr] ページ寸法が無いため除外領域を適用しません: page=%s", page_no
                 )
                 rstats.skipped_pages_no_dims.append(page_no)
+            px_regions = _skip_if_layout_mismatch(
+                "structure_ocr", state, page_no, page_count, w, h, page_spans, px_regions, rstats
+            )
             page_spans, n_excluded = filter_spans(page_spans, px_regions)
             rstats.excluded_spans += n_excluded
             # DD-02: 低確信 span を crop→/ocr 再認識で補完（ocr_client 注入時のみ）
@@ -340,6 +386,9 @@ def make_vl_fallback(
                     "[vl_fallback] ページ寸法が無いため除外領域を適用しません: page=%s", page_no
                 )
                 rstats.skipped_pages_no_dims.append(page_no)
+            px_regions = _skip_if_layout_mismatch(
+                "vl_fallback", state, page_no, page_count, w, h, vl_spans, px_regions, rstats
+            )
             vl_spans, n_excluded = filter_spans(vl_spans, px_regions)
             rstats.excluded_spans += n_excluded
             spans.extend(vl_spans)  # 既存 OCR span を破棄せず併存

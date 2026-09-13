@@ -237,3 +237,68 @@ def test_guard_flags_wrong_page_when_counts_match() -> None:
     assert region_mismatches(
         [_field("title", [320, 10, 680, 60], page=2)], SCHEMA, pages2, 2
     ) == ["title"]
+
+
+# ---------------- layout_probe（除外前のレイアウト判定） ----------------
+
+
+def _schema_with_example(example: str | None, page: int | str = 1) -> dict:
+    region: dict = {"page": page, "rect": [0.25, 0.15, 0.50, 0.25]}
+    if example is not None:
+        region["example_value"] = example
+    return {"doc_type": "invoice", "fields": [{"name": "total_amount", "type": "money_jpy", "region": region}]}
+
+
+def _probe_span(text: str, bbox: list[int], page: int = 1) -> Span:
+    return Span(span_id=1, page=page, text=text, conf=0.9, bbox=bbox)
+
+
+def test_layout_probe_例示値がその位置にあれば一致() -> None:
+    from newfan_orchestrator.region_mask import layout_probe
+
+    spans = [_probe_span("¥128,000", [300, 180, 430, 212])]
+    assert layout_probe(_schema_with_example("¥128,000"), 1, 1, 1000, 1000, spans) == (1, 1)
+
+
+def test_layout_probe_例示値が無ければ不一致() -> None:
+    from newfan_orchestrator.region_mask import layout_probe
+
+    spans = [_probe_span("¥128,000", [300, 180, 430, 212])]
+    assert layout_probe(_schema_with_example("株式会社山田"), 1, 1, 1000, 1000, spans) == (0, 1)
+    # 領域の外に例示値があっても（別の場所）不一致
+    far = [_probe_span("株式会社山田", [700, 800, 900, 830])]
+    assert layout_probe(_schema_with_example("株式会社山田"), 1, 1, 1000, 1000, far) == (0, 1)
+
+
+def test_layout_probe_材料が無ければNone() -> None:
+    from newfan_orchestrator.region_mask import layout_probe
+
+    spans = [_probe_span("¥128,000", [300, 180, 430, 212])]
+    # 例示値の無い領域・領域の無いスキーマ・別ページの領域・寸法不明は判定しない
+    assert layout_probe(_schema_with_example(None), 1, 1, 1000, 1000, spans) is None
+    assert layout_probe({"doc_type": "x", "fields": []}, 1, 1, 1000, 1000, spans) is None
+    assert layout_probe(_schema_with_example("¥128,000", page=2), 1, 2, 1000, 1000, spans) is None
+    assert layout_probe(_schema_with_example("¥128,000"), 1, 1, None, None, spans) is None
+    # "last" は run の最終ページへ解決
+    assert layout_probe(_schema_with_example("¥128,000", page="last"), 1, 1, 1000, 1000, spans) == (1, 1)
+
+
+def test_layout_probe_記入例語の例示値は材料に数えない() -> None:
+    """「〇〇株式会社」のような記入例語はどの帳票にも無いので、探して「見つからない＝
+    別レイアウト」にすると全帳票で除外が止まる。材料から外す（None）。"""
+    from newfan_orchestrator.region_mask import layout_probe
+
+    spans = [_probe_span("株式会社山田", [300, 180, 430, 212])]
+    assert layout_probe(_schema_with_example("〇〇株式会社"), 1, 1, 1000, 1000, spans) is None
+    assert layout_probe(_schema_with_example("   "), 1, 1, 1000, 1000, spans) is None
+    # 実値と記入例語が混在するなら実値だけを数える
+    schema = {
+        "doc_type": "invoice",
+        "fields": [
+            {"name": "issuer_name", "type": "string",
+             "region": {"page": 1, "rect": [0.25, 0.15, 0.50, 0.25], "example_value": "株式会社山田"}},
+            {"name": "customer_name", "type": "string",
+             "region": {"page": 1, "rect": [0.25, 0.30, 0.50, 0.40], "example_value": "〇〇株式会社"}},
+        ],
+    }
+    assert layout_probe(schema, 1, 1, 1000, 1000, spans) == (1, 1)

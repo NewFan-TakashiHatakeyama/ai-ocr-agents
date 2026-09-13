@@ -110,6 +110,8 @@ resource "aws_ecs_task_definition" "orchestrator_worker" {
       # 渡すのと渡さないのは worker にとって同じで、tfvars で値を入れた時だけ効く
       { name = "REGION_KIE_HINTS", value = var.region_kie_hints },
       { name = "REGION_HINTS_ACTIVATED_AT", value = var.region_hints_activated_at },
+      { name = "REGION_GUARD_ENFORCE", value = var.region_guard_enforce },
+      { name = "REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH", value = var.region_exclude_skip_on_layout_mismatch },
       ], var.vl_enabled ? [
       { name = "VL_URL", value = local.vl_url },
     ] : [])

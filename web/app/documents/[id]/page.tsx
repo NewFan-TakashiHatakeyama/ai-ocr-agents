@@ -395,6 +395,9 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
   // 件数 0 でバッジを出さないと、KIE の主要入力が 1 つ欠けたことが誰にも見えない。
   const mdDropped = regionStats.markdown_dropped_pages ?? [];
   const showExcludeBadge = excludedTotal > 0 || mdDropped.length > 0;
+  // 別レイアウトと判定して除外領域を適用しなかったページ（設計 §5.4 / §11-8）。
+  // 「除外設定があるのに消えていない」を無言にしない
+  const skippedExclude = regionStats.skipped_exclude_pages ?? [];
   // 位置ガード（読取領域と違う位置で項目が見つかった）の所見。**参考表示に閉じる**：
   // サーバは既定 shadow で、この値からレビュー項目も確信度も作らない。ここでも
   // pend / auto / total / 確定ボタンの活性のいずれにも入れない（入れた瞬間に
@@ -536,6 +539,20 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
             ) : (
               <>p.{mdDropped.join("・p.")} の本文を未使用</>
             )}
+          </span>
+        )}
+        {skippedExclude.length > 0 && (
+          <span
+            className="rv-exbadge"
+            title={
+              `除外領域を適用しなかったページ: p.${skippedExclude.join("・p.")}\n` +
+              "読取領域の例示値（テンプレート元でその位置にあった値）がこの帳票のその位置に 1 つも" +
+              "見つからず、別レイアウトの帳票と判断しました。除外領域の位置にある文字はそのまま" +
+              "取り込んでいます（REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH）。" +
+              NOTE_NO_EFFECT
+            }
+          >
+            🚫 除外を適用せず {skippedExclude.length} ページ（別レイアウトの可能性）
           </span>
         )}
         {mismatchFields.length > 0 && (

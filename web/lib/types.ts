@@ -111,6 +111,10 @@ export interface RegionStats {
   excluded_rows?: number;
   skipped_pages_no_dims?: number[];
   markdown_dropped_pages?: number[];
+  /** 別レイアウトと判定して除外領域を適用しなかったページ（REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH） */
+  skipped_exclude_pages?: number[];
+  layout_probe_matched?: number;
+  layout_probe_total?: number;
   mismatch_fields?: string[];
   layout_mismatch?: boolean;
   /** 読取領域ヒント（設計 region-field-add-and-hint-v2 §2.5・§2.6）。ヒント有効時のみ */

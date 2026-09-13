@@ -155,6 +155,9 @@ services:
       REGION_HINTS_ACTIVATED_AT: ${REGION_HINTS_ACTIVATED_AT:-}
       # 位置ずれ検知を実際にレビューへ反映するか（Phase 5）。既定 off（shadow）。
       REGION_GUARD_ENFORCE: ${REGION_GUARD_ENFORCE:-}
+      # 別レイアウトと判定したページで除外領域を見送るか（設計 §5.4 / §11-8）。既定 off。
+      # on にすると、読取領域の例示値がそのページに 1 つも無いとき除外を適用しない
+      REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH: ${REGION_EXCLUDE_SKIP_ON_LAYOUT_MISMATCH:-}
       # ⑤⑥ SaaS連携（GDrive/M365/Box）。ローカルは Fake＝下記マウントのディレクトリを
       # SaaS フォルダに見立てる（./<type>-fake/<folder_id>/ にファイルを置くと
       # 検知→取込→ワークフロー発火）。実 API へ切り替えるには .env で
