@@ -26,6 +26,44 @@ IDEM_KEY = "workflow_idem"
 NOTIFY_KEY = "workflow_notify"
 
 
+def declared_doc_type_for(
+    graphs: list[dict[str, Any]], doc_type_of_schema: Callable[[str], Optional[str]]
+) -> Optional[str]:
+    """発火したワークフロー群の extract ノードから、取込帳票の宣言種別を 1 つに決める。
+
+    - extract が ``doc_type`` 指定ならその種別、``schema_id`` 指定なら版の doc_type
+    - 全ワークフローで**同じ 1 種別**に定まるときだけ返す。別々の種別を指す（同じ
+      フォルダを請求書 WF と発注書 WF が監視している等）なら None＝決めない
+    - extract ノードが 1 つも無ければ None
+    """
+    found: set[str] = set()
+    for g in graphs:
+        for n in (g or {}).get("nodes") or []:
+            if not isinstance(n, dict) or n.get("type") != "process.extract":
+                continue
+            cfg = n.get("config") if isinstance(n.get("config"), dict) else {}
+            dt = cfg.get("doc_type")
+            if isinstance(dt, str) and dt.strip():
+                found.add(dt.strip())
+                continue
+            sid = cfg.get("schema_id")
+            if isinstance(sid, str) and sid:
+                resolved = doc_type_of_schema(sid)
+                if resolved:
+                    found.add(resolved)
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def _schema_doc_type(c, tenant_id: str, schema_id: str) -> Optional[str]:  # type: ignore[no-untyped-def]
+    from sqlalchemy import text
+
+    row = c.execute(
+        text("SELECT doc_type FROM field_schemas WHERE tenant_id=:t AND id=:s"),
+        {"t": tenant_id, "s": schema_id},
+    ).first()
+    return None if row is None else str(row[0])
+
+
 @dataclass
 class LockedRun:
     """行ロック中の workflow_run。update はロックと同一トランザクションで行う
@@ -98,6 +136,12 @@ class WorkflowRunStore(Protocol):
         idem_key: str,
         notify: dict[str, Any],
     ) -> str: ...
+    def resolve_schema_id_for_doc_type(self, tenant_id: str, doc_type: str) -> Optional[str]:
+        """extract ノードの ``doc_type`` 指定を**実行時点の最新版** schema_id に解決する
+        （設計 region-template-editor §4.4b v2 (b)）。アーカイブ済み・未登録なら None。
+        版固定（schema_id 指定）と違い、テンプレート化・領域編集で作った新版が次の
+        実行から自動で使われる。"""
+        ...
     def load_extract_result(self, tenant_id: str, run_id: str) -> dict[str, Any]:
         """抽出完了 notify を enrich する（runner が resume の event に merge する）。
 
@@ -134,6 +178,8 @@ class InMemoryWorkflowRunStore:
         self.db_connections: dict[str, DbConnectionInfo] = {}
         self.s3_connections: dict[str, str] = {}
         self.extract_results: dict[str, dict[str, Any]] = {}  # run_id → result
+        # (tenant, doc_type) → 最新版 schema_id（doc_type 指定の解決先。seed で登録）
+        self.schema_ids_by_doc_type: dict[tuple[str, str], str] = {}
         self._locked: set[str] = set()
         self._seq = 0
 
@@ -213,6 +259,12 @@ class InMemoryWorkflowRunStore:
         rec["status"] = status
         rec["output"] = output
         rec["error"] = error
+
+    def seed_doc_type_schema(self, tenant_id: str, doc_type: str, schema_id: str) -> None:
+        self.schema_ids_by_doc_type[(tenant_id, doc_type)] = schema_id
+
+    def resolve_schema_id_for_doc_type(self, tenant_id, doc_type) -> Optional[str]:
+        return self.schema_ids_by_doc_type.get((tenant_id, doc_type))
 
     def ensure_extract_run(self, tenant_id, document_id, schema_id, options, idem_key, notify) -> str:
         if idem_key in self.extract_runs:
@@ -379,6 +431,22 @@ class PgWorkflowRunStore:
                     "n": node_id,
                 },
             )
+
+    def resolve_schema_id_for_doc_type(self, tenant_id, doc_type) -> Optional[str]:
+        from sqlalchemy import text
+
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            row = c.execute(
+                text(
+                    # gateway の get_schema と同じ版選択（ORDER BY version DESC LIMIT 1）。
+                    # アーカイブ済み（is_active=false）は「使えない」側に倒す
+                    "SELECT id FROM field_schemas WHERE tenant_id=:t AND doc_type=:d"
+                    " AND is_active ORDER BY version DESC LIMIT 1"
+                ),
+                {"t": tenant_id, "d": doc_type},
+            ).first()
+        return None if row is None else str(row[0])
 
     def ensure_extract_run(self, tenant_id, document_id, schema_id, options, idem_key, notify) -> str:
         from sqlalchemy import text
@@ -780,6 +848,20 @@ class PgTriggerStore:
                     "e": document.get("external_ref"),
                 },
             )
+            # 宣言種別（documents.doc_type）を発火したワークフローの extract ノードから決める
+            # （設計 region-template-editor §11-11）。手動アップロードの doc_type 指定・
+            # テンプレート化の PATCH と同じ列で、classify ゲートの宣言種別・抽出 UI の
+            # 既定スキーマ・一覧の種別絞り込みが揃う。複数ワークフローが**別の**種別を
+            # 指すときは決められないので NULL のまま（従来どおり）
+            declared = declared_doc_type_for(
+                [m.graph_json for m in matches if m.connection_id in claimed],
+                lambda sid: _schema_doc_type(c, tenant_id, sid),
+            )
+            if declared is not None:
+                c.execute(
+                    text("UPDATE documents SET doc_type=:dt WHERE id=:d AND tenant_id=:t"),
+                    {"dt": declared, "d": document["id"], "t": tenant_id},
+                )
             for p in pages:
                 c.execute(
                     text(

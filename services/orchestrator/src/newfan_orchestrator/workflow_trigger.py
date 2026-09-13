@@ -579,6 +579,8 @@ class InMemoryTriggerStore:
         self.documents: list[dict[str, Any]] = []
         self.runs: list[dict[str, Any]] = []
         self.tested_connections: set[tuple[str, str]] = set()
+        # schema_id → doc_type（取込時の宣言種別の解決。seed で登録）
+        self.schema_doc_types: dict[str, str] = {}
         self._seq = 0
 
     def seed_workflow(
@@ -672,7 +674,15 @@ class InMemoryTriggerStore:
             claimed.add(m.connection_id)
         if not claimed:
             return []
-        self.documents.append({**document, "tenant_id": tenant_id, "pages": pages})
+        from newfan_orchestrator.workflow_store import declared_doc_type_for
+
+        declared = declared_doc_type_for(
+            [m.graph_json for m in matches if m.connection_id in claimed],
+            lambda sid: self.schema_doc_types.get(sid),
+        )
+        self.documents.append(
+            {**document, "tenant_id": tenant_id, "pages": pages, "doc_type": declared}
+        )
         run_ids: list[str] = []
         for m in matches:
             if m.connection_id not in claimed:

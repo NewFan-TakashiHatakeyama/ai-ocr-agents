@@ -199,6 +199,11 @@ function WorkflowEditor({ id }: { id: string }) {
     queryKey: ["connections"],
     queryFn: () => api.listConnections(),
   });
+  // extract の「帳票種別（常に最新版を使う）」の候補
+  const { data: docTypeList } = useQuery({
+    queryKey: ["doc-types"],
+    queryFn: () => api.listDocTypes(),
+  });
 
   // エディタのローカル状態（保存で PUT）。wf 到着時に一度だけ流し込む
   const [name, setName] = useState("");
@@ -516,6 +521,7 @@ function WorkflowEditor({ id }: { id: string }) {
     ? ((catalog?.types[selected.type] ?? null) as RJSFSchema | null)
     : null;
   const selSchemaId = selected?.config?.schema_id;
+  const selDocType = selected?.config?.doc_type;
   const selConnId = selected?.config?.connection_id;
   // 日本語化 + schema_id/connection_id を実在候補のドロップダウンへ差し替える。
   // 現在値を候補に残すため、その値も依存に含める（無関係な編集では再計算しない）。
@@ -527,9 +533,10 @@ function WorkflowEditor({ id }: { id: string }) {
       config: selected.config,
       schemas: schemaList?.items ?? [],
       connections: connList?.items ?? [],
+      docTypes: docTypeList?.items ?? [],
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rawSchema, selected?.type, selSchemaId, selConnId, schemaList, connList]);
+  }, [rawSchema, selected?.type, selSchemaId, selDocType, selConnId, schemaList, connList, docTypeList]);
   const selectedUiSchema = selected ? UI_SCHEMA_BY_TYPE[selected.type] : undefined;
 
   // 点検結果・出力プレビューで node_id を日本語ノード名に読み替えるための表

@@ -38,12 +38,19 @@ from newfan_golden.region_ab import (
 
 
 def _shift(rect: list[float], dy: float) -> list[float]:
-    """領域を縦にずらす（ガードが検知すべきケースを作る）。"""
-    y1 = max(0.0, min(1.0, rect[1] + dy))
-    y2 = max(0.0, min(1.0, rect[3] + dy))
-    if y1 >= y2:
-        y1, y2 = min(y1, y2), max(y1, y2) + 0.02
-    return [rect[0], y1, rect[2], min(1.0, y2)]
+    """領域を縦にずらす（ガードが検知すべきケースを作る）。
+
+    ページ下端の領域は下へずらすと [1.0, 1.0] に潰れて RegionRect の検査
+    （y1 < y2）で 422 になる（S3 の sample の合計欄で実際に踏んだ）。はみ出す側では
+    **逆向き**にずらして高さを保つ。
+    """
+    h = rect[3] - rect[1]
+    if rect[3] + dy > 1.0:
+        dy = -abs(dy)
+    if rect[1] + dy < 0.0:
+        dy = abs(dy)
+    y1 = max(0.0, min(1.0 - h, rect[1] + dy))
+    return [rect[0], y1, rect[2], min(1.0, y1 + h)]
 
 
 def run(

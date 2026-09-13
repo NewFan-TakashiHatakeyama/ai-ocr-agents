@@ -124,10 +124,28 @@ class ExtractOptions(_Cfg):
 
 
 class ExtractConfig(_Cfg):
-    # schema_id は必須。省略を許すと load_context が空スキーマを返し、KIE が
-    # 1 項目も抽出しないまま「成功」する（実 AWS で踏んだ挙動）。
-    schema_id: str = Field(min_length=1)
+    """process.extract の設定。**schema_id か doc_type のどちらか一方**を指定する。
+
+    - ``schema_id``: 版 id 固定（§11.1 版固定）。テンプレート化や領域編集で作った新版は
+      自動適用されない（lint L012 が警告、保存後のトーストが旧版参照を知らせる）。
+    - ``doc_type``: 帳票種別。**実行のたびに最新版へ解決**する（設計 region-template-editor
+      §4.4b の v2 案 (b)、2026-09-13 実装）。有効化済みワークフローの抽出定義が管理者の
+      操作なしに新版へ切り替わるので、それを望むときだけ選ぶ。lint L013 が種別の
+      実在（アーカイブ済みでない）を検査する。
+
+    両方省略を許すと load_context が空スキーマを返し、KIE が 1 項目も抽出しないまま
+    「成功」する（実 AWS で踏んだ挙動）。両方指定は「どちらを使うか」が曖昧なので拒む。
+    """
+
+    schema_id: str | None = Field(default=None, min_length=1)
+    doc_type: str | None = Field(default=None, min_length=1)
     options: ExtractOptions = Field(default_factory=ExtractOptions)
+
+    @model_validator(mode="after")
+    def _exactly_one_of_schema_id_or_doc_type(self) -> "ExtractConfig":
+        if bool(self.schema_id) == bool(self.doc_type):
+            raise ValueError("schema_id か doc_type のどちらか一方を指定してください")
+        return self
 
 
 # ---------- 分岐（branch.*） ----------

@@ -308,7 +308,9 @@ def test_catalogは全種のJSONSchemaと実装済み一覧を返す(client: Tes
     assert "source.gdrive_event" in body["implemented"]  # ⑤⑥: worker 内ポーラー
     assert "source.m365_event" in body["implemented"]  # ⑤⑥ 横展開
     assert "source.box_event" in body["implemented"]  # ⑤⑥ 横展開
-    assert "schema_id" in body["types"]["process.extract"]["required"]
+    # schema_id と doc_type はどちらか一方（モデルの validator）。required には出ない
+    assert "schema_id" not in body["types"]["process.extract"].get("required", [])
+    assert "doc_type" in body["types"]["process.extract"]["properties"]
     assert "source.manual" in body["implemented"]
     assert "source.s3_event" in body["implemented"]  # P4 で実装済み
     assert "branch.hitl_gate" in body["implemented"]  # P5 で実装済み

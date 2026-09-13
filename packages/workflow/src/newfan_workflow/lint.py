@@ -45,12 +45,13 @@ def lint(
     schema_exists: Optional[ExistsFn] = None,
     connection_ok: Optional[ExistsFn] = None,
     schema_is_latest: Optional[ExistsFn] = None,
+    doc_type_exists: Optional[ExistsFn] = None,
 ) -> list[Finding]:
-    """L001〜L012 を評価して指摘を返す。error が 1 つでもあれば有効化不可。
+    """L001〜L013 を評価して指摘を返す。error が 1 つでもあれば有効化不可。
 
     - auto_confirm は workflows.auto_confirm（graph_json の外にある属性）
-    - schema_exists / connection_ok / schema_is_latest が None の規則
-      （L009 / L010 / L012）は skip される
+    - schema_exists / connection_ok / schema_is_latest / doc_type_exists が None の規則
+      （L009 / L010 / L012 / L013）は skip される
     """
     findings: list[Finding] = []
     adj = _adjacency(graph)
@@ -204,12 +205,35 @@ def lint(
     # 倒す（gateway の resolver が false を返す）。文言はその両方を言う
     if schema_exists is not None:
         for node in graph.nodes:
-            if isinstance(node, ExtractNode) and not schema_exists(node.config.schema_id):
+            if (
+                isinstance(node, ExtractNode)
+                and node.config.schema_id
+                and not schema_exists(node.config.schema_id)
+            ):
                 findings.append(
                     Finding(
                         "L009",
                         "error",
                         f"スキーマが存在しないかアーカイブ済みです: {node.config.schema_id!r}",
+                        node_id=node.id,
+                    )
+                )
+
+    # L013: extract の doc_type（実行時に最新版へ解決する指定）の実在。schema_id と
+    # 同じく、存在しない・アーカイブ済みの種別は有効化を止める（error）。doc_type 指定は
+    # 常に最新版を使うので L012（旧版参照）の対象外
+    if doc_type_exists is not None:
+        for node in graph.nodes:
+            if (
+                isinstance(node, ExtractNode)
+                and node.config.doc_type
+                and not doc_type_exists(node.config.doc_type)
+            ):
+                findings.append(
+                    Finding(
+                        "L013",
+                        "error",
+                        f"帳票種別のスキーマが存在しないかアーカイブ済みです: {node.config.doc_type!r}",
                         node_id=node.id,
                     )
                 )
@@ -222,7 +246,11 @@ def lint(
     # **error にはしない**——既存ワークフローの有効化を塞ぐ副作用の方が大きい。
     if schema_is_latest is not None:
         for node in graph.nodes:
-            if isinstance(node, ExtractNode) and not schema_is_latest(node.config.schema_id):
+            if (
+                isinstance(node, ExtractNode)
+                and node.config.schema_id
+                and not schema_is_latest(node.config.schema_id)
+            ):
                 findings.append(
                     Finding(
                         "L012",
