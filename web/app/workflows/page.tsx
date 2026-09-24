@@ -10,6 +10,7 @@ import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
 import { useToasts } from "@/lib/toast";
 import type { WorkflowListItemDto } from "@/lib/types";
+import { WORKFLOWS_QUERY_KEY, invalidateWorkflowList } from "@/lib/workflowListCache";
 import { STALE_SCHEMA_BADGE, staleSchemaTitle } from "@/lib/workflowStale";
 
 // 新規作成の雛形: 手動トリガー → 抽出。エディタで育てる前提の最小 DAG
@@ -47,14 +48,14 @@ export default function WorkflowsPage() {
   const router = useRouter();
   const push = useToasts((s) => s.push);
   const { data, error } = useQuery({
-    queryKey: ["workflows"],
+    queryKey: WORKFLOWS_QUERY_KEY,
     queryFn: () => api.listWorkflows(),
   });
 
   const create = useMutation({
     mutationFn: () => api.createWorkflow("新しいワークフロー", TEMPLATE_GRAPH),
     onSuccess: (w) => {
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      void invalidateWorkflowList(qc);
       router.push(`/workflows/${w.id}`);
     },
     onError: (e) =>
@@ -67,7 +68,7 @@ export default function WorkflowsPage() {
     mutationFn: (w: WorkflowListItemDto) => api.deleteWorkflow(w.id),
     onSuccess: (_r, w) => {
       push({ kind: "ok", message: `「${w.name}」を削除しました。` });
-      qc.invalidateQueries({ queryKey: ["workflows"] });
+      void invalidateWorkflowList(qc);
     },
     onError: (e, w) => {
       // instanceof は dev のモジュール重複で false になり得るため status/details を直接見る
@@ -83,7 +84,7 @@ export default function WorkflowsPage() {
                 ? `「${w.name}」には実行履歴があるため削除できません。停止のまま残してください。`
                 : `「${w.name}」は有効化または実行されたため削除できません。一覧を更新してください。`,
         });
-        qc.invalidateQueries({ queryKey: ["workflows"] });
+        void invalidateWorkflowList(qc);
         return;
       }
       push({ kind: "err", message: `削除できませんでした（${(e as Error).message}）。` });

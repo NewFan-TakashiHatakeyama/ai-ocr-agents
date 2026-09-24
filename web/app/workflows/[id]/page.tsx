@@ -50,6 +50,7 @@ import { AppShell } from "@/components/AppShell";
 import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
 import { useToasts } from "@/lib/toast";
+import { invalidateWorkflowList } from "@/lib/workflowListCache";
 import type {
   DryRunResultDto,
   LintFindingDto,
@@ -459,6 +460,9 @@ function WorkflowEditor({ id }: { id: string }) {
       loadedFor.current = `${w.id}:${w.version}`;
       setDirty(false);
       qc.invalidateQueries({ queryKey: ["workflow", id] });
+      // 一覧（["workflows"]）も捨てる。extract ノードのスキーマを選び直すと一覧の
+      // 「⚠ 旧版スキーマ」バッジが消え、版・名前も変わる（["workflow", id] は一覧に届かない）
+      void invalidateWorkflowList(qc);
       push({ kind: "ok", message: `保存しました（v${w.version}・draft）。` });
       // 保存のたびに lint を回す（指摘の鮮度 = エディタの信頼性）
       const lint = await api.lintWorkflow(id);
@@ -498,6 +502,7 @@ function WorkflowEditor({ id }: { id: string }) {
     mutationFn: () => api.activateWorkflow(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["workflow", id] });
+      void invalidateWorkflowList(qc); // 一覧の status（旧版バッジの隣）を古いまま出さない
       loadedFor.current = null;
       push({ kind: "ok", message: "有効化しました（版が固定されます）。" });
     },
@@ -512,6 +517,7 @@ function WorkflowEditor({ id }: { id: string }) {
       // ロード effect のガード（id:version 一致）が効いて未保存編集が破棄されない。
       // status 表示は StatusChip が wf.status を直接読むので invalidate だけで更新される
       qc.invalidateQueries({ queryKey: ["workflow", id] });
+      void invalidateWorkflowList(qc); // 一覧の status も（["workflow", id] は一覧に届かない）
       push({ kind: "ok", message: "停止しました。" });
     },
   });

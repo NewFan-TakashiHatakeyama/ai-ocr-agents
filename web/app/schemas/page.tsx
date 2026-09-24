@@ -11,6 +11,7 @@ import { chatHrefForSchema, schemaAddRequest } from "@/lib/schemaChat";
 import { schemaSaveErrorToast } from "@/lib/schemaSaveError";
 import { TYPE_OPTIONS } from "@/lib/fieldTypes";
 import { useToasts } from "@/lib/toast";
+import { invalidateWorkflowList } from "@/lib/workflowListCache";
 import type { SchemaDto, SchemaFieldDto, WorkflowRefDto } from "@/lib/types";
 
 // SCR-06 スキーマ管理（§5.5）。座標は登場せず、意味定義（名前・型・重要度）だけを版管理。
@@ -96,6 +97,8 @@ export default function SchemasPage() {
       qc.invalidateQueries({ queryKey: ["schemas"] });
       // 一覧の種別セレクト（GET /doc-types）も新しい種別・版を反映する
       qc.invalidateQueries({ queryKey: ["doc-types"] });
+      // 新版で旧版参照になったワークフローを一覧のバッジに出す（§4.4b-3）
+      void invalidateWorkflowList(qc);
     },
     onError: (e) => {
       const docTypeTried = creating ? newDocType.trim() : (current?.doc_type ?? "");
