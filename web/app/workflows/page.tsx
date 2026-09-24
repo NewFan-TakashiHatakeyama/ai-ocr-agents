@@ -119,7 +119,7 @@ export default function WorkflowsPage() {
           <Link key={w.id} href={`/workflows/${w.id}`} className="wf-card">
             <div className="wf-card-head">
               <span className="wf-name">{w.name}</span>
-              <StatusChip status={w.status} />
+              <StatusChip kind="workflow" status={w.status} />
               {w.status !== "active" && (
                 // カード全体がリンクなので、ボタンはリンク遷移を止めてから動かす。
                 // active には出さない（押させてから 409 で断るのは最悪の順序。先に停止）

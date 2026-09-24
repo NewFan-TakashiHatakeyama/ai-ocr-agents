@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { AppShell } from "@/components/AppShell";
-import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
 import { chatHrefForSchema, schemaAddRequest } from "@/lib/schemaChat";
 import { schemaSaveErrorToast } from "@/lib/schemaSaveError";
@@ -221,7 +220,9 @@ export default function SchemasPage() {
         <span className="ttl">
           スキーマ{creating ? ": 新規作成" : current ? `: ${current.doc_type}` : ""}
         </span>
-        {!creating && current && !current.archived && <StatusChip status="confirmed" />}
+        {/* スキーマの版の状態は documents.status の語彙ではないので StatusChip を通さない
+            （見た目は従来どおり。隣のアーカイブ済みチップと同じく直に書く） */}
+        {!creating && current && !current.archived && <span className="chip st-confirmed">確定</span>}
         {!creating && current && current.archived && (
           <span className="chip st-failed">アーカイブ済み</span>
         )}

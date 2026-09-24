@@ -3,18 +3,12 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { AppShell } from "@/components/AppShell";
-import { statusChip } from "@/lib/fields";
 import { ApiError, api } from "@/lib/api";
+import { statusBarColor, statusView } from "@/lib/statusLabels";
 
 // SCR-04 ダッシュボード（§12.1）。KPI は可観測性メトリクスと1:1。admin。
-const STATUS_COLOR: Record<string, string> = {
-  confirmed: "var(--green)",
-  exported: "var(--blue)",
-  needs_review: "var(--amber)",
-  in_review: "var(--blue)",
-  processing: "var(--violet)",
-  failed: "var(--red)",
-};
+// 処理内訳の status_counts は extraction_runs.status の集計（documents.status ではない）ので、
+// 表示名と色は extractionRun の表で引く（superseded を含む）。
 
 function AdminDenied() {
   return (
@@ -83,12 +77,12 @@ export default function DashboardPage() {
                 {Object.entries(data.status_counts)
                   .sort((a, b) => b[1] - a[1])
                   .map(([st, n]) => {
-                    const { label } = statusChip(st);
+                    const { label, hint } = statusView("extractionRun", st);
                     return (
                       <div key={st} className="statbar">
-                        <span>{label}</span>
+                        <span title={hint}>{label}</span>
                         <span className="track">
-                          <i style={{ width: `${totalRuns ? (n / totalRuns) * 100 : 0}%`, background: STATUS_COLOR[st] ?? "var(--ink3)" }} />
+                          <i style={{ width: `${totalRuns ? (n / totalRuns) * 100 : 0}%`, background: statusBarColor("extractionRun", st) }} />
                         </span>
                         <span className="mono" style={{ textAlign: "right" }}>{n}</span>
                       </div>
