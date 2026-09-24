@@ -35,6 +35,15 @@ import {
   type Preserved,
   type PreviewRegion,
 } from "@/lib/templatize";
+// 記入例語の判定はサーバ（orchestrator の事前ガードと同じ関数）に問い合わせる。
+// ここで規則を書き直さない（lib/placeholderExample の冒頭）
+import {
+  PLACEHOLDER_ROW_NOTE,
+  isPlaceholderExample,
+  mergeVerdicts,
+  unknownExampleValues,
+} from "@/lib/placeholderExample";
+import type { SchemaSaved } from "@/lib/useSchemaSaved";
 import { newUuid } from "@/lib/uuid";
 import type { ExtractedField, PageDim, RegionRect, RunSpans } from "@/lib/types";
 
@@ -77,15 +86,8 @@ export function TemplatizePreview({
   mode: "create" | "edit";
   docType?: string | null;
   onClose: () => void;
-  onSaved: (r: {
-    docType: string;
-    schemaId: string;
-    version: number;
-    prevSchemaId: string | null;
-    /** この画面で足した項目のうち領域なしで保存した件数（保存後の案内に使う） */
-    newWithoutRegion?: number;
-    withExampleValue?: number;
-  }) => void;
+  // 保存後の案内（領域なしの新規項目・例示値・記入例語の警告）は useSchemaSaved が出す
+  onSaved: (r: SchemaSaved) => void;
 }) {
   const pageCount = Math.max(pages.length, 1);
   const dimsByPage = useMemo(() => {
@@ -339,6 +341,38 @@ export function TemplatizePreview({
   const excludes = regions.filter((r) => r.kind === "exclude");
   const includes = regions.filter((r) => r.kind === "include");
 
+  // 例示値が記入例語か（設計 region-field-add-and-hint-v2 §2.5）。例示値が決まった時点
+  // （ゴーストのクリック・手描きの span 取得・既存版の読み込み）で、未判定のものだけを
+  // まとめてサーバに問い合わせる。判定は保存される値（exampleForRegion）で行い、同じ値は
+  // 2 度問い合わせない。**失敗しても画面は止めない**（注記が出ないだけ。失敗した値は
+  // 例示値の組が変わったときに問い合わせ直す ── 同じ組で失敗を繰り返さない）。
+  const [placeholderVerdicts, setPlaceholderVerdicts] = useState<Map<string, boolean>>(
+    () => new Map(),
+  );
+  const placeholderInflight = useRef<Set<string>>(new Set());
+  const uncheckedExamples = unknownExampleValues(
+    includes.map(exampleForRegion),
+    placeholderVerdicts,
+  );
+  const uncheckedExamplesKey = JSON.stringify(uncheckedExamples);
+  useEffect(() => {
+    const pending = uncheckedExamples.filter((v) => !placeholderInflight.current.has(v));
+    if (pending.length === 0) return;
+    pending.forEach((v) => placeholderInflight.current.add(v));
+    api
+      .checkExampleValues(pending)
+      .then(
+        (res) => setPlaceholderVerdicts((m) => mergeVerdicts(m, pending, res)),
+        () => {
+          // 補助情報。取れなくても領域の指定・保存はできる（保存後の通知はサーバの応答で出る）
+        },
+      )
+      .finally(() => pending.forEach((v) => placeholderInflight.current.delete(v)));
+    // 値の組（uncheckedExamplesKey）が変わったときだけ問い合わせる。配列そのものは
+    // 描画ごとに作り直されるので依存に入れない
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uncheckedExamplesKey]);
+
   // 除外行の「この領域内の文字」（この帳票で実際に消える span）のために、除外の引かれた
   // ページの span を引く（未取得のときだけ。失敗＝null は除外を引き直したときに取り直す）。
   // 除外は「消しすぎ」が危険なので、保存する前に何が消えるかを見せる
@@ -559,6 +593,10 @@ export function TemplatizePreview({
         prevSchemaId: prev?.id ?? null,
         newWithoutRegion,
         withExampleValue,
+        // 記入例語の例示値はサーバが**保存した版**で判定し直したもの（画面の注記が
+        // 取れていなくても、保存後の通知はこれで必ず出る）
+        warnings: saved.warnings ?? [],
+        fieldLabels: Object.fromEntries(body.fields.map((f) => [f.name, f.label || f.name])),
       });
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
@@ -731,6 +769,10 @@ export function TemplatizePreview({
                       showSpans && r && !isGhost && pageSpans !== undefined && pageSpans !== null
                         ? exampleValueFromSpans(pageSpans, r.drawnPage, r.bbox)
                         : undefined;
+                    // 例示値が記入例語（サーバの判定）。選択していなくても出す ── 気付かせる
+                    // ための注記なので、行を選んだときだけでは遅い
+                    const placeholderWarn =
+                      !!r && isPlaceholderExample(exampleForRegion(r), placeholderVerdicts);
                     return (
                       <div
                         key={d.rowId}
@@ -816,9 +858,15 @@ export function TemplatizePreview({
                             AI が読んだ原文: {r?.exampleValue ?? "（原文なし）"}
                           </span>
                         )}
-                        {showSpans && r && exampleForRegion(r) && !r.exampleCleared && (
+                        {placeholderWarn && (
+                          <span className="rgn-rownote rgn-rowwarn" role="note">
+                            {PLACEHOLDER_ROW_NOTE}
+                          </span>
+                        )}
+                        {(showSpans || placeholderWarn) && r && exampleForRegion(r) && !r.exampleCleared && (
                           // 例示値は帳票の値（個人名を含み得る）で、スキーマの版が残る限り残る。
-                          // 気になる場合に作者が外せるようにする（§2.3）
+                          // 気になる場合に作者が外せるようにする（§2.3）。記入例語の注記が出て
+                          // いる行では、選択していなくても出す（注記が「例示値を消す」を案内する）
                           <button
                             className="btn sm ghost"
                             onClick={(e) => {
