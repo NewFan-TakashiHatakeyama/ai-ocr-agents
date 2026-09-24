@@ -19,6 +19,7 @@ import { placeholderSavedMessage } from "@/lib/placeholderExample";
 import type { SchemaSaveWarning } from "@/lib/types";
 import { useExtractJob } from "@/lib/useExtractJob";
 import { useToasts } from "@/lib/toast";
+import { invalidateWorkflowList } from "@/lib/workflowListCache";
 import { newUuid } from "@/lib/uuid";
 
 export interface SchemaSaved {
@@ -180,6 +181,9 @@ export function useSchemaSaved({
       // 一覧の種別セレクト（GET /doc-types、staleTime 5 分）も捨てる。作成した種別が
       // 5 分間セレクトに出ない・版の表示が古いまま、を避ける
       qc.invalidateQueries({ queryKey: ["doc-types"] });
+      // ワークフロー一覧も捨てる。新版の保存で、それまで最新だった版を固定している
+      // ワークフローが旧版参照になり、一覧の「⚠ 旧版スキーマ」バッジが変わる（§4.4b-3）
+      void invalidateWorkflowList(qc);
       // 確定済み（会計連携済みを含む）を無警告で置き換えないため再抽出は出さない。
       // 他者がロック中も同様（サーバも E1005 reason=locked で弾くが、押せない方が親切）。
       const canRerun = !readOnly && runStatus !== "confirmed" && runStatus !== "exported";

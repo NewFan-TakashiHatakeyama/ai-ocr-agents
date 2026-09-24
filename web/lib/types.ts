@@ -409,12 +409,26 @@ export interface WorkflowDto {
   graph_json: WorkflowGraphDto;
 }
 
+/** extract ノードが固定保持している旧版スキーマ（GET /workflows の stale_schema_refs）。
+ *  判定は stale-workflows / lint L012 と同じくサーバが行う（schema_id 指定で当該 doc_type
+ *  の最新版でない。doc_type 指定のノードは載らない）。設計 §4.4b / §11-9 */
+export interface StaleSchemaRefDto {
+  node_id: string;
+  doc_type: string;
+  schema_id: string;
+  schema_version: number;
+  latest_schema_id: string;
+  latest_version: number;
+}
+
 export interface WorkflowListItemDto {
   id: string;
   name: string;
   status: string;
   version: number;
   updated_at?: string | null;
+  /** 一覧の「旧版スキーマ」バッジの内訳。旧い gateway は返さないので任意 */
+  stale_schema_refs?: StaleSchemaRefDto[];
 }
 
 /** 当該 doc_type の旧版を extract ノードに固定保持している有効ワークフロー

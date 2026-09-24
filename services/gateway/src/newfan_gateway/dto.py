@@ -431,8 +431,34 @@ class WorkflowDto(WorkflowSummaryDto):
     graph_json: dict[str, Any]
 
 
+class StaleSchemaRefDto(BaseModel):
+    """extract ノードが固定保持している旧版スキーマ（設計 region-template-editor §4.4b / D17）。
+
+    判定は ``GET /schemas/{doc_type}/stale-workflows`` / lint L012 と同じ（``schema_id``
+    指定で、当該 doc_type の最新版でない）。doc_type 指定のノードは載らない。
+    """
+
+    node_id: str
+    doc_type: str
+    #: extract ノードが指している版の id と版番号
+    schema_id: str
+    schema_version: int
+    #: 当該 doc_type の最新版
+    latest_schema_id: str
+    latest_version: int
+
+
+class WorkflowListItemDto(WorkflowSummaryDto):
+    """``GET /workflows`` の 1 行。一覧の「旧版スキーマ」バッジ用に旧版参照を載せる。
+
+    単体取得（WorkflowDto）には載せない ── エディタは保存・lint のたびに L012 で同じことを出す。
+    """
+
+    stale_schema_refs: list[StaleSchemaRefDto] = Field(default_factory=list)
+
+
 class WorkflowList(BaseModel):
-    items: list[WorkflowSummaryDto]
+    items: list[WorkflowListItemDto]
 
 
 class WorkflowDeleted(BaseModel):

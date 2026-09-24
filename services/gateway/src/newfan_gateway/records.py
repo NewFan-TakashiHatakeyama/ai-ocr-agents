@@ -123,6 +123,26 @@ class SchemaRecord(BaseModel):
     updated_at: datetime = Field(default_factory=_now)
 
 
+class SchemaVersionRef(BaseModel):
+    """schema_id（版 id）の版番号と、その doc_type の最新版（旧版参照の判定材料）。
+
+    「最新版」は doc_type 内で version が最大の版。lint L012 の ``schema_is_latest`` と
+    ``GET /schemas/{doc_type}/stale-workflows`` と同じ定義で、is_active は見ない
+    （アーカイブ済みの種別は L009 が別に止める）。AdminRepository.schema_versions が
+    複数の id をまとめて 1 回で返す（設計 region-template-editor §4.4b）。
+    """
+
+    id: str
+    doc_type: str
+    version: int
+    latest_schema_id: str
+    latest_version: int
+
+    @property
+    def is_latest(self) -> bool:
+        return self.id == self.latest_schema_id
+
+
 class WorkflowRecord(BaseModel):
     """workflows 行（§16 設計 v0.2）。
 

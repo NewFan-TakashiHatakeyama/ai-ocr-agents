@@ -80,7 +80,12 @@ from newfan_gateway.page_images import (
 from newfan_gateway.ports import Ingestor, OrchestratorClient
 from newfan_gateway.queue import Queue
 from newfan_gateway.sentinels import UNSET
-from newfan_gateway.workflows_repo import IMPLEMENTED_NODE_TYPES, WorkflowsRepository
+from newfan_gateway.workflows_repo import (
+    IMPLEMENTED_NODE_TYPES,
+    WorkflowsRepository,
+    extract_schema_ids,
+    stale_schema_refs,
+)
 from newfan_gateway.records import (
     ConnectionRecord,
     CorrectionRecord,
@@ -1445,36 +1450,45 @@ def list_stale_workflows(
     （web 側で「直前の版の id」しか辿れず、v1 固定のワークフローが v3 保存時に警告から
     漏れていた。第 3 回敵対的レビュー 2）。lint L012 は有効化時にしか評価されないため、
     既に有効なワークフローにはこれが唯一の警告経路になる。
+
+    旧版かどうかの判定はワークフロー一覧の旧版バッジ（``GET /workflows`` の
+    ``stale_schema_refs``）と共通の ``stale_schema_refs`` で行う。版番号は全版ぶんを
+    ``admin.schema_versions`` で 1 回に引く（旧版ごとの get_schema_by_id はしない）。
+
+    応答は**版一覧（``ids``）のスナップショットに揃える**: 版一覧と ``schema_versions`` は
+    別の読み（Pg では別トランザクション）で、その間に新版が保存されると versions では
+    ``ids[-1]``（応答の ``latest_schema_id``）も「最新でない」に見える。そのまま返すと
+    「最新として報告した版」を旧版参照として返す自己矛盾になるので、``ids[:-1]`` の
+    旧版だけに絞る（設計 region-template-editor §4.4b-3）。
     """
     ids = admin.schema_ids_for_doc_type(principal.tenant_id, doc_type)
     if not ids:
         raise ApiError("E1001", "スキーマが見つかりません", details={"doc_type": doc_type})
     latest_id = ids[-1]
     stale_ids = ids[:-1]
-    latest = admin.get_schema_by_id(principal.tenant_id, latest_id)
+    stale_set = set(stale_ids)
+    # 当該 doc_type の版だけを渡すので、他の種別を指すノードは stale_schema_refs が拾わない
+    versions = admin.schema_versions(principal.tenant_id, ids)
+    latest = versions.get(latest_id)
     items: list[dto.StaleWorkflowDto] = []
     if stale_ids:
-        stale_set = set(stale_ids)
         for w in wf.workflows_referencing_schema(principal.tenant_id, stale_ids, statuses=("active",)):
-            nodes = (w.graph_json or {}).get("nodes") or []
-            referenced = [
-                str(n.get("config", {}).get("schema_id"))
-                for n in nodes
-                if isinstance(n, dict)
-                and n.get("type") == "process.extract"
-                and isinstance(n.get("config"), dict)
-                and n.get("config", {}).get("schema_id") in stale_set
-            ]
-            for sid in dict.fromkeys(referenced):  # 同じ版を複数ノードが指しても 1 行
-                rec = admin.get_schema_by_id(principal.tenant_id, sid)
+            # 同じ版を複数ノードが指しても 1 行（ワークフロー × 版）。stale_set で絞るのは
+            # 上の docstring のとおり（読みの間に保存された新版で latest_id が旧版に見える）
+            by_schema = {
+                ref.id: ref
+                for _node_id, ref in stale_schema_refs(w.graph_json, versions)
+                if ref.id in stale_set
+            }
+            for ref in by_schema.values():
                 items.append(
                     dto.StaleWorkflowDto(
                         id=w.id,
                         name=w.name,
                         status=w.status,
                         version=w.version,
-                        schema_id=sid,
-                        schema_version=rec.version if rec is not None else None,
+                        schema_id=ref.id,
+                        schema_version=ref.version,
                     )
                 )
     return dto.StaleWorkflowList(
@@ -1723,10 +1737,40 @@ def workflow_catalog(
 def list_workflows(
     principal: Principal = Depends(require_role("admin")),
     wf: WorkflowsRepository = Depends(get_workflows),
+    admin: AdminRepository = Depends(get_admin),
 ) -> dto.WorkflowList:
+    """ワークフロー一覧。各行に旧版スキーマ参照（``stale_schema_refs``）を載せる。
+
+    一覧から「版固定の extract ノードが旧版を指している」ことが分かるようにする
+    （設計 region-template-editor §4.4b / §11-9。以前は保存後トーストと lint L012 だけ）。
+    判定は stale-workflows と共通の ``stale_schema_refs``（doc_type 指定は対象外）。
+    全行の schema_id をまとめて ``admin.schema_versions`` で **1 回だけ**引く
+    （ワークフロー数に比例したクエリにしない）。status は問わない ── draft / paused も
+    有効化すれば旧版で動くので、一覧で先に知らせる（status はバッジの隣に出ている）。
+    """
     rows = wf.list_workflows(principal.tenant_id)
+    versions = admin.schema_versions(
+        principal.tenant_id,
+        sorted({sid for r in rows for _node_id, sid in extract_schema_ids(r.graph_json)}),
+    )
     return dto.WorkflowList(
-        items=[dto.WorkflowSummaryDto(**_workflow_dto(r).model_dump(exclude={"graph_json"})) for r in rows]
+        items=[
+            dto.WorkflowListItemDto(
+                **_workflow_dto(r).model_dump(exclude={"graph_json"}),
+                stale_schema_refs=[
+                    dto.StaleSchemaRefDto(
+                        node_id=node_id,
+                        doc_type=ref.doc_type,
+                        schema_id=ref.id,
+                        schema_version=ref.version,
+                        latest_schema_id=ref.latest_schema_id,
+                        latest_version=ref.latest_version,
+                    )
+                    for node_id, ref in stale_schema_refs(r.graph_json, versions)
+                ],
+            )
+            for r in rows
+        ]
     )
 
 

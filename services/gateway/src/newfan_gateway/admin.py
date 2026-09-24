@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol
+from typing import Any, Iterable, Optional, Protocol
 
 from newfan_schemas import RegionRect, check_field_name, check_field_type
 
@@ -19,6 +19,7 @@ from newfan_gateway.records import (
     RuleRecord,
     SchemaFieldDef,
     SchemaRecord,
+    SchemaVersionRef,
 )
 
 def check_field_defs(fields: list[SchemaFieldDef]) -> None:
@@ -131,6 +132,20 @@ class AdminRepository(Protocol):
     def schema_ids_for_doc_type(self, tenant_id: str, doc_type: str) -> list[str]:
         """doc_type の全版の id（版の昇順）。ワークフローの extract.schema_id は旧版を
         固定保持し得るので、アーカイブのガードは全版で参照を探す。"""
+        ...
+
+    def schema_versions(
+        self, tenant_id: str, schema_ids: Iterable[str]
+    ) -> dict[str, SchemaVersionRef]:
+        """schema_id → その版番号と当該 doc_type の最新版。**何件渡しても 1 回で引く。**
+
+        旧版参照（ワークフローの extract.schema_id が最新版でない）の判定材料。
+        ワークフロー一覧の旧版バッジは全ワークフローの schema_id をまとめて渡す
+        （ワークフロー数に比例したクエリにしない）。stale-workflows も同じものを使う。
+        「最新版」の定義は lint L012 の ``schema_is_latest`` と同じ（version 最大、
+        is_active は見ない）。存在しない id は結果に載せない（「最新でない」ではなく
+        「存在しない」であり、それは L009 が出す）。
+        """
         ...
 
     def set_schema_archived(
@@ -275,6 +290,24 @@ class InMemoryAdminRepository:
 
     def schema_ids_for_doc_type(self, tenant_id: str, doc_type: str) -> list[str]:
         return [s.id for s in sorted(self._versions(tenant_id, doc_type), key=lambda s: s.version)]
+
+    def schema_versions(
+        self, tenant_id: str, schema_ids: Iterable[str]
+    ) -> dict[str, SchemaVersionRef]:
+        out: dict[str, SchemaVersionRef] = {}
+        for sid in dict.fromkeys(schema_ids):
+            rec = self.get_schema_by_id(tenant_id, sid)
+            latest = self.get_schema(tenant_id, rec.doc_type) if rec is not None else None
+            if rec is None or latest is None:
+                continue
+            out[sid] = SchemaVersionRef(
+                id=rec.id,
+                doc_type=rec.doc_type,
+                version=rec.version,
+                latest_schema_id=latest.id,
+                latest_version=latest.version,
+            )
+        return out
 
     def set_schema_archived(
         self, tenant_id: str, doc_type: str, archived: bool

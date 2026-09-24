@@ -10,6 +10,7 @@ import { useState } from "react";
 
 import { api } from "@/lib/api";
 import { useToasts } from "@/lib/toast";
+import { WORKFLOWS_QUERY_KEY } from "@/lib/workflowListCache";
 
 export function RunWorkflow({ documentId }: { documentId: string }) {
   const push = useToasts((s) => s.push);
@@ -17,7 +18,10 @@ export function RunWorkflow({ documentId }: { documentId: string }) {
   const [open, setOpen] = useState(false);
   const [wfId, setWfId] = useState<string>("");
 
-  const workflows = useQuery({ queryKey: ["workflows"], queryFn: () => api.listWorkflows() });
+  const workflows = useQuery({
+    queryKey: WORKFLOWS_QUERY_KEY,
+    queryFn: () => api.listWorkflows(),
+  });
   // 手動投入できるのは有効化済み（active）のワークフローだけ（§11.1 版固定）
   const active = (workflows.data?.items ?? []).filter((w) => w.status === "active");
   const effective = wfId || active[0]?.id || "";
