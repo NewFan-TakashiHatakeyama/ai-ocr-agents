@@ -502,7 +502,7 @@ export default function ReviewPage({ params }: { params: Promise<{ id: string }>
           </b>
           <span className="sub"> · run {data.run_id.slice(0, 12)}</span>
         </div>
-        <StatusChip status={data.status} />
+        <StatusChip kind="extractionRun" status={data.status} />
         {saveState !== "idle" && (
           <span className="sub" aria-live="polite">
             {saveState === "saving" ? "保存中…" : "✓ 保存済み"}

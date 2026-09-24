@@ -115,7 +115,7 @@ export function AppShell({ active, children }: { active: string; children: React
           {recent.map((d) => (
             <Link key={d.document_id} href={`/documents/${d.document_id}`} className="recent-item">
               <span className="rn">{d.document_id}</span>
-              <StatusChip status={d.status} />
+              <StatusChip kind="document" status={d.status} />
             </Link>
           ))}
           {recent.length === 0 && <div className="recent-item">（履歴なし）</div>}
