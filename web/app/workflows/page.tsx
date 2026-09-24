@@ -10,6 +10,7 @@ import { StatusChip } from "@/components/StatusChip";
 import { ApiError, api } from "@/lib/api";
 import { useToasts } from "@/lib/toast";
 import type { WorkflowListItemDto } from "@/lib/types";
+import { STALE_SCHEMA_BADGE, staleSchemaTitle } from "@/lib/workflowStale";
 
 // 新規作成の雛形: 手動トリガー → 抽出。エディタで育てる前提の最小 DAG
 const TEMPLATE_GRAPH = {
@@ -115,38 +116,48 @@ export default function WorkflowsPage() {
         </button>
       </div>
       <div className="wf-list">
-        {(data?.items ?? []).map((w) => (
-          <Link key={w.id} href={`/workflows/${w.id}`} className="wf-card">
-            <div className="wf-card-head">
-              <span className="wf-name">{w.name}</span>
-              <StatusChip status={w.status} />
-              {w.status !== "active" && (
-                // カード全体がリンクなので、ボタンはリンク遷移を止めてから動かす。
-                // active には出さない（押させてから 409 で断るのは最悪の順序。先に停止）
-                <button
-                  className="btn sm danger"
-                  style={{ marginLeft: "auto" }}
-                  disabled={del.isPending && del.variables?.id === w.id}
-                  title="このワークフローを削除する（元に戻せません。実行履歴があるものは削除できません）"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    confirmThenDelete(w);
-                  }}
-                >
-                  {del.isPending && del.variables?.id === w.id ? "削除中…" : "削除"}
-                </button>
-              )}
-            </div>
-            <div className="wf-card-sub">
-              v{w.version}
-              {w.updated_at ? ` ・ 更新 ${new Date(w.updated_at).toLocaleString("ja-JP")}` : ""}
-              <span className="sub" style={{ marginLeft: 8 }}>
-                {w.id}
-              </span>
-            </div>
-          </Link>
-        ))}
+        {(data?.items ?? []).map((w) => {
+          // 版固定の extract ノードが旧版を指している（設計 §4.4b / §11-9）。判定はサーバ。
+          // 以前は保存後トーストと lint L012 だけで、一覧からは分からなかった
+          const staleTitle = staleSchemaTitle(w.stale_schema_refs);
+          return (
+            <Link key={w.id} href={`/workflows/${w.id}`} className="wf-card">
+              <div className="wf-card-head">
+                <span className="wf-name">{w.name}</span>
+                <StatusChip status={w.status} />
+                {staleTitle && (
+                  <span className="wf-stale" title={staleTitle}>
+                    {STALE_SCHEMA_BADGE}
+                  </span>
+                )}
+                {w.status !== "active" && (
+                  // カード全体がリンクなので、ボタンはリンク遷移を止めてから動かす。
+                  // active には出さない（押させてから 409 で断るのは最悪の順序。先に停止）
+                  <button
+                    className="btn sm danger"
+                    style={{ marginLeft: "auto" }}
+                    disabled={del.isPending && del.variables?.id === w.id}
+                    title="このワークフローを削除する（元に戻せません。実行履歴があるものは削除できません）"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      confirmThenDelete(w);
+                    }}
+                  >
+                    {del.isPending && del.variables?.id === w.id ? "削除中…" : "削除"}
+                  </button>
+                )}
+              </div>
+              <div className="wf-card-sub">
+                v{w.version}
+                {w.updated_at ? ` ・ 更新 ${new Date(w.updated_at).toLocaleString("ja-JP")}` : ""}
+                <span className="sub" style={{ marginLeft: 8 }}>
+                  {w.id}
+                </span>
+              </div>
+            </Link>
+          );
+        })}
         {data && data.items.length === 0 && (
           <div className="empty">
             まだワークフローがありません。「＋ 新規作成」から始めてください。
