@@ -12,10 +12,15 @@ Protocol + InMemory 実装。本番の PostgreSQL 実装は db.PgWorkflowsReposi
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Optional, Protocol
+from typing import Any, Iterable, Mapping, Optional, Protocol
 
 from newfan_gateway.ids import new_id
-from newfan_gateway.records import WorkflowNodeRunRecord, WorkflowRecord, WorkflowRunRecord
+from newfan_gateway.records import (
+    SchemaVersionRef,
+    WorkflowNodeRunRecord,
+    WorkflowRecord,
+    WorkflowRunRecord,
+)
 
 
 def graph_references(graph_json: Any, key: str, values: Iterable[str]) -> bool:
@@ -37,6 +42,46 @@ def graph_references(graph_json: Any, key: str, values: Iterable[str]) -> bool:
         if isinstance(cfg, dict) and cfg.get(key) in wanted:
             return True
     return False
+
+
+def extract_schema_ids(graph_json: Any) -> list[tuple[str, str]]:
+    """``process.extract`` ノードのうち ``schema_id``（版固定）を持つものの (node_id, schema_id)。
+
+    ``doc_type`` 指定（実行時に最新版へ解決。設計 region-template-editor §4.4b v2 (b)）の
+    ノードは含めない ── 常に最新版を使うので旧版参照になり得ない（L012 と同じ扱い）。
+    """
+    nodes = (graph_json or {}).get("nodes") if isinstance(graph_json, dict) else None
+    if not isinstance(nodes, list):
+        return []
+    out: list[tuple[str, str]] = []
+    for n in nodes:
+        if not isinstance(n, dict) or n.get("type") != "process.extract":
+            continue
+        cfg = n.get("config")
+        sid = cfg.get("schema_id") if isinstance(cfg, dict) else None
+        if isinstance(sid, str) and sid:
+            out.append((str(n.get("id", "")), sid))
+    return out
+
+
+def stale_schema_refs(
+    graph_json: Any, versions: Mapping[str, SchemaVersionRef]
+) -> list[tuple[str, SchemaVersionRef]]:
+    """extract ノードが当該 doc_type の最新版でない版を固定保持しているもの（node_id, 版）。
+
+    旧版参照の判定の**唯一の置き場**。ワークフロー一覧の旧版バッジと
+    ``GET /schemas/{doc_type}/stale-workflows`` の両方がここを通る（設計 §4.4b / D17）。
+    versions は ``AdminRepository.schema_versions`` の結果（最新版の定義は lint L012 の
+    ``schema_is_latest`` と同じ）。versions に無い id（存在しない版・対象外の doc_type）は
+    旧版として扱わない ── 存在しない id は L009 が error として出す。
+    """
+    out: list[tuple[str, SchemaVersionRef]] = []
+    for node_id, sid in extract_schema_ids(graph_json):
+        ref = versions.get(sid)
+        if ref is not None and not ref.is_latest:
+            out.append((node_id, ref))
+    return out
+
 
 # activate を許すノード種別（実装済み Phase のもののみ）。
 # 保存と lint は 13 種すべて通すが、実行できない種別を含むワークフローの有効化は

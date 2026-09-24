@@ -66,6 +66,18 @@ def _graph_ref_sql(graph_col: str, key: str, param: str) -> str:
     )
 
 
+# 「当該 doc_type の最新版」の定義（version 最大。is_active は見ない）。field_schemas を
+# 別名 s で引く SELECT に付け、latest.id / latest.version を足す。lint L012 の
+# schema_is_latest と旧版参照の一括判定 schema_versions（ワークフロー一覧のバッジ・
+# stale-workflows）で共有し、判定を 1 箇所に置く（設計 region-template-editor §4.4b）。
+# UNIQUE (tenant_id, doc_type, version) の索引で 1 行引きになる。
+_LATEST_SCHEMA_LATERAL = (
+    "CROSS JOIN LATERAL (SELECT l.id, l.version FROM field_schemas l"
+    " WHERE l.tenant_id = s.tenant_id AND l.doc_type = s.doc_type"
+    " ORDER BY l.version DESC LIMIT 1) latest"
+)
+
+
 class Document(Base):
     __tablename__ = "documents"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -863,6 +875,40 @@ class PgAdminRepository:
             ).all()
         return [r[0] for r in rows]
 
+    def schema_versions(self, tenant_id: str, schema_ids):
+        """schema_id → 版番号と当該 doc_type の最新版を **1 回の SELECT** で返す。
+
+        最新版の定義は PgWorkflowsRepository.schema_is_latest（lint L012）と同じ
+        ``_LATEST_SCHEMA_LATERAL``。ワークフロー一覧は全行の schema_id をまとめて渡す
+        （N+1 にしない）。空なら DB に行かない。
+        """
+        from newfan_gateway.records import SchemaVersionRef
+
+        ids = list(dict.fromkeys(schema_ids))
+        if not ids:
+            return {}
+        with self._engine.begin() as c:
+            self._rls(c, tenant_id)
+            rows = c.execute(
+                text(
+                    "SELECT s.id, s.doc_type, s.version,"
+                    " latest.id AS latest_id, latest.version AS latest_version"
+                    f" FROM field_schemas s {_LATEST_SCHEMA_LATERAL}"
+                    " WHERE s.tenant_id=:t AND s.id = ANY(:ids)"
+                ),
+                {"t": tenant_id, "ids": ids},
+            ).mappings().all()
+        return {
+            r["id"]: SchemaVersionRef(
+                id=r["id"],
+                doc_type=r["doc_type"],
+                version=r["version"],
+                latest_schema_id=r["latest_id"],
+                latest_version=r["latest_version"],
+            )
+            for r in rows
+        }
+
     def set_schema_archived(self, tenant_id: str, doc_type: str, archived: bool):
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
@@ -1516,16 +1562,15 @@ class PgWorkflowsRepository:
 
         存在しない id は True を返す（「最新でない」ではなく「存在しない」であり、
         それは L009 が error として出す。ここで二重に出すと指摘が読みにくい）。
+        最新版の定義は ``_LATEST_SCHEMA_LATERAL``（ワークフロー一覧の旧版バッジ・
+        stale-workflows が使う PgAdminRepository.schema_versions と共有）。
         """
         with self._engine.begin() as c:
             self._rls(c, tenant_id)
             r = c.execute(
                 text(
-                    "SELECT s.id = ("
-                    "  SELECT id FROM field_schemas"
-                    "  WHERE tenant_id = s.tenant_id AND doc_type = s.doc_type"
-                    "  ORDER BY version DESC LIMIT 1"
-                    ") FROM field_schemas s WHERE s.tenant_id=:t AND s.id=:i"
+                    f"SELECT s.id = latest.id FROM field_schemas s {_LATEST_SCHEMA_LATERAL}"
+                    " WHERE s.tenant_id=:t AND s.id=:i"
                 ),
                 {"t": tenant_id, "i": schema_id},
             ).first()
