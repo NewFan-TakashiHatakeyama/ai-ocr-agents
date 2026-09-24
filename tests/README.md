@@ -11,7 +11,10 @@ confidence・validate・gate・memory・canonical JSON・Webhook 署名）は実
 - 実 LangGraph（`build_graph`）で quality_gate/条件分岐/finalize までルーティングを検証
 
 ```bash
-uv run pytest tests/e2e          # langgraph は dev group に含む
+# ルートの newfan-ocr は workspace のメンバーに依存しないので、素の `uv run` では newfan_* が入らない。
+# 先に全メンバーを sync してから --no-sync で走らせる（下の scripts/e2e_real.py と同じ手順）
+uv sync --frozen --all-packages --all-extras
+uv run --no-sync pytest tests/e2e   # langgraph は dev group に含む
 ```
 
 > このテストは実際に file:// のページ画像を読むため、`file_uri_loader` の実経路を検証する
