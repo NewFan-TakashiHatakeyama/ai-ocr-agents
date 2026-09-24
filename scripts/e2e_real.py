@@ -3,21 +3,37 @@
 外部境界（GPU/LLM）のみ Fake、DB/キュー/チェックポイントは本番相当。
   Phase A（自動確定）: enqueue → worker → extraction_fields 保存 + status=confirmed。
   Phase B（HITL）    : 低信頼 → needs_review interrupt → 修正 resume ジョブ → confirmed。
+  Phase C（export）  : export worker が q.export を消費 → run_a の canonical JSON を書く。
+                       （A/B の finalize が積んだ q.export を読むので、A が落ちると C も落ちる）
   Phase D（除外領域） : exclude_regions 付きスキーマ → span/セルの決定論除外 → metrics.region
                        → 集約 ReviewItem で needs_review。テキスト項目の bbox（F-0）も保存される。
                        （設計 region-template-editor §8 E2E。検証画面の表示は手動 QA）
+
+終了コード（CI の e2e ジョブはこれだけで合否を決める。.github/workflows/ci.yml）:
+  全 Phase が PASS のときだけ 0、それ以外は 1。Phase の途中で例外が出たらトレースバックを
+  出してその Phase を FAIL にし、残りの Phase も続けて実行する（最初の例外で後続の成否が
+  見えなくなるのを避けるため。握りつぶして PASS にすることはない）。
+
+前提:
+  - DB は alembic upgrade head 済み（CI は空の Pg に migration を当ててから走らせる）。
+  - tenant ten_e2e の doc_a/b/d・run_a/b/d・sch_a/b/d を毎回消して作り直す（所有者接続）。
+  - compose の orchestrator-worker が動いていると q.extract のジョブを横取りされて
+    A/B が落ちるので、止めてから実行する。
 
 実行:
     DATABASE_URL=postgresql+psycopg://newfan:newfan@localhost:5433/newfan \
     REDIS_URL=redis://localhost:6380 \
     uv run --with "psycopg[binary]" --with redis python scripts/e2e_real.py
+  （uv を使わない場合は venv の python に各パッケージの src を PYTHONPATH で通す。tests/README.md）
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any
+import sys
+import traceback
+from typing import Any, Callable
 
 from langgraph.checkpoint.memory import MemorySaver
 from sqlalchemy import create_engine, text
@@ -35,6 +51,13 @@ from newfan_paddle_client import LayoutParsingResponse
 DSN = os.environ["DATABASE_URL"]
 REDIS = os.environ["REDIS_URL"]
 TENANT = "ten_e2e"
+PHASES = ("A", "B", "C", "D")
+
+# field_schemas は (tenant_id, doc_type, version) が UNIQUE。以前は abs(hash(sch)) % 1000 で
+# 版を決めていたが、str の hash はプロセスごとに乱数化される（PYTHONHASHSEED）ため、
+# 3 つの版が衝突したり、前回の実行で残った別 id の版と衝突したりして、まれに
+# IntegrityError で落ちていた（CI では約 0.3%、残骸のある手元では約 0.6%）。固定値にする。
+_SCHEMA_VERSION = {"sch_a": 1, "sch_b": 2, "sch_d": 3}
 
 
 def _layout(conf: float) -> dict[str, Any]:
@@ -102,7 +125,7 @@ def _seed(engine, doc: str, run: str, sch: str, exclude_regions: list[dict[str, 
                 " VALUES (:i,:t,'invoice',:v, CAST(:f AS jsonb), CAST(:x AS jsonb), 1)"
             ),
             {
-                "i": sch, "t": TENANT, "v": abs(hash(sch)) % 1000,
+                "i": sch, "t": TENANT, "v": _SCHEMA_VERSION[sch],
                 "f": json.dumps([{"name": "total_amount", "label": "合計金額(税込)", "type": "money_jpy", "critical": True}]),
                 "x": json.dumps(exclude_regions or [], ensure_ascii=False),
             },
@@ -132,26 +155,38 @@ def _worker(conf: float, store: PgContextStore, exports: RedisQueue) -> Extracti
     return ExtractionWorker(graph, store, consumer, webhook=lambda ev, d: print(f"  webhook: {ev}"))
 
 
-def main() -> int:
-    engine = create_engine(DSN, future=True)
-    store = PgContextStore(DSN)
-    exports = RedisQueue(REDIS)
-    gw_queue = GwRedisQueue(REDIS)  # gateway 本番アダプタ（enqueue）
-    orch = QueueOrchestratorClient(gw_queue)  # gateway → resume ジョブ発行（§4.4）
-    ok = True
-    phase_ok: dict[str, bool] = {}
+class _Env:
+    """各 Phase が共有する DB / キューの接続（本番アダプタそのもの）。"""
 
-    # --- Phase A: 自動確定 ---
-    print("== Phase A: 自動確定 ==")
+    def __init__(self) -> None:
+        self.engine = create_engine(DSN, future=True)
+        self.store = PgContextStore(DSN)
+        self.exports = RedisQueue(REDIS)
+        self.gw_queue = GwRedisQueue(REDIS)  # gateway 本番アダプタ（enqueue）
+        self.orch = QueueOrchestratorClient(self.gw_queue)  # gateway → resume ジョブ発行（§4.4）
+
+
+def _phase_a(env: _Env) -> bool:
+    """自動確定: gateway の enqueue → worker → Pg 保存 → gateway.get_run の読み戻し。"""
+    from newfan_gateway.db import PgRepository
+
+    engine = env.engine
     _seed(engine, "doc_a", "run_a", "sch_a")
-    gw_queue.enqueue("q.extract", {"run_id": "run_a", "tenant_id": TENANT})
-    worker_a = _worker(0.99, store, exports)
+    env.gw_queue.enqueue("q.extract", {"run_id": "run_a", "tenant_id": TENANT})
+    worker_a = _worker(0.99, env.store, env.exports)
     consumer_a = RedisStreamConsumer(REDIS, "q.extract", "orchestrator", "worker-1")
+    consumed = False
     for mid, payload in consumer_a.consume(count=10):
         if payload.get("run_id") != "run_a":
             continue
         print(f"  process {payload} -> {worker_a.process(payload)}")
         consumer_a.ack(mid)
+        consumed = True
+    if not consumed:
+        # 別の consumer（compose の orchestrator-worker）に横取りされたか、未処理の
+        # ジョブが溜まっていて先頭 10 件に届かなかった
+        print("  [FAIL] q.extract から run_a のジョブを取れなかった")
+    ok = consumed
     rows, st = _fields(engine, "run_a")
     print(f"  extraction_fields={rows} run.status={st}")
     ok &= st == "confirmed" and any(r[0] == "total_amount" and r[1] == "128000" for r in rows)
@@ -163,42 +198,50 @@ def main() -> int:
     tbl_ok = bool(trows) and any(cell.get("value") == "りんご" for row in trows[0][2] for cell in row.values())
     ok &= tbl_ok
     # gateway result 同期: PgRepository.get_run が正規化テーブル（worker 書込）を反映するか
-    from newfan_gateway.db import PgRepository
-
     gw_run = PgRepository(DSN).get_run(TENANT, "run_a")
-    gw_fields = [(f.name, f.label, f.value_normalized) for f in gw_run.fields] if gw_run else []
+    if gw_run is None:
+        print("  [FAIL] gateway.get_run(run_a) が None")
+        return False
+    gw_fields = [(f.name, f.label, f.value_normalized) for f in gw_run.fields]
     print(f"  gateway.get_run fields={gw_fields}")
     print(f"  gateway.get_run tables={[(t.name, len(t.rows)) for t in gw_run.tables]} review_summary={gw_run.review_summary}")
-    ok &= gw_run is not None
     ok &= any(f.name == "total_amount" and f.label == "合計金額(税込)" and f.value_normalized == "128000" for f in gw_run.fields)
     ok &= len(gw_run.tables) == 1 and bool(gw_run.tables[0].rows)
-    phase_ok["A"] = ok
+    return ok
 
-    # --- Phase B: HITL（needs_review → resume）---
-    print("== Phase B: HITL needs_review -> resume ==")
-    _seed(engine, "doc_b", "run_b", "sch_b")
-    worker_b = _worker(0.78, store, exports)  # 低信頼で interrupt
+
+def _phase_b(env: _Env) -> bool:
+    """HITL: 低信頼で needs_review 停止 → gateway の resume ジョブ（Redis）→ confirmed。"""
+    _seed(env.engine, "doc_b", "run_b", "sch_b")
+    worker_b = _worker(0.78, env.store, env.exports)  # 低信頼で interrupt
     s1 = worker_b.process({"run_id": "run_b", "tenant_id": TENANT})
-    rows1, st1 = _fields(engine, "run_b")
+    rows1, st1 = _fields(env.engine, "run_b")
     print(f"  extract -> {s1}; fields={rows1} run.status={st1}")
-    ok &= s1 == "needs_review" and st1 == "needs_review"
+    # 停止していなければ resume は何も検証しない（ここも Phase B の成否に含める）
+    ok = s1 == "needs_review" and st1 == "needs_review"
 
     # レビュアが 178000 に修正して確定 → gateway が resume ジョブを Redis に発行
-    orch.resume("run_b", TENANT, {"corrections": [{"field_name": "total_amount", "corrected_value": "178000"}]})
+    env.orch.resume("run_b", TENANT, {"corrections": [{"field_name": "total_amount", "corrected_value": "178000"}]})
     consumer_b = RedisStreamConsumer(REDIS, "q.extract", "orchestrator", "worker-1")
+    consumed = False
     for mid, payload in consumer_b.consume(count=10):
         if payload.get("run_id") != "run_b" or "resume" not in payload:
             continue
         print(f"  process resume {payload.get('run_id')} -> {worker_b.process(payload)}")
         consumer_b.ack(mid)
-    rows2, st2 = _fields(engine, "run_b")
+        consumed = True
+    if not consumed:
+        print("  [FAIL] q.extract から run_b の resume ジョブを取れなかった")
+    ok &= consumed
+    rows2, st2 = _fields(env.engine, "run_b")
     print(f"  after resume: fields={rows2} run.status={st2}")
     saved = {r[0]: r[1] for r in rows2}
     ok &= st2 == "confirmed" and saved.get("total_amount") == "178000"
-    phase_ok["B"] = st2 == "confirmed" and saved.get("total_amount") == "178000"
+    return ok
 
-    # --- Phase C: export worker が q.export を消費し canonical JSON を書く ---
-    print("== Phase C: export worker q.export -> canonical JSON ==")
+
+def _phase_c(env: _Env) -> bool:
+    """export worker が q.export を消費し canonical JSON を書く。"""
     import tempfile
     from pathlib import Path
 
@@ -227,21 +270,27 @@ def main() -> int:
             break
     canon = list(outdir.rglob("*.json"))
     print(f"  processed={n_exported} canonical={[str(p.relative_to(outdir)) for p in canon][-5:]}")
-    ok &= n_exported >= 1 and run_a_json is not None
-    phase_ok["C"] = n_exported >= 1 and run_a_json is not None
     if run_a_json is not None:
         doc = json.loads(run_a_json.read_text(encoding="utf-8"))
         print(f"  run_a canonical keys={list(doc)}")
+    return n_exported >= 1 and run_a_json is not None
 
-    # --- Phase D: 除外領域（decision D1/D8）+ F-0 のテキスト項目 bbox ---
-    # ページ 1000×1400 のうち左上の [0, 280]〜[130, 378] px を除外する。_layout の span では
-    # 「品名」[20,300,120,320] と「りんご」[20,340,120,360] が過半を覆われて落ち、
-    # 表の「りんご」セル [10,335,130,365] は値が空になる（列は残る。数量「3」は残る）。
-    # 「128000」[300,180,430,212] は領域外なので total_amount はそのまま取れる。
-    print("== Phase D: exclude regions -> metrics.region / needs_review / field bbox (F-0) ==")
+
+def _phase_d(env: _Env) -> bool:
+    """除外領域（decision D1/D8）+ F-0 のテキスト項目 bbox。
+
+    ページ 1000×1400 のうち左上の [0, 280]〜[130, 378] px を除外する。_layout の span では
+    「品名」[20,300,120,320] と「りんご」[20,340,120,360] が過半を覆われて落ち、
+    表の「りんご」セル [10,335,130,365] は値が空になる（列は残る。数量「3」は残る）。
+    「128000」[300,180,430,212] は領域外なので total_amount はそのまま取れる。
+    """
+    from newfan_gateway.db import PgAdminRepository, PgRepository
+    from newfan_schemas import resolve_regions
+
+    engine = env.engine
     stamp = {"page": 1, "rect": [0.0, 0.20, 0.13, 0.27], "label": "stamp"}
     _seed(engine, "doc_d", "run_d", "sch_d", exclude_regions=[stamp])
-    worker_d = _worker(0.99, store, exports)  # 高信頼: 除外のセルマスクだけで needs_review になる
+    worker_d = _worker(0.99, env.store, env.exports)  # 高信頼: 除外のセルマスクだけで needs_review になる
     s_d = worker_d.process({"run_id": "run_d", "tenant_id": TENANT})
     rows_d, st_d = _fields(engine, "run_d")
     with engine.begin() as c:
@@ -270,21 +319,50 @@ def main() -> int:
     else:
         d_ok = False
     # gateway 側の到達経路: region_stats（run metrics 由来）と、ページ解決済みの除外領域（スキーマ由来）
-    from newfan_gateway.db import PgAdminRepository
-    from newfan_schemas import resolve_regions
-
     gw_run_d = PgRepository(DSN).get_run(TENANT, "run_d")
     d_ok &= gw_run_d is not None and gw_run_d.region_stats == region
     sch_d = PgAdminRepository(DSN).get_schema_by_id(TENANT, "sch_d")
     applied = resolve_regions(list(sch_d.exclude_regions), 1) if sch_d else []
     print(f"  applied_exclude_regions={applied}")
     d_ok &= applied == [{"page_no": 1, "rect": stamp["rect"], "label": "stamp"}]
-    phase_ok["D"] = d_ok
-    ok &= d_ok
+    return d_ok
 
+
+def _run_phase(name: str, title: str, fn: Callable[[], bool]) -> bool:
+    """1 Phase を実行して成否を返す。
+
+    例外はトレースバックを出して FAIL にする（後続 Phase の成否も出すため、ここで止めない）。
+    戻り値は ``True`` そのものだけを PASS とみなす（None や真偽以外が返る書き間違いを
+    PASS に倒さない）。
+    """
+    print(f"== Phase {name}: {title} ==", flush=True)
+    try:
+        result = fn()
+    except Exception:  # noqa: BLE001 - FAIL として記録し、終了コードに反映する
+        # stdout（パイプ時はブロックバッファ）と stderr の順序を CI のログで崩さない
+        sys.stdout.flush()
+        traceback.print_exc()
+        sys.stderr.flush()
+        print(f"  [FAIL] Phase {name}: 例外で中断", flush=True)
+        return False
+    return result is True
+
+
+def main() -> int:
+    env = _Env()
+    phase_ok: dict[str, bool] = {}
+    phase_ok["A"] = _run_phase("A", "自動確定", lambda: _phase_a(env))
+    phase_ok["B"] = _run_phase("B", "HITL needs_review -> resume", lambda: _phase_b(env))
+    phase_ok["C"] = _run_phase("C", "export worker q.export -> canonical JSON", lambda: _phase_c(env))
+    phase_ok["D"] = _run_phase(
+        "D", "exclude regions -> metrics.region / needs_review / field bbox (F-0)", lambda: _phase_d(env)
+    )
+
+    # 全 Phase が実行されて全部 PASS のときだけ成功（Phase を足し忘れても緑にしない）
+    ok = tuple(phase_ok) == PHASES and all(phase_ok.values())
     print("=" * 50)
     print("phases:", {k: ("PASS" if v else "FAIL") for k, v in phase_ok.items()})
-    print("E2E RESULT:", "PASS" if ok else "FAIL")
+    print("E2E RESULT:", "PASS" if ok else "FAIL", flush=True)
     return 0 if ok else 1
 
 
