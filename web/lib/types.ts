@@ -17,8 +17,26 @@ export interface ExtractedField {
   confidence: number;
   grounding_score: number;
   correction?: Record<string, unknown> | null;
-  validation?: { checks?: string[]; passed?: boolean } | null;
+  validation?: FieldValidation | null;
   review_status: ReviewStatus;
+}
+
+/**
+ * 決定論チェック（§5.7.3 V-*）の結果。サーバ（orchestrator の validate ノード）は
+ * `checks` を **`{check, passed, severity}` のオブジェクト配列**で返す。web は 2026-07-14 から
+ * `string[]` と型付けして描画していたため、全チェック合格の項目がある結果（型付きスキーマの
+ * 抽出）を開くと検証画面が「Objects are not valid as a React child」で落ちていた。
+ * 旧形（文字列）が来ても壊れないよう両方を受ける。読むのは lib/fields の `vChecks` だけ。
+ */
+export interface FieldValidationCheck {
+  check: string;
+  passed: boolean;
+  severity?: string;
+}
+
+export interface FieldValidation {
+  checks?: Array<FieldValidationCheck | string>;
+  passed?: boolean;
 }
 
 export interface TableCell {

@@ -35,10 +35,22 @@ export function sourceOf(f: ExtractedField): AuditSource {
   return { key: "ocr", label: "OCR原値" };
 }
 
-// 検証バッジ（V-SUM 等）。validation.checks を採用。
+// 検証バッジ（V-SUM 等）。validation.checks のうち合格したチェックの ID を返す。
+// サーバは {check, passed, severity} のオブジェクトで返す（lib/types の FieldValidation）。
+// 旧形の文字列も ID として受ける。バッジは「合格」の表示なので、項目全体が合格
+// （validation.passed）のときだけ出す（従来どおり）。
 export function vChecks(f: ExtractedField): string[] {
-  if (f.validation?.passed && f.validation.checks) return f.validation.checks;
-  return [];
+  const v = f.validation;
+  if (!v?.passed || !Array.isArray(v.checks)) return [];
+  const out: string[] = [];
+  for (const c of v.checks) {
+    if (typeof c === "string") {
+      if (c) out.push(c);
+    } else if (c && typeof c.check === "string" && c.check && c.passed !== false) {
+      out.push(c.check);
+    }
+  }
+  return Array.from(new Set(out));
 }
 
 // 並び: pending → その他。pending 内は conf 昇順（危険を先頭に）。
