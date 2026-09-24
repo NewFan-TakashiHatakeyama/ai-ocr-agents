@@ -1400,20 +1400,32 @@ def list_stale_workflows(
     旧版かどうかの判定はワークフロー一覧の旧版バッジ（``GET /workflows`` の
     ``stale_schema_refs``）と共通の ``stale_schema_refs`` で行う。版番号は全版ぶんを
     ``admin.schema_versions`` で 1 回に引く（旧版ごとの get_schema_by_id はしない）。
+
+    応答は**版一覧（``ids``）のスナップショットに揃える**: 版一覧と ``schema_versions`` は
+    別の読み（Pg では別トランザクション）で、その間に新版が保存されると versions では
+    ``ids[-1]``（応答の ``latest_schema_id``）も「最新でない」に見える。そのまま返すと
+    「最新として報告した版」を旧版参照として返す自己矛盾になるので、``ids[:-1]`` の
+    旧版だけに絞る（設計 region-template-editor §4.4b-3）。
     """
     ids = admin.schema_ids_for_doc_type(principal.tenant_id, doc_type)
     if not ids:
         raise ApiError("E1001", "スキーマが見つかりません", details={"doc_type": doc_type})
     latest_id = ids[-1]
     stale_ids = ids[:-1]
+    stale_set = set(stale_ids)
     # 当該 doc_type の版だけを渡すので、他の種別を指すノードは stale_schema_refs が拾わない
     versions = admin.schema_versions(principal.tenant_id, ids)
     latest = versions.get(latest_id)
     items: list[dto.StaleWorkflowDto] = []
     if stale_ids:
         for w in wf.workflows_referencing_schema(principal.tenant_id, stale_ids, statuses=("active",)):
-            # 同じ版を複数ノードが指しても 1 行（ワークフロー × 版）
-            by_schema = {ref.id: ref for _node_id, ref in stale_schema_refs(w.graph_json, versions)}
+            # 同じ版を複数ノードが指しても 1 行（ワークフロー × 版）。stale_set で絞るのは
+            # 上の docstring のとおり（読みの間に保存された新版で latest_id が旧版に見える）
+            by_schema = {
+                ref.id: ref
+                for _node_id, ref in stale_schema_refs(w.graph_json, versions)
+                if ref.id in stale_set
+            }
             for ref in by_schema.values():
                 items.append(
                     dto.StaleWorkflowDto(

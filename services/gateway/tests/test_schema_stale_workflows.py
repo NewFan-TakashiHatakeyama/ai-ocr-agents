@@ -14,6 +14,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from gw_helpers import auth
 
 from newfan_gateway.records import SchemaFieldDef, SchemaRecord
@@ -93,3 +94,52 @@ def test_未知の_doc_type_は_E1001(ctx: SimpleNamespace) -> None:
 def test_admin_以外は_403(ctx: SimpleNamespace) -> None:
     r = ctx.client.get("/v1/schemas/invoice/stale-workflows", headers=auth("reviewer"))
     assert r.status_code == 403, r.text
+
+
+def test_版一覧と版番号の読みの間に新版が保存されても応答は自己矛盾しない(
+    ctx: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """版一覧（schema_ids_for_doc_type）と版番号の解決（schema_versions）は別の読み
+    （Pg では別トランザクション）。その間に新版が保存されると、schema_versions では
+    版一覧の最新版（応答の latest_schema_id）も「最新でない」に見える。応答は版一覧の
+    スナップショットに揃え、latest_schema_id に出した版を旧版参照として返さない。
+    """
+    _seed_version(ctx, "sch_1_v2", 2)
+    wf = ctx.client.app.state.workflows
+    for sid in ("sch_1_v2", "sch_1"):
+        wf.seed_schema_id("ten_1", sid)
+    # 旧版（v2）と、読みの時点の最新版（v4 = sch_1）の両方を固定保持する有効ワークフロー
+    graph = {
+        "version": 1,
+        "nodes": [
+            {"id": "t1", "type": "source.manual", "config": {}},
+            {"id": "x_old", "type": "process.extract", "config": {"schema_id": "sch_1_v2"}},
+            {"id": "x_cur", "type": "process.extract", "config": {"schema_id": "sch_1"}},
+        ],
+        "edges": [{"from": "t1", "to": "x_old"}, {"from": "t1", "to": "x_cur"}],
+    }
+    r = ctx.client.post(
+        "/v1/workflows", json={"name": "v2 と v4", "graph_json": graph}, headers=auth("admin")
+    )
+    assert r.status_code == 201, r.text
+    wid = str(r.json()["id"])
+    r = ctx.client.post(f"/v1/workflows/{wid}/activate", headers=auth("admin"))
+    assert r.status_code == 200, r.text
+
+    orig = ctx.admin.schema_ids_for_doc_type
+
+    def ids_then_concurrent_save(tenant_id: str, doc_type: str) -> list[str]:
+        ids: list[str] = orig(tenant_id, doc_type)
+        _seed_version(ctx, "sch_1_v5", 5)  # 版一覧を読んだ直後に別の保存が v5 を足す
+        return ids
+
+    monkeypatch.setattr(ctx.admin, "schema_ids_for_doc_type", ids_then_concurrent_save)
+
+    r = ctx.client.get("/v1/schemas/invoice/stale-workflows", headers=auth("admin"))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # 版一覧の時点の最新版を返す（v5 は次の保存・次の呼び出しで拾う）
+    assert (body["latest_schema_id"], body["latest_version"]) == ("sch_1", 4)
+    got = [(i["id"], i["schema_id"], i["schema_version"]) for i in body["items"]]
+    assert got == [(wid, "sch_1_v2", 2)]  # 最新として出した sch_1 を旧版として返さない
+    assert all(i["schema_id"] != body["latest_schema_id"] for i in body["items"])
