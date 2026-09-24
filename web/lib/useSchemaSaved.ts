@@ -4,16 +4,19 @@
 // 編集（ヘッダの領域・項目を編集）で導線の置き場所は違うが、保存の後にやることは
 // 同じなので共有する。
 //
-// やること 3 つ:
+// やること 4 つ:
 //  1. 適用範囲を正確に伝える（手動抽出と分類推定は最新版・ワークフローは版固定）
 //  2. 条件を満たすときだけ「この帳票を再抽出」を出す
 //  3. 旧版を参照したままの有効ワークフローを警告する
+//  4. 例示値が記入例語の読取領域を警告する（保存応答の warnings。設計 v2 §2.5）
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 
 import { ApiError, api } from "@/lib/api";
 import { summarizeBatch } from "@/lib/bulk";
+import { placeholderSavedMessage } from "@/lib/placeholderExample";
+import type { SchemaSaveWarning } from "@/lib/types";
 import { useExtractJob } from "@/lib/useExtractJob";
 import { useToasts } from "@/lib/toast";
 import { invalidateWorkflowList } from "@/lib/workflowListCache";
@@ -31,6 +34,13 @@ export interface SchemaSaved {
   newWithoutRegion?: number;
   /** 例示値（帳票の値）を持つ読取領域の件数。0 なら案内しない */
   withExampleValue?: number;
+  /**
+   * PUT /schemas の応答の warnings（記入例語の例示値など。設計 region-field-add-and-hint-v2
+   * §2.5）。保存は通っているので成功の通知は出し、別に警告の通知を足す。
+   */
+  warnings?: SchemaSaveWarning[];
+  /** 項目名 → 表示名（警告に表示名で出すため。無ければ項目名のまま） */
+  fieldLabels?: Record<string, string>;
 }
 
 export function useSchemaSaved({
@@ -199,6 +209,10 @@ export function useSchemaSaved({
         // ので canRerun とは独立に出す（確定済みはサーバが skipped にする）。
         actions: [{ label: "この種別の帳票をすべて再抽出", onClick: () => rerunAll(r.docType) }],
       });
+      // 記入例語の例示値（サーバが保存した版で判定した結果）。保存は止めないが、
+      // 実行時はその項目の位置のヒントが使われないので黙らない。warn は自動で消えない
+      const placeholder = placeholderSavedMessage(r.warnings, (f) => r.fieldLabels?.[f]);
+      if (placeholder) push({ kind: "warn", message: placeholder });
       void warnStaleWorkflows(r.docType);
     },
     [push, qc, readOnly, runStatus, rerun, rerunAll, warnStaleWorkflows],

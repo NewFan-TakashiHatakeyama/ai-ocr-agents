@@ -332,7 +332,7 @@ a {
   cursor: not-allowed;
 }
 
-/* ============ STATUS CHIPS（§2, documents.status と1:1） ============ */
+/* ============ STATUS CHIPS（§2。status → クラスの表は lib/statusLabels.ts） ============ */
 .chip {
   display: inline-flex;
   align-items: center;
@@ -383,6 +383,13 @@ a {
 .st-failed {
   background: var(--red-soft);
   color: var(--red);
+}
+/* 現役でない状態（再抽出で置き換え済みの run・退役したワークフロー）。失敗ではないので
+   赤にせず、塗りの無い灰色の枠線にして「処理待ち」等の灰色の塗りとも見分ける */
+.st-inactive {
+  background: transparent;
+  color: var(--ink2);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
 /* ============ CONFIDENCE BAR（§2 / §8.3 色分け、数値常時併記） ============ */
@@ -2503,6 +2510,11 @@ a {
   grid-column: 1 / -1;
   min-width: 0;
   line-height: 1.5;
+}
+/* 例示値が記入例語（設計 v2 §2.5）。.sub の灰色だと読み飛ばされるので警告色にする */
+.rgn-rowwarn {
+  color: var(--amber-ink, #8a6116);
+  font-size: 11.5px;
 }
 /* 枠に含まれる文字は最大 200 字。1 行に収めて全文は title で */
 .rgn-rownote.clip {

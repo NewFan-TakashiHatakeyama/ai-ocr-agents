@@ -2,8 +2,9 @@
 //
 // status の語彙は runner の射影（services/orchestrator workflow_runner.py / workflow_graph.py）
 // に合わせる。run: running / waiting_hitl / succeeded / failed / skipped、
-// node_run: pending / running / succeeded / failed。未知の値は落とさず素通しする
-//（gateway が先に語彙を増やしても UI が壊れないように）。
+// node_run: pending / running / succeeded / failed / skipped。未知の値は落とさず素通しする
+//（gateway が先に語彙を増やしても UI が壊れないように）。全値に表示名があることは
+// statusLabels.test.ts がマイグレーションの CHECK 制約と突き合わせて確かめる。
 
 import type { WorkflowNodeRunDto, WorkflowRunError, WorkflowRunItemDto } from "./types";
 

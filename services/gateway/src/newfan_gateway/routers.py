@@ -13,7 +13,13 @@ from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, Resp
 from fastapi.responses import StreamingResponse
 from newfan_ingest.storage import page_key
 from newfan_netguard import is_blocked_url
-from newfan_schemas import check_field_name, check_field_type, resolve_regions
+from newfan_schemas import (
+    check_field_name,
+    check_field_type,
+    is_placeholder_example,
+    resolve_regions,
+    sanitize_example_value,
+)
 from newfan_workflow import (
     WorkflowGraph,
     build_candidate,
@@ -1302,12 +1308,15 @@ def unarchive_schema(
     return _archive_schema(doc_type, False, principal, admin, wf)
 
 
-@router.put("/schemas", response_model=dto.SchemaDto)
+@router.put("/schemas", response_model=dto.PutSchemaResponse)
 def put_schema(
     body: dto.PutSchemaRequest,
     principal: Principal = Depends(require_role("admin")),
     admin: AdminRepository = Depends(get_admin),
-) -> dto.SchemaDto:
+) -> dto.PutSchemaResponse:
+    """スキーマの新版を保存する（常に新版 INSERT）。応答は保存した版（``SchemaDto``）に
+    ``warnings`` を足したもの。例示値が記入例語の読取領域は保存を止めず、警告で返す
+    （設計 region-field-add-and-hint-v2 §2.5。画面は保存後の通知に出す）。"""
     existing = admin.get_schema(principal.tenant_id, body.doc_type)
     if existing is not None and existing.archived:
         # アーカイブ済み（C9-D）へは新規作成モードでも編集でも新版を足さない。足すと
@@ -1378,7 +1387,52 @@ def put_schema(
         raise ApiError(
             "E1005", str(exc), details={"doc_type": body.doc_type, "reason": "version_conflict"}
         ) from exc
-    return _schema_dto(rec)
+    # dict(...) は浅い変換（入れ子の RegionRect はインスタンスのまま渡り、検証し直さない）
+    return dto.PutSchemaResponse(
+        **dict(_schema_dto(rec)), warnings=_placeholder_warnings(rec.fields)
+    )
+
+
+def _is_placeholder_value(raw: Optional[str]) -> bool:
+    """例示値が記入例語か。**保存されるときの形**（``sanitize_example_value`` の後）で
+    判定する ── orchestrator も消毒した値で判定する（「Lorem\\nipsum」は改行を消して
+    「Loremipsum」で当たる）ので、画面の警告と実行時の判定がずれない。"""
+    ev = sanitize_example_value(raw)
+    return ev is not None and is_placeholder_example(ev)
+
+
+def _placeholder_warnings(fields: list[SchemaFieldDef]) -> list[dto.SchemaSaveWarning]:
+    """保存した版の読取領域のうち、例示値が記入例語のもの（項目の並び順）。
+
+    見るのは**保存した版**（INSERT した確定値）で、リクエストではない。触っていない
+    既存領域の例示値も含めて「この版で位置のヒントに使われない例示値」を返す。
+    """
+    out: list[dto.SchemaSaveWarning] = []
+    for f in fields:
+        ev = f.region.example_value if f.region is not None else None
+        if ev and _is_placeholder_value(ev):
+            out.append(dto.SchemaSaveWarning(field=f.name, example_value=ev))
+    return out
+
+
+@router.post("/schemas/example-values/check", response_model=dto.ExampleValueCheckResponse)
+def check_example_values(
+    body: dto.ExampleValueCheckRequest,
+    principal: Principal = Depends(require_role("admin")),
+) -> dto.ExampleValueCheckResponse:
+    """例示値が記入例語かを判定する（設計 region-field-add-and-hint-v2 §2.5）。
+
+    テンプレート化／領域編集画面が、例示値が決まった時点（ゴーストのクリック・手描き・
+    既存版の読み込み）で呼び、該当行に注記を出す。判定は orchestrator の事前ガード
+    （``placeholder_example``）と同じ関数で、web に規則を書き直さない。保存（PUT）と
+    同じく admin（読む・書くのはスキーマ編集画面だけ）。値は保存も記録もしない。
+    """
+    return dto.ExampleValueCheckResponse(
+        items=[
+            dto.ExampleValueCheckItem(value=v, placeholder=_is_placeholder_value(v))
+            for v in body.values
+        ]
+    )
 
 
 @router.get("/schemas/{doc_type}/stale-workflows", response_model=dto.StaleWorkflowList)

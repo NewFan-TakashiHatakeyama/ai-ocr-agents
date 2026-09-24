@@ -1,5 +1,5 @@
 {
- "_about": "読取領域ヒントの例示値の回帰フィクスチャ。第 4 回計測（2026-09-12、golden/out/phase4r4/c1）で region_from_gold が S2 / S3 の正解値の位置から起こした example_value の全件。placeholder_example（記入例語）の検出器が、記入例の帳票 sample13 由来の 3 件以外を落とさないことを services/orchestrator/tests/test_llm_nodes.py が検査する。",
+ "_about": "読取領域ヒントの例示値の回帰フィクスチャ。第 4 回計測（2026-09-12、golden/out/phase4r4/c1）で region_from_gold が S2 / S3 の正解値の位置から起こした example_value の全件。placeholder_example（記入例語）の検出器（newfan_schemas.placeholder）が、記入例の帳票 sample13 由来の 3 件以外を落とさないことを packages/schemas/tests/test_placeholder_example.py が検査する。",
  "items": [
   {
    "arm": "s2",

@@ -396,7 +396,7 @@ function DocumentsInner() {
                     <td>{d.doc_type ?? "—"}</td>
                     <td className="mono">{d.page_count ?? "—"}</td>
                     <td>
-                      <StatusChip status={d.status} />
+                      <StatusChip kind="document" status={d.status} />
                     </td>
                     <td className="sub">{d.external_ref ?? "—"}</td>
                     <td onClick={(e) => e.stopPropagation()}>

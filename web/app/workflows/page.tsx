@@ -125,7 +125,7 @@ export default function WorkflowsPage() {
             <Link key={w.id} href={`/workflows/${w.id}`} className="wf-card">
               <div className="wf-card-head">
                 <span className="wf-name">{w.name}</span>
-                <StatusChip status={w.status} />
+                <StatusChip kind="workflow" status={w.status} />
                 {staleTitle && (
                   <span className="wf-stale" title={staleTitle}>
                     {STALE_SCHEMA_BADGE}

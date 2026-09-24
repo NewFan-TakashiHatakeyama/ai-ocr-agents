@@ -635,7 +635,7 @@ function WorkflowEditor({ id }: { id: string }) {
             setDirty(true);
           }}
         />
-        {wf && <StatusChip status={wf.status} />}
+        {wf && <StatusChip kind="workflow" status={wf.status} />}
         {wf && <span className="sub">v{wf.version}</span>}
         {dirty && <span className="sub" style={{ color: "var(--warn, #d98a1f)" }}>未保存</span>}
         <div className="tab2 wf-tabs" role="tablist">

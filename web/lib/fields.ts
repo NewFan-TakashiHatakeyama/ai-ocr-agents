@@ -51,18 +51,4 @@ export function sortFields(fields: ExtractedField[]): ExtractedField[] {
   });
 }
 
-// documents.status → chip クラス/表示名（§2 STATUS CHIPS, 1:1）
-const STATUS_MAP: Record<string, { cls: string; label: string }> = {
-  uploaded: { cls: "st-uploaded", label: "アップロード済" },
-  queued: { cls: "st-queued", label: "処理待ち" },
-  processing: { cls: "st-processing", label: "処理中" },
-  needs_review: { cls: "st-review", label: "要確認" },
-  in_review: { cls: "st-inreview", label: "確認中" },
-  confirmed: { cls: "st-confirmed", label: "確定" },
-  exported: { cls: "st-exported", label: "連携済" },
-  failed: { cls: "st-failed", label: "失敗" },
-};
-
-export function statusChip(status: string): { cls: string; label: string } {
-  return STATUS_MAP[status] ?? { cls: "st-uploaded", label: status };
-}
+// ステータスチップ（documents / extraction_runs / workflows の status）は lib/statusLabels.ts
