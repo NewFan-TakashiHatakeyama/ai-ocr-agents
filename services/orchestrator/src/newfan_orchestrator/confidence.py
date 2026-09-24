@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
+from collections.abc import Sequence
 from typing import Optional
 
-from newfan_schemas import SpanSource
+from newfan_schemas import Span, SpanSource
 
 # grounding スコア（§5.7.2）
 GROUNDING_EXACT = 1.00  # value_normalized が source_quote の正規化文字列と一致
@@ -18,9 +20,38 @@ GROUNDING_NONE = 0.00  # 根拠 span なし → 強制レビュー
 
 AUTO_ELEVATION = 0.98  # 検証合格時の昇格値
 
+# 空白類の連なり（改行・タブ・全角空白を含む。全角空白は NFKC で半角空白になる）
+_WS = re.compile(r"\s+")
+# 空白を語の区切りとして残す文字。NFKC 後に判定するので全角英数字もここに入る
+_WORD_CHAR = re.compile(r"[0-9A-Za-z]")
+
 
 def _norm(text: str) -> str:
-    return unicodedata.normalize("NFKC", text).strip()
+    """grounding の比較形。NFKC のうえで空白類の違いを吸収する。
+
+    空白類の連なりは、**両隣が半角英数字のときだけ** 1 つの半角空白に畳み、それ以外
+    （日本語の文字・記号に接するもの、先頭・末尾）は除く。
+
+    source_quote は根拠 span のテキストを半角空白で連結したもの（kie）で、この空白は
+    原文に無い。複数行にまたがる値（住所など）を LLM が行を**つないで**返すと
+    （「…樽町エイピービル」）、根拠は「…樽町 エイピービル」になり、NFKC + strip だけの
+    比較では一致も部分一致もせず grounding 0（確信度 0.00・強制レビュー）に落ちていた。
+    LLM が改行で区切って返したときだけ string の正規化が改行を空白に畳んで偶然一致していた。
+
+    英数字どうしの間の空白を残すのは、除くと別の値と一致してしまうため ── 根拠
+    「12 500」（数量と単価の 2 span）に値「12500」が、「1-1-1 3F」に「1-1-13F」が
+    一致してしまう。住所の正規化（ADR-0007 規則 3）と同じ線引きにしてあるので、
+    address_jp が空白を除いた値も、同じ規則で畳んだ根拠と比べれば一致する。
+    """
+    s = unicodedata.normalize("NFKC", text)
+
+    def repl(m: re.Match[str]) -> str:
+        i, j = m.start(), m.end()
+        if i > 0 and j < len(s) and _WORD_CHAR.match(s[i - 1]) and _WORD_CHAR.match(s[j]):
+            return " "
+        return ""
+
+    return _WS.sub(repl, s)
 
 
 def grounding_score(
@@ -30,16 +61,21 @@ def grounding_score(
     source: SpanSource = SpanSource.OCR,
     type_converted: bool = False,
 ) -> float:
-    """value と原文根拠の対応度から grounding を返す。"""
+    """value と原文根拠の対応度から grounding を返す。
+
+    一致・部分一致は ``_norm``（NFKC + 空白類の違いの吸収）の形で比べる。
+    """
     if not source_quote or value_normalized is None:
         return GROUNDING_NONE
     if source is SpanSource.VL:
         return GROUNDING_VL_OR_PARTIAL  # DD-09: VL 由来は上限 0.7
-    if _norm(value_normalized) == _norm(source_quote):
+    value = _norm(value_normalized)
+    quote = _norm(source_quote)
+    if value == quote:
         return GROUNDING_EXACT
     if type_converted:
         return GROUNDING_TYPE_CONV
-    if _norm(value_normalized) in _norm(source_quote):
+    if value in quote:
         return GROUNDING_VL_OR_PARTIAL
     return GROUNDING_NONE
 
@@ -49,6 +85,39 @@ def ocr_confidence(line_conf: float, char_confs: Optional[list[float]]) -> float
     if char_confs:
         return min(char_confs)
     return line_conf
+
+
+def evidence_ocr_confidence(evidence: Sequence[Optional[Span]]) -> float:
+    """根拠 span 全体の ocr_conf（§5.7.2「min(対象spanのchar_confs)、無ければ行conf」）。
+
+    span ごとに ``ocr_confidence``（char_confs があればその最小、無ければ行 conf）を取り、
+    その最小を返す。``evidence`` は field.span_ids の順に State の span を引いたもの
+    （見つからない id は None）。
+
+    従来は先頭の 1 span だけを見ていた。複数行にまたがる値（住所など）は 1 行 1 span
+    なので、2 行目以降の読みが弱くても確信度に効かず、過大に見積もっていた
+    （sample2 の宛先住所: span 3 = 0.971、span 4 = 0.933 で確信度 0.971）。span_ids の
+    並びは LLM の出力順で読み順の保証も無いので、「先頭」自体に意味が無い。
+
+    根拠 span が無い、または State に見つからない span が混じるときは 0.0（確信の根拠が
+    揃わない。従来も先頭 span が見つからなければ 0.0 だった）。kie は State にある id
+    しか残さないので、実経路では起きない。
+    """
+    if not evidence or any(s is None for s in evidence):
+        return 0.0
+    return min(ocr_confidence(s.conf, s.char_confs) for s in evidence if s is not None)
+
+
+def evidence_source(evidence: Sequence[Optional[Span]]) -> SpanSource:
+    """根拠 span のどれか 1 つでも VL 由来なら VL（DD-09 の grounding 上限 0.7 を掛ける）。
+
+    DD-09 は「VL 由来のフィールドは必ずレビューへ」。先頭 span だけで判定すると、
+    OCR span と VL span を併せて根拠にした値（VL は OCR span を破棄せず併存させる）が
+    LLM の出力順しだいで上限を免れる。
+    """
+    if any(s is not None and s.source is SpanSource.VL for s in evidence):
+        return SpanSource.VL
+    return SpanSource.OCR
 
 
 def compute_confidence(ocr_conf: float, grounding: float) -> float:

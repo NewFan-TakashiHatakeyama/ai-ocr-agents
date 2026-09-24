@@ -36,8 +36,9 @@ from newfan_orchestrator.region_mask import (
 from newfan_orchestrator.confidence import (
     auto_elevate,
     compute_confidence,
+    evidence_ocr_confidence,
+    evidence_source,
     grounding_score,
-    ocr_confidence,
 )
 from newfan_orchestrator.gate import Thresholds, confidence_gate
 
@@ -146,29 +147,24 @@ def confidence_score(state: ExtractionState) -> dict[str, Any]:
     """§5.7.2 の式で各フィールドの confidence/grounding を算出する（実装済み）。
 
     grounding は normalize の type_converted を加味し、date の年補完等の confidence_cap を適用する。
+    ocr_conf と VL 由来の判定は根拠 span **全体**で行う（先頭 span だけではない。
+    docs/design/grounding-whitespace.md）。
     """
     spans_by_id = {s.span_id: s for s in state.get("spans", [])}
     norm_meta = state.get("norm_meta", {})
     updated: list[ExtractedField] = []
     for field in state.get("fields", []):
-        first = spans_by_id.get(field.span_ids[0]) if field.span_ids else None
-        line_conf = first.conf if first else 0.0
-        char_confs = first.char_confs if first else None
+        evidence = [spans_by_id.get(i) for i in field.span_ids]
         meta = norm_meta.get(field.name, {})
         type_converted = bool(meta.get("type_converted", False))
 
-        oc = ocr_confidence(line_conf, char_confs)
-        if first is not None:
-            gk = grounding_score(
-                field.value_normalized,
-                field.source_quote,
-                source=first.source,
-                type_converted=type_converted,
-            )
-        else:
-            gk = grounding_score(
-                field.value_normalized, field.source_quote, type_converted=type_converted
-            )
+        oc = evidence_ocr_confidence(evidence)
+        gk = grounding_score(
+            field.value_normalized,
+            field.source_quote,
+            source=evidence_source(evidence),
+            type_converted=type_converted,
+        )
         field.grounding_score = gk
 
         conf = compute_confidence(oc, gk)
