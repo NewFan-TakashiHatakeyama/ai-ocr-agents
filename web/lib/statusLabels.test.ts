@@ -137,6 +137,14 @@ describe("statusView", () => {
     expect(statusView("workflow", "retired").label).toBe("退役");
   });
 
+  it("draft / paused の補足は自動実行に限らない（gateway は active 以外の手動実行も断る）", () => {
+    for (const st of ["draft", "paused"]) {
+      const hint = statusView("workflow", st).hint ?? "";
+      expect(hint, st).toContain("新しい実行");
+      expect(hint, st).toContain("手動実行");
+    }
+  });
+
   it("表は種類ごとに別: documents の値を run・ワークフローの表では引かない", () => {
     // uploaded は documents だけの語彙。superseded は run だけの語彙
     expect(isKnownStatus("extractionRun", "uploaded")).toBe(false);

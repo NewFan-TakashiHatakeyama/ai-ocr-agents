@@ -76,3 +76,14 @@ connections.last_sync_status（ok / error の 2 分岐）。
   tenant_rules には CHECK があるので、`statusLabels.ts` へ寄せれば D7 の突き合わせに載せられる。
 - `lib/types.ts` の `WorkflowDto.status` は `"draft" | "active" | "paused"` で retired を含まない
   （gateway が retired を書かないため実害は無い）。
+
+## 4. レビューと反映（2026-09-24）
+
+| 重大度 | 指摘 | 反映 |
+|---|---|---|
+| low | `isKnownStatus` の JSDoc が「表に**無い** status か」と、実装（表に有れば true）と逆のことを書いている | 「表に有る（既知の）status か。未知の値は statusView が生値のまま中立色で出す」に直す |
+| （見直しで追加） | ワークフローの draft / paused の補足（チップの title）が「自動実行されません」で、手動なら動くように読める。実際は gateway が active 以外の手動実行（`POST /workflows/{id}/runs`）も E1005 で断り、トリガーも active だけを引く（`list_active_workflows`） | 「有効にするまで／停止中は **新しい実行が始まりません**（トリガー・手動実行とも）」に直す。「実行されない」としないのは、走行中の run と失敗した run の再実行（retry）は停止・再保存（新版は draft に戻る）の後も止まらないため。補足の語をテストで押さえる |
+
+同じファイルのほかのコメント（CHECK と 1:1、retired を gateway が書かない、run の状態が
+documents に写される、未知の値の扱い、内訳バーの灰色落ち）は実装・サーバと突き合わせて
+食い違いが無いことを確かめた。

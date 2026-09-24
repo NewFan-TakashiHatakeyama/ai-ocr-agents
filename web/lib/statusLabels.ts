@@ -76,10 +76,22 @@ const EXTRACTION_RUN: Record<ExtractionRunStatus, StatusChipView> = {
 
 // 「有効」「退役」はルール・接続の画面と同じ言葉に揃える。
 // paused は止めた操作のボタン名（「停止」）に合わせ、動いていないことが目に付くよう琥珀にする。
+// hint は「自動」に限らない: gateway は active 以外の手動実行（POST /workflows/{id}/runs）も
+// E1005 で断り、トリガーも active だけを引く（list_active_workflows）。一方、走行中の run と
+// 失敗した run の再実行（retry）は停止・再保存（新版は draft に戻る）の後も止めないので、
+// 「実行されない」ではなく「新しい実行が始まらない」と書く。
 const WORKFLOW: Record<WorkflowStatus, StatusChipView> = {
-  draft: { cls: "st-uploaded", label: "下書き", hint: "有効にするまで自動実行されません" },
+  draft: {
+    cls: "st-uploaded",
+    label: "下書き",
+    hint: "有効にするまで新しい実行は始まりません（トリガー・手動実行とも）",
+  },
   active: { cls: "st-confirmed", label: "有効" },
-  paused: { cls: "st-review", label: "停止中", hint: "停止中は自動実行されません" },
+  paused: {
+    cls: "st-review",
+    label: "停止中",
+    hint: "停止中は新しい実行が始まりません（トリガー・手動実行とも）",
+  },
   retired: { cls: "st-inactive", label: "退役" },
 };
 
@@ -94,7 +106,7 @@ function lookup(table: Readonly<Record<string, StatusChipView>>, status: string)
   return Object.hasOwn(table, status) ? table[status] : null;
 }
 
-/** 表に無い status か。未知の値は落とさず生値のまま中立色で出す */
+/** 表に有る（既知の）status か。未知の値は statusView が生値のまま中立色で出す */
 export function isKnownStatus(kind: StatusKind, status: string): boolean {
   return lookup(TABLES[kind], status) !== null;
 }
