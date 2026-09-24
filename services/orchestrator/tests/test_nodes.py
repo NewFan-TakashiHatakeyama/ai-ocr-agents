@@ -45,6 +45,47 @@ def test_confidence_score_vl_source_capped() -> None:
     assert out["fields"][0].confidence == 0.70
 
 
+def test_confidence_score_uses_all_evidence_spans() -> None:
+    """ocr_conf は根拠 span 全体の最小、VL 由来は根拠 span のどれか 1 つで判定する。"""
+    line2_char_confs = [0.99, 0.99, 0.84, 0.99, 0.99, 0.99, 0.99]
+    spans = [
+        Span(span_id=1, page=1, text="東京都港区", conf=0.97, bbox=[0, 0, 1, 1]),
+        Span(
+            span_id=2,
+            page=1,
+            text="芝公園4-2-8",
+            conf=0.99,
+            bbox=[0, 1, 1, 2],
+            char_confs=line2_char_confs,
+        ),
+        Span(
+            span_id=3,
+            page=1,
+            text="芝公園4-2-8",
+            conf=0.99,
+            bbox=[0, 1, 1, 2],
+            source=SpanSource.VL,
+        ),
+    ]
+
+    def score(span_ids: list[int]) -> tuple[float, float]:
+        field = ExtractedField(
+            name="address",
+            value_normalized="東京都港区芝公園4-2-8",
+            source_quote=" ".join(s.text for s in spans if s.span_id in span_ids),
+            span_ids=span_ids,
+        )
+        f = nodes.confidence_score({"spans": spans, "fields": [field]})["fields"][0]
+        return f.grounding_score, f.confidence
+
+    # 2 行目の char_confs の最小 0.84 が効く（先頭 span だけなら 0.97）
+    assert score([1, 2]) == (1.0, 0.84)
+    # 後ろの span が VL 由来なら上限 0.7（先頭 span だけなら 1.0 のまま auto に通っていた）
+    assert score([1, 3]) == (0.70, 0.70)
+    # State に無い span id が混じれば ocr_conf 0（kie は有効な id しか残さない）
+    assert score([1, 99])[1] == 0.0
+
+
 def test_confidence_gate_node_builds_review_items() -> None:
     field = ExtractedField(name="total_amount", confidence=0.5, grounding_score=1.0)
     schema = {

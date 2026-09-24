@@ -1,6 +1,8 @@
 """deterministic_normalize → confidence_score → validate の配線テスト（§5.6/§5.7）。"""
 
-from newfan_schemas import ExtractedField, Span, TableCell, TableResult
+from typing import Any
+
+from newfan_schemas import ExtractedField, ExtractionState, Span, TableCell, TableResult
 
 from newfan_orchestrator import nodes
 
@@ -65,7 +67,7 @@ def test_confidence_uses_type_converted_for_grounding() -> None:
     assert out["fields"][0].confidence == 0.85  # min(0.95, 0.85)
 
 
-def _two_line_address_state(schema: dict, value_raw: str) -> dict:
+def _two_line_address_state(schema: dict[str, Any], value_raw: str) -> ExtractionState:
     """sample2.png の宛先住所（2 行・2 span）を kie の出力形で組む。
 
     source_quote は kie と同じく span テキストの半角空白連結。
@@ -83,6 +85,14 @@ def _two_line_address_state(schema: dict, value_raw: str) -> dict:
     return {"schema": schema, "spans": spans, "fields": [field]}
 
 
+def _normalized(state: ExtractionState) -> ExtractionState:
+    """deterministic_normalize の出力を State に反映する（グラフの State 更新と同じ）。"""
+    out = nodes.deterministic_normalize(state)
+    state["fields"] = out["fields"]
+    state["norm_meta"] = out["norm_meta"]
+    return state
+
+
 def test_confidence_multiline_value_schemaless() -> None:
     """スキーマなし抽出（ADR-0006）で LLM が 2 行をつないで返しても grounding 1.0。
 
@@ -92,11 +102,11 @@ def test_confidence_multiline_value_schemaless() -> None:
     state = _two_line_address_state(
         {"doc_type": "", "fields": []}, "神奈川県横浜市港北区樽町エイピービル"
     )
-    state.update(nodes.deterministic_normalize(state))
-    out = nodes.confidence_score(state)
+    out = nodes.confidence_score(_normalized(state))
     f = out["fields"][0]
     assert f.grounding_score == 1.0
-    assert f.confidence > 0.9
+    # ocr_conf は根拠 span 全体の最小（span 4 = 0.9330）。先頭 span 3 の 0.9713 ではない
+    assert f.confidence == 0.9330
 
 
 def test_confidence_multiline_value_address_jp() -> None:
@@ -108,11 +118,30 @@ def test_confidence_multiline_value_address_jp() -> None:
         "doc_type": "invoice",
         "fields": [{"name": "recipient_address", "type": "address_jp"}],
     }
-    state = _two_line_address_state(schema, "神奈川県横浜市港北区樽町\nエイピービル")
-    state.update(nodes.deterministic_normalize(state))
+    state = _normalized(_two_line_address_state(schema, "神奈川県横浜市港北区樽町\nエイピービル"))
     assert state["fields"][0].value_normalized == "神奈川県横浜市港北区樽町エイピービル"
     out = nodes.confidence_score(state)
     assert out["fields"][0].grounding_score == 1.0
+    assert out["fields"][0].confidence == 0.9330
+
+
+def test_confidence_multiline_low_second_line_goes_to_review() -> None:
+    """2 行目の span の conf が閾値を下回れば、先頭行が高くても確信度はそれに下がる。
+
+    先頭 span だけを見ていたときは 0.9713 で auto 確定していた。grounding が 1.0 に
+    戻ったので、ocr_conf の見落としが確信度にそのまま出る。
+    """
+    state = _two_line_address_state(
+        {"doc_type": "", "fields": []}, "神奈川県横浜市港北区樽町エイピービル"
+    )
+    state["spans"][1] = state["spans"][1].model_copy(update={"conf": 0.72})
+    state = _normalized(state)
+    state["fields"] = nodes.confidence_score(state)["fields"]
+    f = state["fields"][0]
+    assert f.grounding_score == 1.0
+    assert f.confidence == 0.72
+    gate = nodes.confidence_gate_node(state)
+    assert [i.field_name for i in gate["review_items"]] == ["recipient_address"]
 
 
 def test_confidence_cap_applied() -> None:

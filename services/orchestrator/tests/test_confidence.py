@@ -1,9 +1,13 @@
-from newfan_schemas import SpanSource
+from typing import Any
+
+from newfan_schemas import Span, SpanSource
 
 from newfan_orchestrator.confidence import (
     apply_correction_confidence,
     auto_elevate,
     compute_confidence,
+    evidence_ocr_confidence,
+    evidence_source,
     grounding_score,
     ocr_confidence,
 )
@@ -43,9 +47,34 @@ _PHONE_QUOTE = "TEL:03-9999-9999 FAX:03-9999-9999"  # span 23
 
 
 def test_grounding_multiline_value_joined_without_separator() -> None:
-    """LLM が行を区切りなしでつないだ値も、根拠と完全一致として扱う。"""
-    assert grounding_score(_RECIPIENT_JOINED, _RECIPIENT_QUOTE) == 1.00
+    """改行位置の片側が日本語の文字・記号のとき（日本語の境界）、LLM が行を区切りなしで
+    つないだ値も根拠と完全一致として扱う。
+
+    改行位置の両側が半角英数字のときは一致させない
+    （test_grounding_multiline_joined_at_alnum_boundary_stays_zero）。
+    """
+    assert grounding_score(_RECIPIENT_JOINED, _RECIPIENT_QUOTE) == 1.00  # 「町」|「エ」
+    # 「9」|「サ」: 片側が日本語なら数字に接していても吸収する
     assert grounding_score("東京都新宿区四谷9-9-9サプライビル2F", _ISSUER_QUOTE) == 1.00
+
+
+def test_grounding_multiline_joined_at_alnum_boundary_stays_zero() -> None:
+    """改行位置の両側が半角英数字のとき、行を区切りなしでつないだ値は grounding 0 のまま。
+
+    「12 500」（数量と単価）に「12500」を一致させないための意図的な線引きで、2 行の住所でも
+    同じ規則が掛かる（docs/design/grounding-whitespace.md「残る課題」）。空白・改行で区切って
+    返した値は一致する。
+    """
+    # 「…丸の内1-1-1」＋「JPタワー」（「1」|「J」）
+    marunouchi = "東京都千代田区丸の内1-1-1 JPタワー"
+    assert grounding_score("東京都千代田区丸の内1-1-1JPタワー", marunouchi) == 0.00
+    assert grounding_score("東京都千代田区丸の内1-1-1\nJPタワー", marunouchi) == 1.00
+    # 「…梅田3-1-3」＋「2F」（「3」|「2」）。つなぐと 3-1-32 番地と区別できない
+    umeda = "大阪府大阪市北区梅田3-1-3 2F"
+    assert grounding_score("大阪府大阪市北区梅田3-1-32F", umeda) == 0.00
+    assert grounding_score("大阪府大阪市北区梅田3-1-3 2F", umeda) == 1.00
+    # 英字の住所「Suite 200」＋「New York」（「0」|「N」）
+    assert grounding_score("Suite 200New York", "Suite 200 New York") == 0.00
 
 
 def test_grounding_multiline_value_with_newline() -> None:
@@ -115,6 +144,51 @@ def test_grounding_type_conversion_with_multiline_quote() -> None:
 def test_ocr_confidence_prefers_char_min() -> None:
     assert ocr_confidence(0.95, [0.99, 0.60, 0.88]) == 0.60
     assert ocr_confidence(0.91, None) == 0.91
+
+
+# --- 根拠 span 全体の ocr_conf（複数 span の値） --------------------------------
+
+
+def _span(span_id: int, conf: float, **kw: Any) -> Span:
+    return Span(span_id=span_id, page=1, text=f"t{span_id}", conf=conf, bbox=[0, 0, 1, 1], **kw)
+
+
+def test_evidence_ocr_confidence_takes_min_over_all_spans() -> None:
+    """2 行目以降の低い conf も効く（sample2 の宛先住所: span 3 = 0.9713、span 4 = 0.9330）。"""
+    assert evidence_ocr_confidence([_span(3, 0.9713), _span(4, 0.9330)]) == 0.9330
+    # 並び順（LLM の出力順）に依らない
+    assert evidence_ocr_confidence([_span(4, 0.9330), _span(3, 0.9713)]) == 0.9330
+    # 1 span は従来どおり
+    assert evidence_ocr_confidence([_span(1, 0.91)]) == 0.91
+
+
+def test_evidence_ocr_confidence_char_confs_per_span() -> None:
+    """span ごとに ocr_confidence と同じ扱い（char_confs があればその最小、無ければ行 conf）。"""
+    spans = [_span(1, 0.99, char_confs=[0.99, 0.70, 0.95]), _span(2, 0.80)]
+    assert evidence_ocr_confidence(spans) == 0.70
+    # 行 conf が高くても char_confs の最小を採る。char_confs の無い span は行 conf
+    spans = [_span(1, 0.99, char_confs=[0.97, 0.96]), _span(2, 0.93)]
+    assert evidence_ocr_confidence(spans) == 0.93
+    # 空の char_confs は「無い」扱い（ocr_confidence と同じ）
+    assert evidence_ocr_confidence([_span(1, 0.88, char_confs=[])]) == 0.88
+
+
+def test_evidence_ocr_confidence_zero_without_evidence() -> None:
+    """根拠 span が無い・State に見つからない span が混じるときは 0.0。"""
+    assert evidence_ocr_confidence([]) == 0.0
+    assert evidence_ocr_confidence([None]) == 0.0
+    # 先頭以外が見つからなくても 0.0（従来は先頭しか見ず、後ろの欠落を見落とした）
+    assert evidence_ocr_confidence([_span(1, 0.95), None]) == 0.0
+
+
+def test_evidence_source_vl_if_any_span_is_vl() -> None:
+    """DD-09: 根拠 span のどれかが VL 由来なら VL（先頭が OCR でも上限を掛ける）。"""
+    ocr, vl = _span(1, 0.95), _span(2, 0.95, source=SpanSource.VL)
+    assert evidence_source([ocr, vl]) is SpanSource.VL
+    assert evidence_source([vl, ocr]) is SpanSource.VL
+    assert evidence_source([ocr, ocr]) is SpanSource.OCR
+    assert evidence_source([]) is SpanSource.OCR
+    assert evidence_source([None, vl]) is SpanSource.VL
 
 
 def test_compute_confidence_is_min() -> None:

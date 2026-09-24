@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Sequence
 from typing import Optional
 
-from newfan_schemas import SpanSource
+from newfan_schemas import Span, SpanSource
 
 # grounding スコア（§5.7.2）
 GROUNDING_EXACT = 1.00  # value_normalized が source_quote の正規化文字列と一致
@@ -84,6 +85,39 @@ def ocr_confidence(line_conf: float, char_confs: Optional[list[float]]) -> float
     if char_confs:
         return min(char_confs)
     return line_conf
+
+
+def evidence_ocr_confidence(evidence: Sequence[Optional[Span]]) -> float:
+    """根拠 span 全体の ocr_conf（§5.7.2「min(対象spanのchar_confs)、無ければ行conf」）。
+
+    span ごとに ``ocr_confidence``（char_confs があればその最小、無ければ行 conf）を取り、
+    その最小を返す。``evidence`` は field.span_ids の順に State の span を引いたもの
+    （見つからない id は None）。
+
+    従来は先頭の 1 span だけを見ていた。複数行にまたがる値（住所など）は 1 行 1 span
+    なので、2 行目以降の読みが弱くても確信度に効かず、過大に見積もっていた
+    （sample2 の宛先住所: span 3 = 0.971、span 4 = 0.933 で確信度 0.971）。span_ids の
+    並びは LLM の出力順で読み順の保証も無いので、「先頭」自体に意味が無い。
+
+    根拠 span が無い、または State に見つからない span が混じるときは 0.0（確信の根拠が
+    揃わない。従来も先頭 span が見つからなければ 0.0 だった）。kie は State にある id
+    しか残さないので、実経路では起きない。
+    """
+    if not evidence or any(s is None for s in evidence):
+        return 0.0
+    return min(ocr_confidence(s.conf, s.char_confs) for s in evidence if s is not None)
+
+
+def evidence_source(evidence: Sequence[Optional[Span]]) -> SpanSource:
+    """根拠 span のどれか 1 つでも VL 由来なら VL（DD-09 の grounding 上限 0.7 を掛ける）。
+
+    DD-09 は「VL 由来のフィールドは必ずレビューへ」。先頭 span だけで判定すると、
+    OCR span と VL span を併せて根拠にした値（VL は OCR span を破棄せず併存させる）が
+    LLM の出力順しだいで上限を免れる。
+    """
+    if any(s is not None and s.source is SpanSource.VL for s in evidence):
+        return SpanSource.VL
+    return SpanSource.OCR
 
 
 def compute_confidence(ocr_conf: float, grounding: float) -> float:
