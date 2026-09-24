@@ -295,9 +295,9 @@ variable "acm_certificate_arn" {
 variable "ingest_preprocess" {
   type        = string
   default     = ""
-  description = "取込の前処理。空は none、\"deskew\" で傾き補正"
+  description = "取込の前処理。空は none、\"deskew\" で傾き補正、\"deskew_measure\" は傾きを記録するだけ（画像は回さない）"
   validation {
-    condition     = contains(["", "none", "deskew"], var.ingest_preprocess)
-    error_message = "ingest_preprocess は \"\" / \"none\" / \"deskew\" のいずれか。"
+    condition     = contains(["", "none", "deskew", "deskew_measure"], var.ingest_preprocess)
+    error_message = "ingest_preprocess は \"\" / \"none\" / \"deskew\" / \"deskew_measure\" のいずれか。"
   }
 }

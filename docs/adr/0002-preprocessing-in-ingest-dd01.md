@@ -56,3 +56,11 @@ DD-01 は「HITL ビューアにはパイプラインが返す前処理済みペ
 
 未実装のまま: 90°/180° の向き補正（orientation）、アンワープ。方針決定の材料は
 `docs/design/dd01-deskew-measurement-2026-09-13.md`（手元 30 帳票の傾き分布）。
+
+### 追記（2026-09-24）: 測るだけのモード `deskew_measure`
+
+`INGEST_PREPROCESS=deskew_measure` は傾きを推定して `pages.preproc.deskew`（`estimated` / `gain` /
+`would_apply` / `measure_only: true`）に残すだけで、画像は回さない。sample2（幅 740 px）を 2° 傾けた
+合成画像で比べると、補正なしは PaddleOCR がそのまま正しく読み、補正ありは再標本化で 2 文字を誤読した
+（`docs/design/dd01-deskew-measurement-2026-09-13.md` の追記）。補正の効き目は実帳票の傾き分布しだいなので、
+本番で `deskew` を検討する前に、まず `deskew_measure` で分布を測る。

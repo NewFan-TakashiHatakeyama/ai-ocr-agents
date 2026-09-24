@@ -69,3 +69,27 @@
 # 傾き分布と合成傾き（samples/ → golden/out/dd01_deskew/{angles.json,synthetic_skew.txt}）。要 Pillow
 .venv/Scripts/python.exe golden/scripts/measure_deskew_angles.py --samples samples --out golden/out/dd01_deskew
 ```
+
+## 追記（2026-09-24）: 実スタックでの A/B（補正あり／なし）と、測るだけのモード
+
+compose の実スタック（gateway の取込 → structure-svc の OCR → Gemini の抽出。スキーマなし）で、
+sample2.png（740×1046）を Pillow で +2° 回した画像を 2 回取り込んで比べた。
+
+| 取込 | `pages.preproc` | 住所（宛先） | 会社名（宛先） | 振込先 |
+|---|---|---|---|---|
+| `INGEST_PREPROCESS=deskew` | `angle: -2.0`、`deskew.applied: true`、`gain 5.12` | 神奈川県横浜市港北区**梅町**エイピービル（誤読） | 株式会社**工化ー工ム**（誤読） | 3 行とも正読 |
+| 補正なし | `angle: 0` | 神奈川県横浜市港北区樽町エイピービル | 株式会社エイピーエム | 3 行とも正読（1 件は根拠照合で 0.0） |
+
+- 推定器は実スタックでも傾きをちょうど打ち消した（−2.0°）。
+- ところが **OCR は補正なしの方が正しかった**。PaddleOCR（PP-OCRv5 系）は 2° 程度の傾きを
+  そのまま読める一方、補正の回転（bicubic の再標本化）は小さい文字をぼかす。この合成は「回した画像を
+  さらに回し戻す」ので再標本化が 2 回入り、実スキャン（1 回）より不利な条件ではあるが、幅 740 px の
+  低解像度帳票では 1 回でも効きうる。
+- 1 帳票・1 角度の観察で、一般化はできない。傾きが大きい（5° 前後）帳票や高解像度のスキャンでは
+  補正が効く可能性は残る。
+
+**判断の更新**: 本番はもちろん dev でも、傾き分布を測る目的で `deskew` を on にすると OCR を
+崩しうる。そこで **測るだけのモード `INGEST_PREPROCESS=deskew_measure`** を足した（推定角・`gain`・
+「補正するなら回したか」＝`would_apply` を `pages.preproc.deskew` に残し、画像は回さない）。
+dev はこのモードで分布を集め、|推定角| ≧ 0.3° の帳票が一定数あり、かつその帳票で OCR の誤読が
+目立つときに、`deskew` の実測（補正あり／なしの A/B）に進む。
