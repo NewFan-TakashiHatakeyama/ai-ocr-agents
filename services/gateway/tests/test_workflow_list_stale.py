@@ -171,7 +171,7 @@ def test_版番号の解決はワークフロー数によらず1回(
 
     monkeypatch.setattr(ctx.admin, "schema_versions", spy)
 
-    # SQL 文の数が行数によらないことは実 Pg で数える（test_pg_workflows_integration.py）
+    # SQL 文の数が行数によらないことは実 Pg で数える（test_pg_workflow_list_stale_integration.py）
     items = _list(ctx)
     assert len(calls) == 1
     assert sorted(calls[0]) == ["sch_1", "sch_1_v2"]  # 重複は畳んで渡す

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -29,54 +30,85 @@ from sqlalchemy import create_engine, event, text  # noqa: E402
 _DSN = os.environ.get("DATABASE_URL_TEST")
 pytestmark = pytest.mark.skipif(not _DSN, reason="DATABASE_URL_TEST 未設定（実 DB が要る）")
 
-# 他の Pg テスト（test_pg_workflows_integration の ten_wf_test 等）と tenant を分ける
-TENANT = "ten_wf_stale_test"
-OTHER = "ten_wf_stale_other"
 
-# テストごとに一意な id（並行実行・前回の残骸と衝突させない）
-_SFX = uuid.uuid4().hex[:8]
-INV_V1 = f"sch_st_inv1_{_SFX}"
-INV_V2 = f"sch_st_inv2_{_SFX}"
-INV_V3 = f"sch_st_inv3_{_SFX}"
-RC_V1 = f"sch_st_rc1_{_SFX}"
+@dataclass(frozen=True)
+class Env:
+    """1 テストぶんの tenant・版 id と、それに向けた Pg リポジトリ。"""
+
+    admin: Any
+    wf: Any
+    #: 判定の対象 tenant と、分離の確認に使う他 tenant
+    tenant: str
+    other: str
+    #: invoice は v1〜v3（最新 v3）、receipt は v1 のみ（それが最新）
+    inv_v1: str
+    inv_v2: str
+    inv_v3: str
+    rc_v1: str
 
 
 @pytest.fixture(scope="module")
-def owner() -> Any:
-    return create_engine(_DSN, future=True)  # type: ignore[arg-type]
+def owner() -> Iterator[Any]:
+    engine = create_engine(_DSN, future=True)  # type: ignore[arg-type]
+    yield engine
+    engine.dispose()
 
 
 @pytest.fixture
-def repos(owner: Any) -> Iterator[tuple[Any, Any]]:
+def env(owner: Any) -> Iterator[Env]:
+    """tenant を**テストごとに作って消す**。
+
+    field_schemas は ``UNIQUE (tenant_id, doc_type, version)`` なので、tenant を固定すると
+    版 id を一意にしても (invoice, 1) などの (doc_type, version) が衝突する ── 中断した実行が
+    残した行や、同じ DB に向けた同時実行と UniqueViolation になる。tenant ごと一意にすれば
+    doc_type / version は固定のままでよく、後始末は tenant 単位で消せば残らない
+    （field_schemas.id は全テナントで一意の主キーなので、版 id にも同じ接尾辞を付ける）。
+    """
     from newfan_gateway.db import PgAdminRepository, PgWorkflowsRepository
 
+    sfx = uuid.uuid4().hex[:12]
+    tenant, other = f"ten_wfst_{sfx}", f"ten_wfst_other_{sfx}"
+    inv_v1, inv_v2, inv_v3 = (f"sch_st_inv{v}_{sfx}" for v in (1, 2, 3))
+    rc_v1 = f"sch_st_rc1_{sfx}"
     with owner.begin() as c:
-        for t in (TENANT, OTHER):
-            c.execute(
-                text("INSERT INTO tenants (id, name) VALUES (:i,'wf stale') ON CONFLICT DO NOTHING"),
-                {"i": t},
-            )
-        # invoice は v1〜v3（最新 v3）、receipt は v1 のみ（それが最新）
+        for t in (tenant, other):
+            c.execute(text("INSERT INTO tenants (id, name) VALUES (:i, 'wf stale test')"), {"i": t})
         for sid, doc_type, version in (
-            (INV_V1, "invoice", 1),
-            (INV_V2, "invoice", 2),
-            (INV_V3, "invoice", 3),
-            (RC_V1, "receipt", 1),
+            (inv_v1, "invoice", 1),
+            (inv_v2, "invoice", 2),
+            (inv_v3, "invoice", 3),
+            (rc_v1, "receipt", 1),
         ):
             c.execute(
                 text(
                     "INSERT INTO field_schemas (id, tenant_id, doc_type, version, fields)"
                     " VALUES (:i, :t, :d, :v, '[]'::jsonb)"
                 ),
-                {"i": sid, "t": TENANT, "d": doc_type, "v": version},
+                {"i": sid, "t": tenant, "d": doc_type, "v": version},
             )
     admin, wf = PgAdminRepository(_DSN), PgWorkflowsRepository(_DSN)  # type: ignore[arg-type]
-    yield admin, wf
-    with owner.begin() as c:
-        for table in ("audit_logs", "workflows", "field_schemas"):
-            c.execute(
-                text(f"DELETE FROM {table} WHERE tenant_id IN (:a, :b)"), {"a": TENANT, "b": OTHER}
-            )
+    try:
+        yield Env(
+            admin=admin,
+            wf=wf,
+            tenant=tenant,
+            other=other,
+            inv_v1=inv_v1,
+            inv_v2=inv_v2,
+            inv_v3=inv_v3,
+            rc_v1=rc_v1,
+        )
+    finally:
+        admin._engine.dispose()
+        wf._engine.dispose()
+        with owner.begin() as c:
+            # tenants を参照する行を先に消す（field_schemas は tenants への FK を持つ）
+            for table in ("audit_logs", "workflows", "field_schemas"):
+                c.execute(
+                    text(f"DELETE FROM {table} WHERE tenant_id IN (:a, :b)"),
+                    {"a": tenant, "b": other},
+                )
+            c.execute(text("DELETE FROM tenants WHERE id IN (:a, :b)"), {"a": tenant, "b": other})
 
 
 def _graph(*extracts: tuple[str, dict[str, Any]]) -> dict[str, Any]:
@@ -90,13 +122,13 @@ def _graph(*extracts: tuple[str, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _create(wf: Any, name: str, graph: dict[str, Any]) -> str:
+def _create(env: Env, name: str, graph: dict[str, Any]) -> str:
     from newfan_gateway.records import WorkflowRecord
 
-    rec = wf.create_workflow(
+    rec = env.wf.create_workflow(
         WorkflowRecord(
             id=f"workflow_{uuid.uuid4().hex[:12]}",
-            tenant_id=TENANT,
+            tenant_id=env.tenant,
             name=name,
             graph_json=graph,
             created_by="tester",
@@ -105,28 +137,28 @@ def _create(wf: Any, name: str, graph: dict[str, Any]) -> str:
     return str(rec.id)
 
 
-def test_schema_versionsは版と最新版を1回で返しL012の判定と一致する(repos: tuple[Any, Any]) -> None:
-    admin, wf = repos
-    got = admin.schema_versions(TENANT, [INV_V1, INV_V3, RC_V1, "sch_nope", INV_V1])
+def test_schema_versionsは版と最新版を1回で返しL012の判定と一致する(env: Env) -> None:
+    admin, wf, t = env.admin, env.wf, env.tenant
+    got = admin.schema_versions(t, [env.inv_v1, env.inv_v3, env.rc_v1, "sch_nope", env.inv_v1])
 
-    assert set(got) == {INV_V1, INV_V3, RC_V1}  # 存在しない id は載らない・重複は畳む
-    assert (got[INV_V1].doc_type, got[INV_V1].version) == ("invoice", 1)
-    assert (got[INV_V1].latest_schema_id, got[INV_V1].latest_version) == (INV_V3, 3)
-    assert got[INV_V3].is_latest and got[RC_V1].is_latest
-    assert not got[INV_V1].is_latest
+    assert set(got) == {env.inv_v1, env.inv_v3, env.rc_v1}  # 存在しない id は載らない・重複は畳む
+    assert (got[env.inv_v1].doc_type, got[env.inv_v1].version) == ("invoice", 1)
+    assert (got[env.inv_v1].latest_schema_id, got[env.inv_v1].latest_version) == (env.inv_v3, 3)
+    assert got[env.inv_v3].is_latest and got[env.rc_v1].is_latest
+    assert not got[env.inv_v1].is_latest
 
     # lint L012（schema_is_latest）と同じ判定になる（最新版の定義を共有している）
-    for sid in (INV_V1, INV_V2, INV_V3, RC_V1):
-        expected = admin.schema_versions(TENANT, [sid])[sid].is_latest
-        assert wf.schema_is_latest(TENANT, sid) is expected, sid
-    assert wf.schema_is_latest(TENANT, "sch_nope") is True  # 不在は L009 の担当
+    for sid in (env.inv_v1, env.inv_v2, env.inv_v3, env.rc_v1):
+        expected = admin.schema_versions(t, [sid])[sid].is_latest
+        assert wf.schema_is_latest(t, sid) is expected, sid
+    assert wf.schema_is_latest(t, "sch_nope") is True  # 不在は L009 の担当
 
-    assert admin.schema_versions(OTHER, [INV_V1]) == {}  # 他テナントの版は引けない
-    assert admin.schema_versions(TENANT, []) == {}
+    assert admin.schema_versions(env.other, [env.inv_v1]) == {}  # 他テナントの版は引けない
+    assert admin.schema_versions(t, []) == {}
 
 
 def test_一覧の旧版バッジは実Pgで判定されSQL文数がワークフロー数によらない(
-    repos: tuple[Any, Any], tmp_path: Path
+    env: Env, tmp_path: Path
 ) -> None:
     from newfan_ingest import IngestService
     from newfan_ingest.storage import LocalObjectStore
@@ -134,7 +166,7 @@ def test_一覧の旧版バッジは実Pgで判定されSQL文数がワークフ
     from newfan_gateway.app import create_app
     from newfan_gateway.config import Settings
 
-    admin, wf = repos
+    admin, wf = env.admin, env.wf
     app = create_app(
         settings=Settings(jwt_secret=TEST_SECRET, storage_root=tmp_path),
         admin=admin,
@@ -142,7 +174,7 @@ def test_一覧の旧版バッジは実Pgで判定されSQL文数がワークフ
         ingestor=IngestService(LocalObjectStore(tmp_path), FakeRasterizer()),
     )
     client = TestClient(app)
-    headers = {"Authorization": f"Bearer {make_token('admin', tenant=TENANT)}"}
+    headers = {"Authorization": f"Bearer {make_token('admin', tenant=env.tenant)}"}
 
     statements: list[str] = []
 
@@ -153,7 +185,7 @@ def test_一覧の旧版バッジは実Pgで判定されSQL文数がワークフ
     for e in engines:
         event.listen(e, "before_cursor_execute", count)
     try:
-        w_old = _create(wf, "v1 固定", _graph(("x1", {"schema_id": INV_V1})))
+        w_old = _create(env, "v1 固定", _graph(("x1", {"schema_id": env.inv_v1})))
         statements.clear()
         r = client.get("/v1/workflows", headers=headers)
         assert r.status_code == 200, r.text
@@ -163,25 +195,25 @@ def test_一覧の旧版バッジは実Pgで判定されSQL文数がワークフ
             {
                 "node_id": "x1",
                 "doc_type": "invoice",
-                "schema_id": INV_V1,
+                "schema_id": env.inv_v1,
                 "schema_version": 1,
-                "latest_schema_id": INV_V3,
+                "latest_schema_id": env.inv_v3,
                 "latest_version": 3,
             }
         ]
 
         w_mixed = _create(
-            wf,
+            env,
             "混在",
             _graph(
-                ("x_old", {"schema_id": INV_V2}),
-                ("x_new", {"schema_id": INV_V3}),
-                ("x_rc", {"schema_id": RC_V1}),
+                ("x_old", {"schema_id": env.inv_v2}),
+                ("x_new", {"schema_id": env.inv_v3}),
+                ("x_rc", {"schema_id": env.rc_v1}),
             ),
         )
-        w_latest = _create(wf, "最新", _graph(("x1", {"schema_id": INV_V3})))
-        w_dt = _create(wf, "種別指定", _graph(("x1", {"doc_type": "invoice"})))
-        w_missing = _create(wf, "不在", _graph(("x1", {"schema_id": "sch_nope"})))
+        w_latest = _create(env, "最新", _graph(("x1", {"schema_id": env.inv_v3})))
+        w_dt = _create(env, "種別指定", _graph(("x1", {"doc_type": "invoice"})))
+        w_missing = _create(env, "不在", _graph(("x1", {"schema_id": "sch_nope"})))
         statements.clear()
         r = client.get("/v1/workflows", headers=headers)
         assert r.status_code == 200, r.text
