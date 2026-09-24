@@ -2494,6 +2494,11 @@ a {
   min-width: 0;
   line-height: 1.5;
 }
+/* 例示値が記入例語（設計 v2 §2.5）。.sub の灰色だと読み飛ばされるので警告色にする */
+.rgn-rowwarn {
+  color: var(--amber-ink, #8a6116);
+  font-size: 11.5px;
+}
 /* 枠に含まれる文字は最大 200 字。1 行に収めて全文は title で */
 .rgn-rownote.clip {
   overflow: hidden;

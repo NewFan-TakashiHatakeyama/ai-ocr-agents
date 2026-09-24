@@ -213,6 +213,28 @@ export interface SchemaDto {
   archived?: boolean;
 }
 
+/**
+ * 保存は通したが作者に知らせること（PUT /schemas の応答。設計 region-field-add-and-hint-v2 §2.5）。
+ * placeholder_example: 読取領域の例示値が記入例語で、実行時は位置のヒントに使われない。
+ */
+export interface SchemaSaveWarning {
+  code: "placeholder_example";
+  /** 項目名（name） */
+  field: string;
+  /** 保存された例示値（サーバで消毒した後の形） */
+  example_value: string;
+}
+
+/** PUT /schemas の応答。保存した版に warnings を足しただけ（既存のキーは変わらない） */
+export interface PutSchemaResponse extends SchemaDto {
+  warnings?: SchemaSaveWarning[];
+}
+
+/** POST /schemas/example-values/check の応答。items は送った values と同じ順・同じ件数 */
+export interface ExampleValueCheckResponse {
+  items: { value: string | null; placeholder: boolean }[];
+}
+
 /** 取込時の種別指定・分類の候補（GET /doc-types）。fields は含まない軽い一覧。 */
 export interface DocTypeDto {
   doc_type: string;

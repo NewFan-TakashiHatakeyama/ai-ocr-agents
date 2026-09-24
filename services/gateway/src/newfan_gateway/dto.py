@@ -304,6 +304,48 @@ class PutSchemaRequest(BaseModel):
     source_page_count: Optional[int] = None
 
 
+class SchemaSaveWarning(BaseModel):
+    """保存は通したが作者に知らせること（``PUT /schemas`` の応答。設計
+    region-field-add-and-hint-v2 §2.5 / region-template-editor §6）。
+
+    ``placeholder_example``: 読取領域の例示値が記入例語（「〇〇株式会社」「YYYY/MM/DD」
+    「住所1」）。実行時は KIE の前の事前ガードがこの項目のヒントを落とすので、保存を
+    止めはしないが黙ってもいない（記入例の帳票で領域を引いたことに作者が気付けない）。
+    判定は orchestrator と同じ ``newfan_schemas.is_placeholder_example``。
+    """
+
+    code: Literal["placeholder_example"] = "placeholder_example"
+    field: str  # 項目名（name）
+    example_value: str  # 保存された例示値（消毒後）
+
+
+class PutSchemaResponse(SchemaDto):
+    """``PUT /schemas`` の応答。保存した版（``SchemaDto``）に警告を**足しただけ**で、
+    既存のキーは 1 つも変えない（旧編集画面・chat 経路は ``warnings`` を読まなくてよい）。"""
+
+    warnings: list[SchemaSaveWarning] = Field(default_factory=list)
+
+
+# 1 回の問い合わせで判定する例示値の上限。画面は 1 スキーマの読取領域ぶん（数十件）しか
+# 送らない。上限を超える要求は 422（FastAPI の形式検証）で返す。
+EXAMPLE_VALUE_CHECK_MAX = 500
+
+
+class ExampleValueCheckRequest(BaseModel):
+    """``POST /schemas/example-values/check``。null・空文字も受ける（判定は false）。"""
+
+    values: list[Optional[str]] = Field(max_length=EXAMPLE_VALUE_CHECK_MAX)
+
+
+class ExampleValueCheckItem(BaseModel):
+    value: Optional[str]  # 受け取った値そのまま（画面が自分の値と突き合わせるため）
+    placeholder: bool  # 記入例語（保存しても位置のヒントに使われない）
+
+
+class ExampleValueCheckResponse(BaseModel):
+    items: list[ExampleValueCheckItem]  # values と同じ順・同じ件数
+
+
 class StaleWorkflowDto(BaseModel):
     """当該 doc_type の**旧版**の schema_id を extract ノードに固定保持している有効
     ワークフロー（設計 §4.4b / D17）。"""

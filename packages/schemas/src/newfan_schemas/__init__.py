@@ -31,6 +31,7 @@ from newfan_schemas.field_schema import (
     sanitize_example_value,
 )
 from newfan_schemas.enums import DocStatus, FieldType, ReviewStatus, RunStatus, SpanSource
+from newfan_schemas.placeholder import is_placeholder_example
 from newfan_schemas.textnorm import norm_key
 
 __all__ = [
@@ -57,6 +58,7 @@ __all__ = [
     "resolve_regions",
     "norm_key",
     "sanitize_example_value",
+    "is_placeholder_example",
     "FieldType",
     "SpanSource",
     "ReviewStatus",

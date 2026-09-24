@@ -24,8 +24,10 @@ import type {
   DocumentList,
   DocumentMeta,
   DocTypeDto,
+  ExampleValueCheckResponse,
   LockStatus,
   MetricsResponse,
+  PutSchemaResponse,
   ResultResponse,
   RegionRect,
   ReviewQueueItem,
@@ -225,6 +227,8 @@ export const api = {
   // exclude_regions / source_page_count は **キー自体を送らなければ直前版から引き継ぎ**
   // される（サーバ側 §4.4）。undefined を明示的に送ると JSON.stringify が落とすので
   // 結果は同じだが、「省略＝引き継ぎ」を呼び出し側が意識できるよう opts で分ける。
+  // 応答は保存した版に warnings（記入例語の例示値など）を足したもの。保存は止めない
+  // ので、読むかどうかは呼び出し側が決める（テンプレート化画面は保存後の通知に出す）
   putSchema: (
     docType: string,
     fields: SchemaFieldDto[],
@@ -234,7 +238,7 @@ export const api = {
       sourcePageCount?: number | null;
     },
   ) =>
-    request<SchemaDto>(`/schemas`, {
+    request<PutSchemaResponse>(`/schemas`, {
       method: "PUT",
       body: JSON.stringify({
         doc_type: docType,
@@ -247,6 +251,13 @@ export const api = {
           ? { source_page_count: opts.sourcePageCount }
           : {}),
       }),
+    }),
+  // 例示値が記入例語（「〇〇株式会社」「YYYY/MM/DD」）かをサーバに判定させる（admin）。
+  // 規則は orchestrator の事前ガードと同じ関数にあり、web では書き直さない（lib/placeholderExample）
+  checkExampleValues: (values: (string | null)[]) =>
+    request<ExampleValueCheckResponse>(`/schemas/example-values/check`, {
+      method: "POST",
+      body: JSON.stringify({ values }),
     }),
   listConnections: () => request<{ items: ConnectionDto[] }>(`/connections`),
   // 接続の登録（⑤⑥ SaaS連携）。秘密は config に入れず secret_ref で渡す（§16.5）

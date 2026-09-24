@@ -2,7 +2,8 @@
      「読取領域ヒントを反証可能にして既定 on にする」の 2 つ。
      前提: docs/design/region-template-editor.md（Phase 1〜5）、
            docs/design/region-measurement-2026-09-07.md（Phase 4 の再計測）。
-     改訂: 2026-09-11 敵対的レビュー第 1 回（§7）を反映。 -->
+     改訂: 2026-09-11 敵対的レビュー第 1 回（§7）を反映。
+     改訂: 2026-09-24 記入例語の判定を newfan_schemas へ移し、保存時に警告する（§2.5）。 -->
 
 # 設計: 画像からの項目追加と、反証可能な読取領域ヒント
 
@@ -331,6 +332,55 @@ stripped["region_hint"] = {
 
 型の解釈は決定論正規化のパーサをそのまま使う（新しく書かない）。
 
+**記入例語の判定の置き場と、保存時の警告（2026-09-24 追加、残タスク A-4）** ──
+`placeholder_example` は実行時にヒントを落とすだけで、テンプレート化／領域編集画面では
+何も言わなかった。作者は「記入例の帳票で領域を引いた」ことに、検証画面の参考表示（§2.8）を
+開くまで気付けない。**保存の画面で伝える**:
+
+- **判定は共有パッケージに移す（TypeScript で書き直さない）。** `is_placeholder_example` と、
+  それが使う定数（強い印・見出し語・伏せ字・ゼロ埋めの正規表現と語彙）を
+  `packages/schemas/src/newfan_schemas/placeholder.py` へ**判定を変えずに**移し、
+  `region_hint` からは明示的に re-export した（`region_hint.is_placeholder_example` と
+  `region_mask` の import はそのまま動く）。gateway は orchestrator に依存しない
+  （pyproject で確認。推移的にも無い）が newfan_schemas には依存しているので、同じ関数を
+  呼べる。web に規則を写すと、第 5 回の敵対的検証で直し続けた 4 規則が画面と実行時で
+  ずれ、「画面では警告が出ないのに実行時は落ちる」（または逆）という追いにくい差になる。
+  移設の前後で判定が **1 件も変わらない**ことは、第 4 回の例示値 94 件
+  （`golden/data/region_ab_example_values.json`。値としては 72 種、記入例語は sample13 由来の
+  3 件）・golden データ全体の文字列 410 種・テストの文字列定数 428 種を、移設前の実装と
+  突き合わせて確かめた（差分 0）。判定そのもののテスト（記入例語・値の一覧、正解値と
+  94 件の回帰）は `packages/schemas/tests/test_placeholder_example.py` へ入力・期待値を変えずに
+  移し、orchestrator には「落ちてヒントが渡らない」経路のテストと、`region_hint` /
+  `region_mask` が newfan_schemas の**同じ関数**を使うことの固定を残した。
+- **判定は保存される形で行う。** gateway は `sanitize_example_value` を通した後の値で
+  判定する（orchestrator と同じ。「Lorem\nipsum」は改行が消えて「Loremipsum」で当たる）。
+- **判定 API** `POST /v1/schemas/example-values/check`（admin。スキーマの保存と同じ権限）:
+  `{values: [...]}` → `{items: [{value, placeholder}]}`（送った順・同じ件数。null・空は false。
+  上限 500 件で、超えると 422）。値は保存も記録もしない。
+- **保存応答の警告** `PUT /v1/schemas` の応答（`PutSchemaResponse`）は `SchemaDto` に
+  `warnings: [{code: "placeholder_example", field, example_value}]` を**足しただけ**（既存の
+  キーは変えない。GET の応答形も変えない）。見るのは**保存した版**の読取領域で、触って
+  いない既存領域の例示値も含む（その版でヒントに使われないことに変わりはないので、
+  外すまで毎回伝える）。除外領域の例示値は見ない（使われない）。**保存は止めない** ──
+  誤って落としても対照に戻るだけという上の非対称性はそのままで、止めると、記入例の帳票
+  しか手元に無い作者がテンプレートを作れなくなる。
+- **画面**（`TemplatizePreview`）: 例示値が決まった時点（ゴーストのクリック・手描きの
+  span 取得・既存版の読み込み）で、未判定の値だけをまとめて判定 API に問い合わせ、該当行に
+  「⚠ 記入例の語のようです。この例示値は位置のヒントに使われません（例示値を消す で外せます）」
+  を出す。行を選んでいなくても出し（気付かせるための注記なので、選んだときだけでは遅い）、
+  その行には「例示値を消す」も出す。問い合わせに失敗しても画面は止めない（注記が出ない
+  だけ。同じ値の組では問い合わせ直さない）。保存後の通知（`useSchemaSaved`）は応答の
+  `warnings` から出す（warn。自動で消えない）ので、画面の注記が取れていなくても保存後には
+  必ず伝わる。問い合わせる値の選び方・応答の取り込み・通知の文言は
+  `web/lib/placeholderExample.ts`（vitest）。
+- **「例示値を消す」で何が変わるか**: その領域は例示値の無い読取領域になり、ヒントは
+  候補（枠の中の span）だけで渡る（手描きで span が取れなかった領域と同じ扱い）。記入例語の
+  例示値のままだと `placeholder_example` でヒントごと使われない。ただし例示値が無いと
+  `kind_conflict` が効かない（別雛形の帳票で候補に従う余地が残る）ので、保存後の通知では
+  **「記入例ではない帳票で領域を引き直す」を先に**案内し、消すのはその次の手段として並べる
+  （検証画面の参考表示 §2.8 と同じ順）。旧スキーマ管理画面（`/schemas`）は例示値を編集
+  しないので、`warnings` を表示しない。
+
 **種類判定（`kind_conflict`）** ── 小さな規則ベースの分類器。順に当てて最初に
 当たった種類にする:
 
@@ -578,6 +628,7 @@ S3 を測り直し、sample2 ← sample13 は −6 → ±0、S3 全体は 6 / 22
 | `buildSaveBody` | 切り出し前と同一出力（スナップショット）／新規行は `base` 無し分岐／触っていない矩形は origin を返す（`example_value` / `origin` / `created_at` ごと）／引き直した矩形は `example_value` を取り直す／新規行の × で領域も消える |
 | `validateDrafts` | 新規行の `name` / `label` 必須、重複、命名規則、孤立領域 |
 | `resolveGhosts` | 確定済み行には出ない、`source_quote` を添える、根拠 span 無しは出ない |
+| `unknownExampleValues` / `mergeVerdicts` / `placeholderSavedMessage`（`lib/placeholderExample.ts`） | 未判定の例示値だけを重複なしで問い合わせる（空は送らない）／応答は送った順に対応づけ、件数がずれたら取り込まない／保存後の通知は表示名で 3 件まで並べて残りは件数、警告が無ければ出さない（§2.5 の保存時の警告。判定そのものは書かない） |
 
 **Python**
 
@@ -585,6 +636,8 @@ S3 を測り直し、sample2 ← sample13 は −6 → ±0、S3 全体は 6 / 22
 |---|---|---|
 | `packages/schemas/tests` | `RegionRect` の 3 項目の往復、消毒（印字不可文字・200 字）、除外領域に付けても無害、`origin` の値域 | 契約 |
 | `packages/schemas/tests`（`textnorm`） | 3 つの正規化関数を置き換えても golden のテストが全て通る | D18 |
+| `packages/schemas/tests/test_placeholder_example.py` | 記入例語・値の一覧、正解値 29 帳票で sample13 の 3 項目だけ、第 4 回の例示値 94 件で sample13 由来の 3 件だけ（PR #16 のテストを移設。期待値は不変） | §2.5 |
+| `services/gateway/tests/test_schema_placeholder_warning.py` | 判定 API（同じ順・消毒後で判定・admin のみ・上限 422・94 件で同じ 3 件）、PUT 応答の `warnings`（項目名と値・保存は止めない・既存キーは GET と一致・編集往復でも出て例示値を消せば消える・除外領域は見ない） | §2.5 |
 | `services/gateway/tests/test_schema_regions.py` | PUT → GET で 3 項目が返る（extra="ignore" の罠）、予約名は API でもチャット経路でも E1003 | DTO 漏れ・D9 |
 | `services/gateway/tests` | `GET /documents/{id}/spans` の RLS・ページ指定（1 始まり、0 以下は 422）・run が無ければ E1001・行が無いページは空 | D12 |
 | `services/orchestrator/tests/test_pg_save_result_integration.py` | span が保存される、needs_review → confirmed で消えない、再配信で二重にならない | D12 |

@@ -3,6 +3,7 @@
      関連: ADR-0006, DD-01。実装着手前のレビュー対象。
      更新: 2026-09-06 第2回敵対的レビュー反映済み（C1〜C35）。
      更新: 2026-09-12 実装完了後の第3回敵対的レビュー反映済み（末尾「付録: 第3回レビュー対応表」）。
+     更新: 2026-09-24 記入例語の例示値の注記と保存時の警告（§3.2・§6。残タスク A-4）。
      反映方針は末尾「付録: 第2回レビュー対応表」を参照。各節の変更は「（敵対的レビュー第2回 C#）」で追跡可能。 -->
 
 # 詳細設計書（最終版）: 領域指定テンプレート化（region hint / exclude regions）+ F-0 フィールド BBOX 修正
@@ -117,6 +118,11 @@ web/components/TemplatizeSchema.tsx（既存: ボタン + open 状態のみ残�
 - doc_type 空 / 未紐付け include / 重複 name / 行未選択 / 403 / 409 等の検証・API エラーは、**右ペインの保存ボタン近傍のインライン領域（`role="alert"`）に表示**する。
 - トーストは `setOpen(false)` 後の成功通知（D15 の再抽出ボタン付き）に限定する。
 - 併せて Phase 3 の `globals.css` 変更に「`.toast-wrap` の `z-index` を `.tpl-overlay` より上（200）へ引き上げる」を含める（既存 `issue()` 警告の救済。二重防御）。
+
+**記入例語の例示値の注記（2026-09-24 追加、残タスク A-4。設計 region-field-add-and-hint-v2 §2.5）**: 例示値が記入例語（「〇〇株式会社」「YYYY/MM/DD」「住所1」）だと、実行時は事前ガードがその項目の位置のヒントを落とす（`placeholder_example`）が、この画面は何も言わなかった。上の規則どおりトーストにはせず、**該当行の直下にインライン（`role="note"`、警告色 `.rgn-rowwarn`）**で「⚠ 記入例の語のようです。この例示値は位置のヒントに使われません（例示値を消す で外せます）」を出す。
+- 判定は web に書かない。例示値が決まった時点（ゴーストのクリック・手描きの span 取得・編集モードの既存版の読み込み）で、未判定の値だけをまとめて `POST /v1/schemas/example-values/check`（§6）に問い合わせ、結果を値ごとに持つ（同じ値は 2 度問い合わせない）。失敗しても画面は止めない（注記が出ないだけ）。
+- 注記は行を選んでいなくても出し、その行には「例示値を消す」も出す（従来は選択中の行だけ）。消すと注記も消え、版には `example_value: null` で保存される（§2.3 の既存の挙動）。
+- 保存後は `PUT /v1/schemas` の応答の `warnings`（保存した版で判定し直したもの）を、プレビューを閉じた後の通知（`useSchemaSaved`、warn）に出す。画面の問い合わせが失敗していても保存後には必ず伝わる。保存は止めない。
 
 **右ペイン Draft 行の型表示（敵対的レビュー第2回 C4）**: `TYPE_OPTIONS`（`TemplatizeSchema.tsx:35-43`）に `table` は存在しない。編集モードで `type === "table"` の行が来たときに select が表示不能になるため、`table` を TYPE_OPTIONS に追加した上で**当該行の型 select は読み取り専用**にする（`columns` はそのまま往復させ、削除・改変しない）。table 行は include 領域の対象外でよいが、**保存対象からは外さない**。
 
@@ -487,6 +493,8 @@ ADR-0006 追補（`docs/adr/`）に以下を**正確に**書く（批評 tech-5 
 | lint（`routers.py:901` / `lint.py`） | **L012（warning）「`extract.schema_id` が当該 doc_type の最新版ではありません（v1 / 最新 v3）」を追加**（§4.4b / D17。敵対的レビュー第2回 C5）。`schema_exists` と同型の注入関数 `schema_is_latest` を gateway から渡す（呼び出しに 1 引数追加）。**error ではなく warning**（既存ワークフローの有効化を塞がない）。 |
 | ページ画像 API | 変更なし（既存の署名 URL 流用）。 |
 | **`GET /v1/schemas/{doc_type}/stale-workflows`（admin・新設）** | 当該 doc_type の**旧版**（最新版以外の全版）の id を `process.extract.config.schema_id` に持つ **active** ワークフローを `{items:[{id,name,status,version,schema_id,schema_version}], latest_schema_id, latest_version}` で返す。web は保存成功後にこれを呼んで警告する（§4.4b）。lint L012 は有効化時にしか評価されないため、既に有効なワークフローにはこれが唯一の警告経路（第 3 回敵対的レビュー 2） |
+| **`POST /v1/schemas/example-values/check`（admin・新設、2026-09-24）** | 読取領域の例示値が**記入例語**（「〇〇株式会社」「YYYY/MM/DD」「住所1」）かを判定する。`{values: (string\|null)[]}`（上限 500 件、超えると 422）→ `{items: [{value, placeholder}]}`（送った順・同じ件数）。判定は orchestrator の事前ガード（`placeholder_example`）と**同じ関数** `newfan_schemas.is_placeholder_example` を、`sanitize_example_value` の後の値に当てる。値は保存も記録もしない。テンプレート化／領域編集画面が、例示値が決まった時点で呼んで行に注記を出す（設計 region-field-add-and-hint-v2 §2.5） |
+| `PUT /v1/schemas` の応答（2026-09-24） | `SchemaDto` に `warnings: [{code: "placeholder_example", field, example_value}]` を足した `PutSchemaResponse`。**既存のキーは変えない**（GET の応答形も変えない。旧編集画面・chat は読まなくてよい）。見るのは保存した版の読取領域（触っていない既存領域を含む）。保存は止めない。web は保存後の通知（`useSchemaSaved`、warn）に出す |
 
 web 側: `web/lib/types.ts` に `RegionRect` / `ResolvedRegion` / `PageDim`、`SchemaFieldDto.region?`、`SchemaDto.exclude_regions?/source_page_count?`、`DocumentMeta.pages?`（**任意・一覧では空**）、`ResultResponse.region_stats/applied_exclude_regions/schema_doc_type`。`web/lib/api.ts` の `putSchema` を `(docType, fields, opts?: {create?, excludeRegions?, sourcePageCount?})` に拡張（省略時はキー自体を送らない = 引き継ぎ）。さらに `api.getSchema(docType)`（既存 `GET /v1/admin/schemas/{doc_type}` = 最新版、`routers.py:707`）と `api.extract(id, {schema_id, supersede_review})` を追加し、`ExtractStart.pollJob` を **`web/lib/useExtractJob.ts`** に切り出して再抽出ボタンと共有する（§3.1。敵対的レビュー第2回 C3/C9/C11）。`TemplatizeSchema` の `onCreated` は `{docType, schemaId}` を渡す形に変更する（再抽出の `schema_id` 明示送信と編集モードの入口条件に必要 — C11 / C30）。
 
