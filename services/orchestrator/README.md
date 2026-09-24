@@ -6,7 +6,7 @@ LangGraph 抽出グラフ（詳細設計 §4）。
 
 | モジュール | 内容 | 状況 |
 |---|---|---|
-| `confidence.py` | §5.7.2 confidence/grounding 算出（DD-09/DD-10 反映） | 実装済み・テスト有 |
+| `confidence.py` | §5.7.2 confidence/grounding 算出（DD-09/DD-10 反映。比較形の空白類の吸収は `docs/design/grounding-whitespace.md`） | 実装済み・テスト有 |
 | `gate.py` | §2.5 閾値ゲート → review_items | 実装済み・テスト有 |
 | `nodes.py` | §4.3 全ノード。決定論ノード（confidence_score/quality_gate/confidence_gate）は実装、外部接続ノードはスタブ | 骨組み |
 | `graph.py` | §4.1 グラフ組み立て（interrupt/resume は §4.4） | 骨組み（langgraph は extra） |

@@ -248,6 +248,9 @@ def kie_extract(
             name = f"{name}_{n}"
         seen_names.add(name)
         valid_ids = _valid_span_ids(item.get("span_ids"), span_map)
+        # span の間の半角空白は原文に無い区切り。複数行の値（住所など）を LLM が行を
+        # つないで返しても落とさないよう、grounding 側（orchestrator の confidence._norm）
+        # が空白類の違いを吸収して比べる。
         quote = " ".join(span_map[i].text for i in valid_ids) if valid_ids else None
         # 根拠 span から座標を合成する（F-0）。span 根拠契約を執行するこの場所に
         # 置く（根拠が無ければ bbox も作らない、を 1 箇所で守る）。
