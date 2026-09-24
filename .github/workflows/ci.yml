@@ -70,6 +70,59 @@ jobs:
             exit 1
           fi
 
+  e2e:
+    name: E2E（実 PG + Redis、GPU/LLM は Fake）
+    runs-on: ubuntu-latest
+    # scripts/e2e_real.py（A 自動確定 / B HITL resume / C export / D 除外領域）を空の
+    # PostgreSQL＋Redis に当てる。pytest の結合テストは Pg 単体（キューは InMemory）までで、
+    # 「gateway が XADD → worker が消費 → Pg 保存 → q.export → export worker」という
+    # Redis Streams を挟んだ貫通経路は手元の compose でしか通しておらず、壊れても CI は緑だった。
+    # quality ジョブとは分ける: ruff/mypy が落ちても E2E の成否が見える／pytest の結合テストと
+    # DB・Redis を共有しない（ten_e2e の作り直しと干渉しない）／並列に走る。
+    # 設計判断と故障注入での確認結果は docs/design/ci-e2e-real.md。
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: newfan
+          POSTGRES_PASSWORD: newfan
+          POSTGRES_DB: newfan
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7  # deploy/compose.yaml と同じ
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.9.8"
+          enable-cache: true
+      # quality と同じ理由で全メンバー＋全 extras（worker/export/gateway の runtime extra に
+      # redis・psycopg・langgraph が入っている）。同じ uv.lock なのでキャッシュも共有される。
+      - name: Sync workspace (全メンバー＋extras)
+        run: uv sync --frozen --all-packages --all-extras
+      - name: Apply migrations
+        run: uv run --no-sync alembic -c db/alembic.ini upgrade head
+        env:
+          DATABASE_URL: postgresql+psycopg://newfan:newfan@localhost:5432/newfan
+      - name: E2E（scripts/e2e_real.py）
+        # 合否はスクリプトの終了コードだけで決まる（全 Phase PASS のときだけ 0。Phase 内の
+        # 例外も FAIL として 1 になる）。tee 等のパイプを挟まないこと: 既定シェルは
+        # `bash -e`（pipefail なし）で、パイプの右側が成功すると E2E の失敗が消える。
+        run: uv run --no-sync python scripts/e2e_real.py
+        env:
+          DATABASE_URL: postgresql+psycopg://newfan:newfan@localhost:5432/newfan
+          REDIS_URL: redis://localhost:6379
+          PYTHONUNBUFFERED: "1"  # print とトレースバック（stderr）の順序をログで崩さない
+
   golden:
     name: ゴールデンセット回帰（§14.2 / DD-03）
     runs-on: ubuntu-latest
