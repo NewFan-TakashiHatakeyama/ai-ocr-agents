@@ -82,11 +82,18 @@ class DeskewPreprocessor:
       保つため。角度は反時計回りが正（Pillow の rotate と同じ向き）で、適用した回転を
       ``preproc["angle"]`` に残す
     - 画像を開けない・Pillow が無いときは warning を出して無補正で通す（取込を止めない）
+    - ``apply=False``（``INGEST_PREPROCESS=deskew_measure``）は**推定だけ**して回さない。
+      画像のバイト列は常にそのまま返し、``preproc["deskew"]`` に推定角と「補正するなら
+      回したか」（``would_apply``）を残す。回転の再標本化は小さい文字を崩しうる
+      （sample2 を 2° 傾けた合成で、補正ありは 2 文字誤読・補正なしは正読。
+      docs/design/dd01-deskew-measurement-2026-09-13.md）ので、実帳票の傾き分布は
+      OCR に触らずに測る
     """
 
     def __init__(
         self,
         *,
+        apply: bool = True,
         max_angle: float = 5.0,
         coarse_step: float = 1.0,
         fine_step: float = 0.25,
@@ -100,6 +107,7 @@ class DeskewPreprocessor:
         self._min_angle = min_angle
         self._min_gain = min_gain
         self._work_width = work_width
+        self._apply = apply
 
     # ---- 推定 ----
     def estimate_angle(self, png_bytes: bytes) -> tuple[float, dict[str, Any]]:
@@ -163,6 +171,10 @@ class DeskewPreprocessor:
             logger.warning("[deskew] 傾き推定に失敗（無補正で継続）: page=%s err=%s", page.page_no, exc)
             meta["deskew"] = {"error": str(exc)[:200], "applied": False}
             return PreprocessedPage(page.page_no, page.width, page.height, page.png_bytes, meta)
+        if not self._apply:
+            # 測るだけ: 回さない。「補正するなら回したか」は would_apply に残す
+            meta["deskew"] = {**detail, "applied": False, "would_apply": angle != 0.0, "measure_only": True}
+            return PreprocessedPage(page.page_no, page.width, page.height, page.png_bytes, meta)
         meta["deskew"] = detail
         if angle == 0.0:
             return PreprocessedPage(page.page_no, page.width, page.height, page.png_bytes, meta)
@@ -184,6 +196,8 @@ def preprocessor_from_env(env: Optional[Mapping[str, str]] = None) -> Preprocess
 
     - 空 / ``none``（既定）: ``NoopPreprocessor``
     - ``deskew``: ``DeskewPreprocessor``（射影プロファイルの傾き補正）
+    - ``deskew_measure``: 傾きを推定して ``preproc.deskew`` に残すだけ（画像は回さない）。
+      本番で補正を有効にする前に、実帳票の傾き分布を OCR に影響させずに測るためのもの
     - それ以外: warning を出して Noop（取込を止めない）
     """
     src = os.environ if env is None else env
@@ -192,5 +206,9 @@ def preprocessor_from_env(env: Optional[Mapping[str, str]] = None) -> Preprocess
         return NoopPreprocessor()
     if value == "deskew":
         return DeskewPreprocessor()
-    logger.warning("INGEST_PREPROCESS=%r は未対応です。前処理なしで続けます（none|deskew）", value)
+    if value == "deskew_measure":
+        return DeskewPreprocessor(apply=False)
+    logger.warning(
+        "INGEST_PREPROCESS=%r は未対応です。前処理なしで続けます（none|deskew|deskew_measure）", value
+    )
     return NoopPreprocessor()

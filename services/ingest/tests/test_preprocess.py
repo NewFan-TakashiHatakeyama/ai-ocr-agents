@@ -93,3 +93,27 @@ def test_preprocessor_from_env() -> None:
     assert isinstance(preprocessor_from_env({"INGEST_PREPROCESS": "deskew"}), DeskewPreprocessor)
     assert isinstance(preprocessor_from_env({"INGEST_PREPROCESS": " Deskew "}), DeskewPreprocessor)
     assert isinstance(preprocessor_from_env({"INGEST_PREPROCESS": "bogus"}), NoopPreprocessor)
+
+
+def test_deskew_measure_は推定だけして画像を回さない() -> None:
+    page = _page(_text_page(2.0))
+    out = DeskewPreprocessor(apply=False).preprocess(page)
+    assert out.png_bytes is page.png_bytes  # 回さない・再エンコードしない
+    assert (out.width, out.height) == (page.width, page.height)
+    assert out.preproc["angle"] == 0
+    d = out.preproc["deskew"]
+    assert d["measure_only"] is True and d["applied"] is False and d["would_apply"] is True  # type: ignore[index]
+    assert abs(float(d["estimated"]) + 2.0) <= 0.3  # type: ignore[index,arg-type]
+
+
+def test_deskew_measure_は整ったページで_would_apply_が偽() -> None:
+    out = DeskewPreprocessor(apply=False).preprocess(_page(_text_page(0.0)))
+    d = out.preproc["deskew"]
+    assert d["would_apply"] is False and d["applied"] is False  # type: ignore[index]
+
+
+def test_preprocessor_from_env_deskew_measure() -> None:
+    p = preprocessor_from_env({"INGEST_PREPROCESS": "deskew_measure"})
+    assert isinstance(p, DeskewPreprocessor)
+    out = p.preprocess(_page(_text_page(2.0)))
+    assert out.preproc["angle"] == 0 and out.preproc["deskew"]["measure_only"] is True  # type: ignore[index]
