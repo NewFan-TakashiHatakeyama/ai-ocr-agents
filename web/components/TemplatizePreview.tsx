@@ -11,9 +11,18 @@
 // メッセージにトーストを使わない: .toast-wrap は z-index 50、このプレビューは 100 で、
 // 表示中に出したトーストは幕の下に沈んで × も押せない（warn は自動消去もされない）。
 // 検証・API エラーは保存ボタン近傍のインライン領域に出す。
+//
+// 幕（.tpl-overlay）は **document.body へポータルで描く**。検証画面のヘッダ（.rv-head）は
+// backdrop-filter を持ち、backdrop-filter / transform / filter を持つ祖先は position: fixed の
+// 包含ブロックになる。ヘッダの「✎ 領域・項目を編集」から開くと幕がヘッダ（高さ約 57px）に
+// 閉じ込められ、中央寄せの本体（高さ約 870px）の上 400px ほどが画面外に出て、ページ切替・
+// ズーム・読取／除外の切替に手が届かなかった（2026-09-24 に実画面で確認）。
+// ページのショートカット抑止は document.querySelector(".tpl-overlay") で幕の有無を見るので、
+// ポータルにしても効く。
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { RegionCanvas, type CanvasGhost, type CanvasRegion, type Px } from "@/components/RegionCanvas";
 import { ApiError, api } from "@/lib/api";
@@ -616,7 +625,7 @@ export function TemplatizePreview({
   const preservedCount =
     Object.keys(preserved.fieldRegions).length + preserved.excludes.length;
 
-  return (
+  const overlay = (
     <div className="tpl-overlay" role="dialog" aria-modal="true" aria-label="テンプレート化プレビュー">
       <div className="rgn-shell">
         <header className="rgn-head">
@@ -1079,4 +1088,7 @@ export function TemplatizePreview({
       </div>
     </div>
   );
+  // 開くのは利用者の操作の後（クライアント）だけなので document は必ずある。SSR で
+  // 評価されたときだけ素のまま返す
+  return typeof document === "undefined" ? overlay : createPortal(overlay, document.body);
 }
