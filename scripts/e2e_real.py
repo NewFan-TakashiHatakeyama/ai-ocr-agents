@@ -20,11 +20,15 @@
   - compose の orchestrator-worker が動いていると q.extract のジョブを横取りされて
     A/B が落ちるので、止めてから実行する。
 
-実行:
+実行（CI の e2e ジョブと同じ手順。詳細は tests/README.md「実 PG + Redis の E2E」）:
+    docker ps -q --filter name=orchestrator-worker   # 何も出なければ停止中
+    uv sync --frozen --all-packages --all-extras
     DATABASE_URL=postgresql+psycopg://newfan:newfan@localhost:5433/newfan \
     REDIS_URL=redis://localhost:6380 \
-    uv run --with "psycopg[binary]" --with redis python scripts/e2e_real.py
-  （uv を使わない場合は venv の python に各パッケージの src を PYTHONPATH で通す。tests/README.md）
+    uv run --no-sync python scripts/e2e_real.py
+  （`uv run` だけでは --with で redis・psycopg を足しても workspace のメンバー newfan_* が
+    入らず import で落ちる。uv sync 済みの venv の python に各 src を PYTHONPATH で通す方法と、
+    使い捨て DB で回す方法も tests/README.md）
 """
 
 from __future__ import annotations

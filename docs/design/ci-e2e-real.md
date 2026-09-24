@@ -76,6 +76,32 @@ CI の pytest は実 PG の結合テスト（`test_pg_*_integration.py`）まで
 
 Phase の中身（seed・assert の内容）は変えていない。
 
+### 5. 手元の実行手順を CI と揃える（レビュー指摘、2026-09-24）
+
+- 手元の手順（`tests/README.md` とスクリプトの docstring）は
+  `uv run --with "psycopg[binary]" --with redis python scripts/e2e_real.py` のままだった。ルートの
+  `newfan-ocr` は workspace のメンバーに依存していない（`[build-system]` も無い）ので、`uv run` が
+  入れるのはルートの dev group と `--with` の分だけで、`newfan_*` は入らない。素の環境（`.venv` の
+  無い worktree）で実際に `ModuleNotFoundError: No module named 'newfan_gateway'` になることを確かめた。
+  下の「確認したこと」の手元の実行は venv＋`PYTHONPATH` で行っていたので、書いてあった uv の手順
+  自体は通していなかった（`uv sync --all-packages --all-extras` 済みの `.venv` があれば通るが、
+  それは手順に書かれていない前提）。
+- CI と同じ `uv sync --frozen --all-packages --all-extras` → `uv run --no-sync python scripts/e2e_real.py`
+  に揃えた。手元と CI で依存の入り方が同じになり、「手元では通るが CI で import に落ちる」
+  （またはその逆）の差が出ない。
+- venv＋`PYTHONPATH` の手順は、`uv sync` をもう一度せずに main checkout の `.venv` を使い回す手段として
+  残し、前提を書き直した: サードパーティの依存はその venv のもの（`--all-packages --all-extras` で
+  sync 済みであること）で、`PYTHONPATH` が補うのは `newfan_*` のソースだけ。`PYTHONPATH` は
+  editable install の `.pth` の追加分より前に `sys.path` に入るので worktree のソースが勝つ。
+  以前の「worktree ではこの方法にする」は、worktree で `uv sync` すれば worktree 側に `.venv` ができて
+  editable install も worktree を指すので、必須ではなくなった。
+- worker の停止確認を `docker ps --filter name=orchestrator-worker`（「何も出なければ停止中」）から
+  `docker ps -q --filter name=orchestrator-worker` に直した。`-q` が無いと一致する container が
+  無くてもヘッダ行（`CONTAINER ID   IMAGE ...`）が必ず出るので、書いてあるとおりに読むと
+  「動いている」と誤読する。`-q` なら停止中は何も出ない。
+- dev の DB・Redis の中身に触れずに回す手順（使い捨て DB にマイグレーション＋Redis の空の論理 DB）も
+  README に足した。下の「CI 相当」の確認はこの形で行っている。
+
 ## 確認したこと
 
 手元（Windows、venv の python に worktree の各 `src` を `PYTHONPATH` で通して実行）:
@@ -98,7 +124,22 @@ Phase の中身（seed・assert の内容）は変えていない。
 いずれの失敗でも 0 は返らない（= CI のジョブは赤になる）。CI 上での初回実行は、この変更を push して
 確認する（ここでは push していない）。
 
+判断 5 の手順（README どおり）での確認（Windows、`.venv` の無い worktree から）:
+
+| 手順 | 結果 |
+|---|---|
+| 旧手順 `uv run --frozen --with "psycopg[binary]" --with redis python -c "import newfan_gateway.prod"` | `.venv` を作って dev group だけ入れ、`ModuleNotFoundError: No module named 'newfan_gateway'`（終了コード 1） |
+| `docker ps -q --filter name=orchestrator-worker` | 何も出ない（停止中）。`-q` 無しではヘッダ行だけが出ることも確認 |
+| `uv sync --frozen --all-packages --all-extras` | worktree の `.venv` に 128 パッケージ（uv のキャッシュから 11 秒程度）。`uv.lock` は変わらない |
+| 使い捨て DB に `uv run --no-sync alembic -c db/alembic.ini upgrade head` → 空の Redis 論理 DB（6380/9）で `uv run --no-sync python scripts/e2e_real.py` | A〜D PASS、終了コード 0。Phase C の processed=2。`PYTHONIOENCODING` 無しでも終了コードは 0（出力が cp932 で文字化けするだけ） |
+
+venv＋`PYTHONPATH` の手順は、main checkout の `.venv` の python で `newfan_gateway` /
+`newfan_orchestrator` が worktree の `src` から import されること（`PYTHONPATH` 無しでは main checkout
+の `src`）を確かめた。
+
 ## 手元での実行
 
-`tests/README.md`「実 PG + Redis の E2E」を参照。compose の orchestrator-worker が動いていると
-q.extract のジョブを横取りされて A/B が落ちるので、`docker ps` で止まっていることを確かめてから実行する。
+`tests/README.md`「実 PG + Redis の E2E」を参照（依存の入れ方と実行は CI と同じ
+`uv sync --frozen --all-packages --all-extras` → `uv run --no-sync`。判断 5）。compose の orchestrator-worker が
+動いていると q.extract のジョブを横取りされて A/B が落ちるので、
+`docker ps -q --filter name=orchestrator-worker` が何も出さない（停止中）ことを確かめてから実行する。

@@ -34,16 +34,49 @@ gateway の enqueue（XADD）→ worker の消費 → Pg 保存 → q.export →
 doc_a/b/d・run_a/b/d・sch_a/b/d を毎回消して作り直す。**compose の orchestrator-worker が
 動いていると q.extract のジョブを横取りされて A/B が落ちる**ので、止まっていることを確かめてから実行する。
 
+依存の入れ方と実行は CI の `e2e` ジョブと同じにする。ルートの `newfan-ocr` は workspace のメンバーに
+依存していないので、素の環境では `uv run` だけでは（`--with` で redis・psycopg を足しても）
+`newfan_*` が入らず import で落ちる。先に `uv sync --all-packages --all-extras` で全メンバーと
+extras（redis・psycopg・langgraph は各サービスの `runtime` / `graph` extra）を入れ、
+`uv run --no-sync` で実行する。
+
 ```bash
-docker ps --filter name=orchestrator-worker   # 何も出なければ停止中
+docker ps -q --filter name=orchestrator-worker   # 何も出なければ停止中（-q が無いとヘッダ行は必ず出る）
+
+uv sync --frozen --all-packages --all-extras     # リポジトリ（または worktree）のルートで
 
 DATABASE_URL=postgresql+psycopg://newfan:newfan@localhost:5433/newfan \
 REDIS_URL=redis://localhost:6380 \
-uv run --with "psycopg[binary]" --with redis python scripts/e2e_real.py
+uv run --no-sync python scripts/e2e_real.py
 ```
 
-uv を使わない（venv の python で動かす）場合は、各パッケージの `src` を `PYTHONPATH` に並べる
-（worktree で動かすときも、editable install が main checkout を指すのでこの方法にする）。
+- `uv sync` は実行したディレクトリの `.venv` に入れる。worktree で実行すれば worktree 側に `.venv` が
+  でき、editable install も worktree のソースを指す。
+- Windows（Git Bash）では出力が cp932 になって文字化けするので、読むときは `PYTHONIOENCODING=utf-8` を
+  付ける（合否には影響しない）。
+- dev の DB・Redis の中身に触れたくないときは、使い捨ての DB に CI と同じくマイグレーションを当て、
+  Redis は空の論理 DB を指す（例: `/9`）。上の `uv sync` の後で:
+
+  ```bash
+  uv run --no-sync python -c "import psycopg; psycopg.connect('postgresql://newfan:newfan@localhost:5433/newfan', autocommit=True).execute('CREATE DATABASE e2e_tmp')"
+  TMP=postgresql+psycopg://newfan:newfan@localhost:5433/e2e_tmp
+  DATABASE_URL=$TMP uv run --no-sync alembic -c db/alembic.ini upgrade head
+  DATABASE_URL=$TMP REDIS_URL=redis://localhost:6380/9 uv run --no-sync python scripts/e2e_real.py
+  ```
+
+  後片付けは `DROP DATABASE e2e_tmp`（別の DB に繋いで実行）と、Redis の論理 DB 9 の `FLUSHDB`。
+
+uv sync をせず、**既に `uv sync --all-packages --all-extras` 済みの venv**（通常は main checkout の
+`.venv`）の python で動かすこともできる。前提:
+
+- redis・psycopg・langgraph・sqlalchemy などサードパーティの依存は、その venv に入っているものを使う。
+  `PYTHONPATH` が補うのは `newfan_*` のソースだけなので、venv が `--all-packages --all-extras` で
+  sync されていないと import で落ちる。ブランチで依存を足した・変えたときも venv には入っていないので、
+  上の uv の手順にする。
+- venv の `newfan_*` は editable install（site-packages の `.pth`）で main checkout のソースを指す。
+  `PYTHONPATH` の並びは `.pth` の追加分より前に `sys.path` に入るので、worktree のルートで各 `src` を
+  並べれば worktree のソースが import される。
+
 Windows の Git Bash で、リポジトリ（または worktree）のルートから:
 
 ```bash
